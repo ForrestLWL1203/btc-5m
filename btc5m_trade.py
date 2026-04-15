@@ -22,39 +22,56 @@ import argparse
 import asyncio
 import logging
 import logging.handlers
+import os
 import sys
 from pathlib import Path
 
+from dotenv import load_dotenv
+load_dotenv()  # Load .env before importing btc5m (so proxy vars are set for requests)
+
 from btc5m import config
 from btc5m.market import find_next_window
+from btc5m.log_formatter import ConsoleFormatter, JsonFormatter
 from btc5m.monitor import monitor_window
 
-LOG_FILE = Path("log/btc5m_trade.log")
-LOG_FILE.parent.mkdir(exist_ok=True)
+LOG_DIR = Path("log")
+LOG_DIR.mkdir(exist_ok=True)
+LOG_FILE = LOG_DIR / "btc5m_trade.log"
+JSONL_FILE = LOG_DIR / "btc5m_trade.jsonl"
 
 root_log = logging.getLogger()
 root_log.setLevel(logging.INFO)
 
-# Console
+# Console — human-readable with [EVENT_TYPE] prefix
 console = logging.StreamHandler()
-console.setFormatter(logging.Formatter(
+console.setFormatter(ConsoleFormatter(
     "%(asctime)s.%(msecs)03d %(levelname)s %(name)s — %(message)s",
     datefmt="%H:%M:%S",
 ))
 root_log.addHandler(console)
 
-# File (rotate at 10 MB, keep 5 backups)
+# File — human-readable (rotate at 10 MB, keep 5 backups)
 file_handler = logging.handlers.RotatingFileHandler(
     LOG_FILE,
     maxBytes=10 * 1024 * 1024,
     backupCount=5,
     encoding="utf-8",
 )
-file_handler.setFormatter(logging.Formatter(
+file_handler.setFormatter(ConsoleFormatter(
     "%(asctime)s.%(msecs)03d %(levelname)s %(name)s — %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 ))
 root_log.addHandler(file_handler)
+
+# JSONL — structured JSON Lines for frontend consumption
+jsonl_handler = logging.handlers.RotatingFileHandler(
+    JSONL_FILE,
+    maxBytes=10 * 1024 * 1024,
+    backupCount=5,
+    encoding="utf-8",
+)
+jsonl_handler.setFormatter(JsonFormatter())
+root_log.addHandler(jsonl_handler)
 
 log = logging.getLogger(__name__)
 
@@ -247,38 +264,48 @@ Examples:
     if dry_run:
         log.info("[DRY-RUN MODE — no orders will be placed]")
 
-    while True:
-        window = find_next_window()
+    ws = None
+    try:
+        while True:
+            window = find_next_window()
 
-        if window is None:
-            log.warning("No window found, retrying in 60s...")
-            await asyncio.sleep(60)
-            continue
+            if window is None:
+                log.warning("No window found, retrying in 60s...")
+                await asyncio.sleep(60)
+                continue
 
-        log.info("Next window: %s", window.short_label)
-        log.info("  Window: %s → %s", window.start_time, window.end_time)
+            log.info("Next window: %s", window.short_label)
+            log.info("  Window: %s → %s", window.start_time, window.end_time)
 
-        # monitor_window returns the next window if it was pre-opened and is ready
-        # to monitor immediately (skip path). Otherwise None.
-        next_win = await monitor_window(window, dry_run=dry_run)
+            # monitor_window returns (next_window, ws) — ws is reused across windows
+            next_win, ws = await monitor_window(window, dry_run=dry_run, existing_ws=ws)
 
-        if next_win is not None:
-            # Pre-opened window is ready — monitor it immediately without extra sleep
-            log.info("=== Pre-opened window ready, monitoring immediately ===")
-            next_win = await monitor_window(next_win, dry_run=dry_run, preopened=True)
+            if next_win is not None:
+                log.info("=== Pre-opened window ready, monitoring immediately ===")
+                next_win, ws = await monitor_window(next_win, dry_run=dry_run, preopened=True, existing_ws=ws)
 
-            # The pre-opened window may also return a next window; keep chaining
-            # to avoid re-fetching from Gamma API.
-            while next_win is not None:
-                log.info("=== Chained window ready: %s ===", next_win.short_label)
-                next_win = await monitor_window(next_win, dry_run=dry_run, preopened=True)
+                while next_win is not None:
+                    log.info("=== Chained window ready: %s ===", next_win.short_label)
+                    next_win, ws = await monitor_window(next_win, dry_run=dry_run, preopened=True, existing_ws=ws)
 
-        log.info("=== Window pair complete, restarting search ===")
+            log.info("=== Window pair complete, restarting search ===")
+    finally:
+        if ws:
+            await ws.close()
+            log.info("WebSocket closed on exit")
 
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        log.info("Interrupted by user, exiting.")
+        log.info("Interrupted by user — attempting cleanup...")
+        try:
+            from btc5m.client import get_client
+            client = get_client()
+            client.cancel_all()
+            log.info("Cancelled all open orders on exit")
+        except Exception as e:
+            log.warning("Cleanup failed: %s — please check for open orders manually", e)
+        log.info("Exiting.")
         sys.exit(0)

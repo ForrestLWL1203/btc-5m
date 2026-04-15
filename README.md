@@ -246,6 +246,12 @@ btc5m/
 ├── monitor.py     # 异步监控循环，事件驱动的买入/止损/止盈
 └── notify.py      # macOS 通知
 
+tests/             # 单元测试（pytest）
+├── test_trading.py   # FAK 部分成交、GTD 下单数量
+├── test_monitor.py   # 状态流转、并发锁、卖出失败恢复
+├── test_market.py    # slug 计算、窗口发现
+└── test_stream.py    # 事件解析、缓存清理
+
 btc5m_trade.py     # 异步入口（asyncio.run）
 requirements.txt   # Python 依赖
 ```
@@ -282,6 +288,14 @@ HTTP 425 错误表示 Polymarket 匹配引擎正在重启（每周二 7:00 AM ET
 21:45:58.851 WARNING — TAKE-PROFIT triggered at UP=0.805 (>80¢) [source=best_bid_ask] reentry=False
 ```
 
+## 测试
+
+项目使用 pytest 进行单元测试，覆盖交易逻辑、状态流转、市场发现和 WebSocket 事件解析，无需连接外部 API。
+
+```bash
+python3.11 -m pytest tests/ -v
+```
+
 ## 依赖
 
 - **Python 3.11+**
@@ -290,6 +304,8 @@ HTTP 425 错误表示 Polymarket 匹配引擎正在重启（每周二 7:00 AM ET
 - `python-dotenv` — 环境变量
 - `requests` — Gamma API 市场查询
 - `eth-account` — 钱包签名
+- `pytest >= 8.0` — 单元测试框架
+- `pytest-asyncio >= 0.23` — 异步测试支持
 
 ## 风险提示
 

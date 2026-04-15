@@ -10,6 +10,7 @@ from py_clob_client.order_builder.constants import BUY, SELL
 
 from . import config
 from .client import get_client, get_midpoint, round_to_tick
+from .log_formatter import TRADE, log_event
 
 log = logging.getLogger(__name__)
 
@@ -112,12 +113,23 @@ async def _post_fak_market(
                 total_filled += filled
                 if price > 0:
                     weighted_price_sum += filled * price
-                remaining_amount -= filled
+                    # For BUY: amount is dollars, sizeFilled is shares —
+                    # convert filled shares back to dollars for accurate remaining.
+                    if side == BUY:
+                        filled_cost = filled * price
+                    else:
+                        filled_cost = filled  # SELL: both amount and sizeFilled are in shares
+                    remaining_amount -= filled_cost
                 order_ids.append(str(resp_id))
-                log.info(
-                    "FAK %s partial fill: id=%s filled=%s price=%s remaining=%s (attempt %d)",
-                    side, resp_id, filled, price, remaining_amount, attempt,
-                )
+                log_event(log, logging.INFO, TRADE, {
+                    "action": "FAK_PARTIAL",
+                    "side": side,
+                    "order_id": resp_id,
+                    "filled": filled,
+                    "price": price,
+                    "remaining": remaining_amount,
+                    "attempt": attempt,
+                })
 
                 if remaining_amount <= 0:
                     avg_price = weighted_price_sum / total_filled if total_filled > 0 else 0.0
@@ -150,10 +162,14 @@ async def _post_fak_market(
     # Partial fill after exhausting retries
     if total_filled > 0:
         avg_price = weighted_price_sum / total_filled
-        log.warning(
-            "FAK partially filled: %s/%s shares at avg %s after %d attempts",
-            total_filled, amount, avg_price, retry_count,
-        )
+        log_event(log, logging.WARNING, TRADE, {
+            "action": "FAK_PARTIAL_TOTAL",
+            "side": side,
+            "filled": total_filled,
+            "requested": amount,
+            "avg_price": avg_price,
+            "attempts": retry_count,
+        })
         return OrderResult(
             success=True,
             order_id=order_ids[-1] if order_ids else None,
@@ -168,6 +184,7 @@ async def _post_fak_market(
 async def _post_gtd_limit(
     token_id: str, amount: float, side: str, price: float,
     expiration: Optional[int] = None,
+    is_sell: bool = False,
 ) -> OrderResult:
     """
     Fallback: place a GTD (Good-Til-Date) limit order at the given price.
@@ -175,14 +192,22 @@ async def _post_gtd_limit(
     GTD orders auto-expire at the given timestamp, eliminating the need for
     API heartbeat management.  Falls back to GTC + heartbeat if no expiration
     is provided.
+
+    Args:
+        amount: For BUY, this is dollars; for SELL (is_sell=True), this is shares.
+        is_sell: If True, amount is already in shares — don't divide by price.
     """
     side_const = BUY if side == BUY else SELL
     try:
         client = get_client()
         aligned_price = round_to_tick(price, token_id)
 
-        # Calculate size: amount / price (shares)
-        size = round(amount / aligned_price, 4) if aligned_price > 0 else amount
+        # BUY: amount is dollars → convert to shares via price
+        # SELL: amount is already shares — use directly
+        if is_sell:
+            size = round(amount, 4)
+        else:
+            size = round(amount / aligned_price, 4) if aligned_price > 0 else amount
 
         use_gtd = expiration is not None and expiration > 0
 
@@ -198,11 +223,14 @@ async def _post_gtd_limit(
         resp = client.post_order(signed, order_type)
 
         resp_id = resp.get("orderID") or resp.get("orderId") or resp.get("id", "")
-        log.info(
-            "%s limit placed: id=%s price=%s size=%s exp=%s",
-            "GTD" if use_gtd else "GTC", resp_id, aligned_price, size,
-            expiration if use_gtd else "none",
-        )
+        log_event(log, logging.INFO, TRADE, {
+            "action": "GTD_PLACED" if use_gtd else "GTC_PLACED",
+            "side": side,
+            "order_id": resp_id,
+            "price": aligned_price,
+            "size": size,
+            "expiration": expiration if use_gtd else None,
+        })
 
         if not use_gtd:
             # GTC fallback: start heartbeat to keep order alive (must send within 10s)
@@ -233,7 +261,11 @@ async def buy_up(
     Buy the Up token using FOK market order with retry.
     Falls back to GTD limit at midpoint if FOK fails.
     """
-    log.info(">>> BUYING $%s of Up @ %s", amount, label)
+    log_event(log, logging.INFO, TRADE, {
+        "action": "BUY",
+        "amount": amount,
+        "label": label,
+    })
 
     result = await _post_fak_market(
         token_id=token_id,
@@ -248,7 +280,10 @@ async def buy_up(
 
     # FAK failed — try GTD limit at current midpoint
     if config.FALLBACK_GTC:
-        log.warning("FAK failed, falling back to GTD limit at midpoint")
+        log_event(log, logging.WARNING, TRADE, {
+            "action": "GTD_FALLBACK",
+            "reason": "FAK buy failed",
+        })
         mid = get_midpoint(token_id)
         if mid:
             return await _post_gtd_limit(token_id, amount, BUY, mid, expiration=window_end_epoch)
@@ -270,7 +305,11 @@ async def sell_up(
     ``size`` is in **shares** (MarketOrderArgs.amount for SELL = shares).
     Falls back to GTD limit at best bid / midpoint if FOK fails.
     """
-    log.info(">>> SELLING %s shares (%s)", size, reason)
+    log_event(log, logging.INFO, TRADE, {
+        "action": "SELL",
+        "shares": size,
+        "reason": reason,
+    })
 
     # Stop heartbeat — we're exiting, no more GTC orders to keep alive
     stop_heartbeat()
@@ -287,24 +326,33 @@ async def sell_up(
         return result
 
     if config.FALLBACK_GTC:
-        log.warning("FAK sell failed, falling back to GTD limit")
+        log_event(log, logging.WARNING, TRADE, {
+            "action": "GTD_FALLBACK",
+            "reason": "FAK sell failed",
+        })
         fallback_price = price_hints or get_midpoint(token_id)
         if fallback_price:
-            return await _post_gtd_limit(token_id, size, SELL, fallback_price, expiration=window_end_epoch)
+            return await _post_gtd_limit(
+                token_id, size, SELL, fallback_price,
+                expiration=window_end_epoch, is_sell=True,
+            )
         else:
             return OrderResult(success=False, message="Could not get price for fallback")
     else:
         return result
 
 
-def cancel_all_open_orders() -> None:
-    """Cancel all open orders and stop heartbeat."""
+async def cancel_all_open_orders() -> None:
+    """Cancel all open orders and stop heartbeat (non-blocking)."""
     stop_heartbeat()
     try:
-        get_client().cancel_all()
-        log.info("Cancelled all open orders")
+        await asyncio.to_thread(get_client().cancel_all)
+        log_event(log, logging.INFO, TRADE, {"action": "CANCEL_ALL"})
     except Exception as e:
-        log.warning("cancel_all failed: %s", e)
+        log_event(log, logging.WARNING, TRADE, {
+            "action": "CANCEL_ALL_FAILED",
+            "message": str(e),
+        })
 
 
 # Generic aliases — these functions accept any token_id (names are historical)

@@ -14,6 +14,7 @@ from typing import Optional
 import requests
 
 from . import config
+from .log_formatter import MARKET, log_event
 
 log = logging.getLogger(__name__)
 
@@ -164,16 +165,19 @@ def find_next_window() -> Optional[MarketWindow]:
 
     window = _scan_forward(current_start_epoch)
     if window is None:
-        log.warning("No active BTC 5-min window found in scan range")
+        log_event(log, logging.WARNING, MARKET, {
+            "action": "NOT_FOUND",
+            "message": "No active BTC 5-min window found in scan range",
+        })
         return None
 
     end_dt = window.end_time
-    log.info(
-        "Found window: %s (ends %s UTC, %s away)",
-        window.short_label,
-        end_dt.strftime("%H:%M"),
-        end_dt - now,
-    )
+    log_event(log, logging.INFO, MARKET, {
+        "action": "FOUND",
+        "window": window.short_label,
+        "ends": end_dt.strftime("%H:%M"),
+        "away": str(end_dt - now),
+    })
     return window
 
 
@@ -188,7 +192,10 @@ def find_window_after(after_epoch: int) -> Optional[MarketWindow]:
     next_boundary = -(-after_epoch // config.SLUG_STEP) * config.SLUG_STEP
     window = _scan_forward(next_boundary)
     if window is None:
-        log.warning("No window found after epoch %d", after_epoch)
+        log_event(log, logging.WARNING, MARKET, {
+            "action": "NOT_FOUND",
+            "message": f"No window found after epoch {after_epoch}",
+        })
     return window
 
 

@@ -92,6 +92,9 @@ def create_clob_client(
     try:
         client.set_api_creds(client.create_or_derive_api_creds())
     except Exception as e:
-        sys.stderr.write(f"Warning: could not set API credentials: {e}\n")
+        raise RuntimeError(
+            f"Failed to set API credentials — all orders will fail. "
+            f"Check your private key and network connection. Error: {e}"
+        ) from e
 
     return client

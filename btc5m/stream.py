@@ -13,6 +13,7 @@ from typing import Awaitable, Callable, Optional
 import websockets
 
 from . import config
+from .log_formatter import WS, log_event
 
 log = logging.getLogger(__name__)
 
@@ -76,6 +77,10 @@ class PriceStream:
         """Get the latest cached midpoint for a token (sync read)."""
         return self._prices.get(token_id, PriceUpdate("", None, None, None, None, "")).midpoint
 
+    def set_on_price(self, callback: Callable[[PriceUpdate], Awaitable[None]]) -> None:
+        """Update the price callback (used when reusing WS for a new window)."""
+        self._on_price = callback
+
     async def connect(self, token_ids: list[str]) -> None:
         """
         Connect to the WebSocket and subscribe to the given token IDs.
@@ -104,6 +109,9 @@ class PriceStream:
             }
             await self._ws.send(json.dumps(unsub))
             log.debug("Unsubscribed from %s", self._connected_tokens)
+
+        # Clear stale cached prices from previous window
+        self._prices.clear()
 
         # Subscribe to new tokens
         self._connected_tokens = list(new_token_ids)
@@ -134,7 +142,10 @@ class PriceStream:
             "custom_feature_enabled": True,
         }
         await self._ws.send(json.dumps(msg))
-        log.info("Subscribed to tokens: %s", [t[:20] + "..." for t in token_ids])
+        log_event(log, logging.INFO, WS, {
+            "action": "SUBSCRIBED",
+            "tokens": [t[:20] + "..." for t in token_ids],
+        })
 
     async def _ping_loop(self) -> None:
         """Send ``{}`` every PING_INTERVAL seconds to keep the connection alive."""
@@ -158,7 +169,10 @@ class PriceStream:
                 if self._ws is None:
                     self._ws = await websockets.connect(WS_URL)
                     await self._subscribe(self._connected_tokens)
-                    log.debug("WebSocket (re)connected")
+                    # Clear stale cached prices after reconnect
+                        # Clear stale cached prices after reconnect
+                    self._prices.clear()
+                    log_event(log, logging.INFO, WS, {"action": "RECONNECTED"})
 
                 async for msg in self._ws:
                     self._dispatch(msg)
@@ -175,10 +189,10 @@ class PriceStream:
 
             consecutive_failures += 1
             if consecutive_failures > config.WS_RECONNECT_MAX_RETRIES:
-                log.error(
-                    "WebSocket reconnect failed %d times — giving up",
-                    consecutive_failures,
-                )
+                log_event(log, logging.ERROR, WS, {
+                    "action": "RECONNECT_FAILED",
+                    "attempts": consecutive_failures,
+                })
                 self._running = False
                 break
 
