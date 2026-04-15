@@ -38,7 +38,7 @@ root_log.setLevel(logging.INFO)
 # Console
 console = logging.StreamHandler()
 console.setFormatter(logging.Formatter(
-    "%(asctime)s %(levelname)s %(name)s — %(message)s",
+    "%(asctime)s.%(msecs)03d %(levelname)s %(name)s — %(message)s",
     datefmt="%H:%M:%S",
 ))
 root_log.addHandler(console)
@@ -51,7 +51,7 @@ file_handler = logging.handlers.RotatingFileHandler(
     encoding="utf-8",
 )
 file_handler.setFormatter(logging.Formatter(
-    "%(asctime)s %(levelname)s %(name)s — %(message)s",
+    "%(asctime)s.%(msecs)03d %(levelname)s %(name)s — %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 ))
 root_log.addHandler(file_handler)

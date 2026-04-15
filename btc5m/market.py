@@ -180,9 +180,12 @@ def find_next_window() -> Optional[MarketWindow]:
 def find_window_after(after_epoch: int) -> Optional[MarketWindow]:
     """Find the first window that starts at or after the given epoch.
 
-    Computes the next 5-minute boundary and scans forward.
+    Uses ceiling division so that if after_epoch is exactly on a 5-minute
+    boundary (e.g. window end == next window start), that boundary is
+    included rather than skipped.
     """
-    next_boundary = ((after_epoch // config.SLUG_STEP) + 1) * config.SLUG_STEP
+    # Ceiling division: round up to next boundary, but include current boundary
+    next_boundary = -(-after_epoch // config.SLUG_STEP) * config.SLUG_STEP
     window = _scan_forward(next_boundary)
     if window is None:
         log.warning("No window found after epoch %d", after_epoch)

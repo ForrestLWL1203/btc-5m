@@ -30,6 +30,9 @@ FOK_RETRY_COUNT: int = 10  # retry FOK orders this many times
 FOK_RETRY_INTERVAL: float = 0.1  # seconds between retries (~10x per second)
 FALLBACK_GTC: bool = True  # fallback to GTC limit order if FOK fails
 
+# Window timing
+WINDOW_END_BUFFER: int = 5  # treat window as ending this many seconds early to avoid boundary issues
+
 # Re-entry limits per window (0 = most conservative, only one buy)
 # STOP_LOSS: allow up to N re-buys after stop-loss exits
 # TAKE_PROFIT: allow up to N re-buys after take-profit exits

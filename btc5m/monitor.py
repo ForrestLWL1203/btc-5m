@@ -60,28 +60,34 @@ async def _monitor_single_window(
 
     Returns the pre-fetched next window if one was retrieved during sleep,
     so the caller can start monitoring it immediately without waiting.
+
+    Uses ``effective_end`` = ``end_epoch - WINDOW_END_BUFFER`` so the bot
+    stops monitoring a few seconds before the market actually closes.
+    This avoids boundary issues with ``end_epoch == next_start_epoch`` and
+    gives a clean gap for window transition.
     """
     buy_token_id, _ = _side_token(window)
+    effective_end = window.end_epoch - config.WINDOW_END_BUFFER
 
     while True:
         now = int(time.time())
-        if now >= window.end_epoch:
-            log.info("Window %s expired.", window.short_label)
+        if now >= effective_end:
+            log.info("Window %s expired (effective end).", window.short_label)
             if state.bought and not state.exit_triggered:
                 log.warning("Position still open at window expiry — cancelling orders and selling...")
                 cancel_all_open_orders()
                 if not dry_run:
                     result = await sell_token(
-                buy_token_id, state.holding_size, "Window expired",
-                window_end_epoch=window.end_epoch,
-            )
+                        buy_token_id, state.holding_size, "Window expired",
+                        window_end_epoch=window.end_epoch,
+                    )
                     if not result.success:
                         log.error("Sell at expiry FAILED: %s", result.message)
                 else:
                     log.info("[DRY-RUN] Would SELL at expiry")
             break
 
-        remaining = window.end_epoch - now
+        remaining = effective_end - now
         # Window ending soon (<=10s) with position open and no exit triggered — sell now
         if remaining <= 10 and state.bought and not state.exit_triggered:
             log.info(
@@ -109,7 +115,7 @@ async def _monitor_single_window(
             return next_win
 
         if state.exit_triggered:
-            remaining = window.end_epoch - now
+            remaining = effective_end - now
             log.info(
                 "Exit done for %s, sleeping %ds until window end (%s) — pre-fetching next window...",
                 window.short_label, remaining, window.end_time,
@@ -323,12 +329,16 @@ async def _on_price_update(
     check_price = sl_tp_price if sl_tp_price is not None else price
 
     if check_price > config.TAKE_PROFIT:
-        log.warning(
-            "TAKE-PROFIT triggered at %s=%s (>%.0f¢) [source=%s]",
-            config.BUY_SIDE.upper(), check_price, config.TAKE_PROFIT * 100, update.source,
-        )
-        state.exit_triggered = True
         state.tp_count += 1
+        can_reenter = state.tp_count <= config.MAX_TP_REENTRY
+        log.warning(
+            "TAKE-PROFIT triggered at %s=%s (>%.0f¢) [source=%s] reentry=%s",
+            config.BUY_SIDE.upper(), check_price, config.TAKE_PROFIT * 100, update.source,
+            can_reenter,
+        )
+        # Only set exit_triggered if no re-entry allowed; otherwise keep
+        # listening for prices to trigger a re-buy.
+        state.exit_triggered = not can_reenter
         state.bought = False
         cancel_all_open_orders()
         if not dry_run:
@@ -343,13 +353,17 @@ async def _on_price_update(
         return
 
     if check_price < config.STOP_LOSS:
-        log.warning(
-            "STOP-LOSS triggered at %s=%s (<%.0f¢) [%d/%d] [source=%s]",
-            config.BUY_SIDE.upper(), check_price, config.STOP_LOSS * 100,
-            state.stop_loss_count + 1, config.MAX_STOP_LOSS_REENTRY + 1, update.source,
-        )
-        state.exit_triggered = True
         state.stop_loss_count += 1
+        can_reenter = state.stop_loss_count <= config.MAX_STOP_LOSS_REENTRY
+        log.warning(
+            "STOP-LOSS triggered at %s=%s (<%.0f¢) [%d/%d] [source=%s] reentry=%s",
+            config.BUY_SIDE.upper(), check_price, config.STOP_LOSS * 100,
+            state.stop_loss_count, config.MAX_STOP_LOSS_REENTRY + 1, update.source,
+            can_reenter,
+        )
+        # Only set exit_triggered if no re-entry allowed; otherwise keep
+        # listening for prices to trigger a re-buy.
+        state.exit_triggered = not can_reenter
         state.bought = False
         cancel_all_open_orders()
         if not dry_run:
@@ -361,6 +375,7 @@ async def _on_price_update(
                 log.error("Stop-loss sell FAILED: %s", result.message)
         else:
             log.info("[DRY-RUN] Would SELL (stop-loss)")
+        return
 
 
 async def _handle_opening_price(
