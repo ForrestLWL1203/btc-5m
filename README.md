@@ -33,15 +33,144 @@
 - 窗口结束后自动链式切换到下一个窗口，无需重新搜索市场。
 - 如果当前窗口已开始超过 5 秒，自动跳过并等待下一个窗口。
 
-## 安装
+## 环境要求
+
+- **Python 3.11+**
+- **Node.js 16+**（Polymarket CLI 依赖）
+- **网络代理**（中国大陆用户需要，Polymarket API 无法直接访问）
+- macOS / Linux
+
+## 从零开始配置
+
+### 第 1 步：安装 Python 3.11
 
 ```bash
-# 需要 Python 3.11+
-pip install -r requirements.txt
+# macOS (Homebrew)
+brew install python@3.11
 
-# 配置 Polymarket CLI（首次使用）
+# Ubuntu / Debian
+sudo add-apt-repository ppa:deadsnakes/ppa
+sudo apt install python3.11 python3.11-venv python3.11-dev
+
+# 验证
+python3.11 --version
+```
+
+### 第 2 步：克隆项目并安装依赖
+
+```bash
+git clone https://github.com/ForrestLWL1203/btc-5m.git
+cd btc-5m
+python3.11 -m pip install -r requirements.txt
+```
+
+### 第 3 步：安装 Node.js 和 Polymarket CLI
+
+```bash
+# 安装 Node.js（macOS）
+brew install node
+
+# 安装 Node.js（Ubuntu）
+curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+sudo apt install nodejs
+
+# 验证
+node --version
+
+# 安装 Polymarket CLI
+npm install -g polymarket
+```
+
+### 第 4 步：配置 Polymarket 账户
+
+实盘交易前需要配置钱包凭证。凭证文件位于 `~/.config/polymarket/config.json`。
+
+**方式一：使用 Polymarket CLI（推荐）**
+
+```bash
 polymarket setup
 ```
+
+CLI 会交互式引导你生成或导入私钥。
+
+**方式二：手动创建配置文件**
+
+如果你已有 Polymarket 钱包私钥，可以直接创建配置文件：
+
+```bash
+mkdir -p ~/.config/polymarket
+cat > ~/.config/polymarket/config.json << 'EOF'
+{
+  "private_key": "你的私钥",
+  "chain_id": 137,
+  "signature_type": "proxy"
+}
+EOF
+
+# 设置文件权限，防止其他用户读取
+chmod 600 ~/.config/polymarket/config.json
+```
+
+> **安全提醒**：私钥即代表你的全部资金控制权。切勿分享给任何人，切勿提交到 Git 仓库。
+
+配置字段说明：
+
+| 字段 | 值 | 说明 |
+|---|---|---|
+| `private_key` | `0x...` | Polygon 钱包私钥。可通过 MetaMask 等钱包工具导出。 |
+| `chain_id` | `137` | 固定值，表示 Polygon 主网 |
+| `signature_type` | `"proxy"` | Polymarket Magic Link 钱包用 `"proxy"`，普通 EOA 钱包用 `"eoa"`，多签钱包用 `"gnosis-safe"` |
+
+### 第 5 步：充值 USDC
+
+钱包需要在 **Polygon 网络** 上持有 USDC 才能交易。从交易所提币 USDC 到你的钱包地址即可，注意务必选择 Polygon 网络。
+
+### 第 6 步：配置网络代理（中国大陆用户）
+
+Polymarket API 在中国大陆无法直接访问，需要配置代理：
+
+```bash
+# 将以下内容添加到 ~/.zshrc 或 ~/.bashrc（替换为你自己的代理端口）
+export http_proxy=http://127.0.0.1:7897
+export https_proxy=http://127.0.0.1:7897
+
+# 立即生效
+source ~/.zshrc   # 或 source ~/.bashrc
+```
+
+常见代理软件端口：Clash `7897`、V2Ray `10809`、Shadowsocks `1080`。
+
+验证代理是否生效：
+
+```bash
+curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 "https://gamma-api.polymarket.com/markets?limit=1"
+# 返回 200 表示正常
+```
+
+### 第 7 步：验证安装（Dry Run）
+
+```bash
+python3.11 btc5m_trade.py \
+  --side up --amount 1 \
+  --buy-low 0.45 --buy-high 0.55 \
+  --stop-loss 0.35 --take-profit 0.80 \
+  --max-reentry 1 --max-tp-reentry 0 \
+  --dry
+```
+
+正常输出示例：
+
+```
+21:40:00.453 INFO — === BTC 5-Min Up/Down Trader Started ===
+21:40:00.453 INFO — Side: UP | Buy: $1.0 if 45¢ < UP < 55¢ | Stop-loss: <35¢ | Take-profit: >80¢
+21:40:00.453 INFO — [DRY-RUN MODE — no orders will be placed]
+21:40:01.070 INFO — Subscribed to tokens: [...]
+21:40:01.316 INFO — [DRY-RUN] Would BUY $1.0 UP @ 0.525 (1.9048 shares)
+```
+
+看到 `[DRY-RUN] Would BUY` 表示 WebSocket 和 API 全部连通，策略正常运行。
+
+确认无误后去掉 `--dry` 即可实盘交易。
 
 ## 使用方法
 
