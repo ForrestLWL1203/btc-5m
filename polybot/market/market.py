@@ -1,6 +1,6 @@
-"""Market discovery — finds active BTC 5-min windows.
+"""Market discovery — finds active trading windows.
 
-The slug number in btc-updown-5m-{N} IS the Unix epoch of the window's start time.
+The slug number in {prefix}-{N} IS the Unix epoch of the window's start time.
 Since we can compute the exact slug, we query the Gamma API by slug directly —
 no need for batch fetching 1000 markets.
 """
@@ -13,8 +13,9 @@ from typing import Optional
 
 import requests
 
-from . import config
-from .log_formatter import MARKET, log_event
+from polybot.core import config
+from polybot.core.log_formatter import MARKET, log_event
+from .series import MarketSeries
 
 log = logging.getLogger(__name__)
 
@@ -24,7 +25,7 @@ UTC = datetime.timezone.utc
 
 @dataclass
 class MarketWindow:
-    """Represents a single 5-minute trading window."""
+    """Represents a single trading window."""
 
     question: str
     up_token: str  # token ID for "Up" outcome
@@ -36,7 +37,10 @@ class MarketWindow:
     @property
     def short_label(self) -> str:
         """Human-readable window label."""
-        return self.question.replace("Bitcoin Up or Down - ", "")
+        for prefix in ("Bitcoin Up or Down - ", "Ethereum Up or Down - "):
+            if self.question.startswith(prefix):
+                return self.question[len(prefix):]
+        return self.question
 
     @property
     def start_epoch(self) -> int:
@@ -84,7 +88,7 @@ def _parse_dt(s: str) -> Optional[datetime.datetime]:
         return None
 
 
-def _build_window(m: dict) -> Optional[MarketWindow]:
+def _build_window(m: dict, series: Optional[MarketSeries] = None) -> Optional[MarketWindow]:
     """Build a MarketWindow from a raw market dict, or return None if invalid."""
     tokens = _parse_tokens(m.get("clobTokenIds", []))
     if not tokens or len(tokens) < 2:
@@ -96,7 +100,10 @@ def _build_window(m: dict) -> Optional[MarketWindow]:
 
     start_dt = _parse_dt(m.get("eventStartTime", m.get("endDate", "")))
     if start_dt is None:
-        start_dt = end_dt - datetime.timedelta(minutes=5)
+        fallback_duration = (
+            datetime.timedelta(seconds=series.slug_step) if series else datetime.timedelta(minutes=5)
+        )
+        start_dt = end_dt - fallback_duration
 
     return MarketWindow(
         question=m.get("question", ""),
@@ -108,23 +115,26 @@ def _build_window(m: dict) -> Optional[MarketWindow]:
     )
 
 
-def _epoch_to_slug(n: int) -> str:
+def _epoch_to_slug(n: int, series: Optional[MarketSeries] = None) -> str:
     """Convert a Unix epoch to the corresponding slug."""
+    if series is not None:
+        return series.epoch_to_slug(n)
     return f"{config.SERIES_SLUG_PREFIX}-{n}"
 
 
-def _scan_forward(from_epoch: int, max_windows: int = 12) -> Optional[MarketWindow]:
+def _scan_forward(from_epoch: int, series: Optional[MarketSeries] = None, max_windows: int = 12) -> Optional[MarketWindow]:
     """Scan forward from a given epoch, querying one slug at a time.
 
     Stops at the first active, not-yet-expired window.  Each iteration is a
     single lightweight Gamma API call (1 result, not 1000).
     """
     now = datetime.datetime.now(UTC)
-    base_epoch = (from_epoch // config.SLUG_STEP) * config.SLUG_STEP
+    slug_step = series.slug_step if series else config.SLUG_STEP
+    base_epoch = (from_epoch // slug_step) * slug_step
 
     for offset in range(max_windows):
-        candidate_epoch = base_epoch + offset * config.SLUG_STEP
-        slug = _epoch_to_slug(candidate_epoch)
+        candidate_epoch = base_epoch + offset * slug_step
+        slug = _epoch_to_slug(candidate_epoch, series)
 
         m = _fetch_market_by_slug(slug)
         if m is None:
@@ -136,7 +146,7 @@ def _scan_forward(from_epoch: int, max_windows: int = 12) -> Optional[MarketWind
         if end_dt is None or end_dt <= now:
             continue
 
-        window = _build_window(m)
+        window = _build_window(m, series)
         if window is None:
             continue
 
@@ -145,16 +155,17 @@ def _scan_forward(from_epoch: int, max_windows: int = 12) -> Optional[MarketWind
     return None
 
 
-def find_next_window() -> Optional[MarketWindow]:
+def find_next_window(series: Optional[MarketSeries] = None) -> Optional[MarketWindow]:
     """
-    Find the next active BTC 5-min window.
+    Find the next active trading window.
 
-    Computes the current 5-minute boundary epoch, then queries Gamma API
+    Computes the current window boundary epoch, then queries Gamma API
     by exact slug — one lightweight request per candidate window.
     """
     now = datetime.datetime.now(UTC)
     now_epoch = int(now.timestamp())
-    current_start_epoch = (now_epoch // config.SLUG_STEP) * config.SLUG_STEP
+    slug_step = series.slug_step if series else config.SLUG_STEP
+    current_start_epoch = (now_epoch // slug_step) * slug_step
 
     log.info(
         "Current time: %s UTC (epoch %d), window start: %d",
@@ -163,11 +174,12 @@ def find_next_window() -> Optional[MarketWindow]:
         current_start_epoch,
     )
 
-    window = _scan_forward(current_start_epoch)
+    window = _scan_forward(current_start_epoch, series)
     if window is None:
+        series_info = series.series_key if series else "BTC 5-min"
         log_event(log, logging.WARNING, MARKET, {
             "action": "NOT_FOUND",
-            "message": "No active BTC 5-min window found in scan range",
+            "message": f"No active {series_info} window found in scan range",
         })
         return None
 
@@ -181,16 +193,17 @@ def find_next_window() -> Optional[MarketWindow]:
     return window
 
 
-def find_window_after(after_epoch: int) -> Optional[MarketWindow]:
+def find_window_after(after_epoch: int, series: Optional[MarketSeries] = None) -> Optional[MarketWindow]:
     """Find the first window that starts at or after the given epoch.
 
-    Uses ceiling division so that if after_epoch is exactly on a 5-minute
-    boundary (e.g. window end == next window start), that boundary is
-    included rather than skipped.
+    Uses ceiling division so that if after_epoch is exactly on a boundary
+    (e.g. window end == next window start), that boundary is included rather
+    than skipped.
     """
+    slug_step = series.slug_step if series else config.SLUG_STEP
     # Ceiling division: round up to next boundary, but include current boundary
-    next_boundary = -(-after_epoch // config.SLUG_STEP) * config.SLUG_STEP
-    window = _scan_forward(next_boundary)
+    next_boundary = -(-after_epoch // slug_step) * slug_step
+    window = _scan_forward(next_boundary, series)
     if window is None:
         log_event(log, logging.WARNING, MARKET, {
             "action": "NOT_FOUND",

@@ -1,0 +1,23 @@
+# Polymarket Trading Bot Configuration
+# Copy to strategy.yaml and customize
+
+# Market selection (supported: btc/eth × 5m/15m/4h)
+market:
+  asset: btc              # btc or eth
+  timeframe: 5m           # 5m, 15m, or 4h
+
+# Round control (top-level, applies to all strategies)
+# rounds: 1               # Number of complete windows to run (omit or null for infinite)
+
+# Strategy — buy decision logic only
+strategy:
+  type: immediate         # immediate = buy at window open price
+
+# Common trading parameters (apply to all strategies)
+params:
+  side: up                # "up" or "down"
+  amount: 5.0             # USD per trade
+  tp_pct: 0.50            # +50% from entry price → sell at entry * 1.50
+  sl_pct: 0.30            # -30% from entry price → sell at entry * 0.70
+  max_sl_reentry: 0       # max re-buys after stop-loss (0 = no re-entry)
+  max_tp_reentry: 0       # max re-buys after take-profit (0 = no re-entry)

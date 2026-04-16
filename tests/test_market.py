@@ -1,12 +1,12 @@
-"""Unit tests for btc5m.market — slug calculation, window discovery."""
+"""Unit tests for polybot.market.market — slug calculation, window discovery."""
 
 import datetime
 from unittest.mock import patch
 
 import pytest
 
-from btc5m import config
-from btc5m.market import (
+from polybot.core import config
+from polybot.market.market import (
     MarketWindow,
     _build_window,
     _epoch_to_slug,

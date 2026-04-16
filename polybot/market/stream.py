@@ -12,8 +12,8 @@ from typing import Awaitable, Callable, Optional
 
 import websockets
 
-from . import config
-from .log_formatter import WS, log_event
+from polybot.core import config
+from polybot.core.log_formatter import WS, log_event
 
 log = logging.getLogger(__name__)
 
@@ -170,7 +170,6 @@ class PriceStream:
                     self._ws = await websockets.connect(WS_URL)
                     await self._subscribe(self._connected_tokens)
                     # Clear stale cached prices after reconnect
-                        # Clear stale cached prices after reconnect
                     self._prices.clear()
                     log_event(log, logging.INFO, WS, {"action": "RECONNECTED"})
 

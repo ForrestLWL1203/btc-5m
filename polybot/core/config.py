@@ -11,11 +11,7 @@ STOP_LOSS: float = 0.30  # sell if Up price drops below this (for UP side) / DOW
 TAKE_PROFIT: float = 0.80  # sell if price rises above this
 
 # Market slug discovery
-BASE_SLUG_NUM: int = 1776182700  # anchor: btc-updown-5m-1776182700 = 2026-04-14T16:05:00Z
 SLUG_STEP: int = 300  # slug numbers increment by 300 seconds (5 minutes)
-SLUG_SCAN_BACK_SECS: int = 3600  # scan 1h back from estimated slug
-SLUG_SCAN_FWD_SECS: int = 14400  # scan 4h forward from estimated slug
-
 # CLOB API
 CLOB_HOST: str = "https://clob.polymarket.com"
 CHAIN_ID: int = 137  # Polygon mainnet
@@ -32,6 +28,9 @@ FALLBACK_GTC: bool = True  # fallback to GTC limit order if FOK fails
 
 # Window timing
 WINDOW_END_BUFFER: int = 5  # treat window as ending this many seconds early to avoid boundary issues
+
+# Signal freshness
+TRADE_PRICE_TTL: float = 3.0  # seconds before last_trade_price is considered stale for SL/TP
 
 # Re-entry limits per window (0 = most conservative, only one buy)
 # STOP_LOSS: allow up to N re-buys after stop-loss exits

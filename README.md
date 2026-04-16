@@ -1,103 +1,163 @@
-# BTC 5-Min Polymarket Trading Bot
+# Polybot — Polymarket Up/Down Trading Bot
 
-自动化 Polymarket BTC 5 分钟涨跌市场交易机器人，基于 Python 3.11 异步架构，通过 WebSocket 获取实时价格，使用 FAK 市价单快速成交。
+自动化 Polymarket BTC/ETH 涨跌预测市场交易机器人。支持多市场（BTC/ETH × 5m/15m/4h）、可插拔策略、YAML 配置、WebSocket 实时定价。
+
+## 快速开始
+
+```bash
+# 安装依赖 (Python 3.11+)
+pip3.11 install -r requirements.txt
+
+# Dry run（模拟，不下单）
+python3.11 run.py --config strategy.yaml --dry
+
+# CLI 参数模式
+python3.11 run.py --side up --amount 5 --tp-pct 0.50 --sl-pct 0.30 --dry
+
+# 交互模式（引导式输入）
+python3.11 run.py --dry
+```
 
 ## 策略说明
 
-机器人持续监控 Polymarket 上的 `btc-updown-5m` 系列 5 分钟涨跌预测市场。每个市场窗口持续 5 分钟，预测窗口结束时 BTC 价格相对于窗口开始时的涨跌方向。
+### ImmediateStrategy（默认）
 
-### 核心逻辑
+窗口开启后立即以首个价格买入，不做价格区间判断。买入后持续监控止盈/止损。
 
 ```
-窗口开始 → 获取实时价格 → 价格在买入区间？→ 买入 → 监控止损/止盈
-                                  ↓ 否                      ↓
-                            等待价格进入区间          价格触及止损/止盈？
-                                                        ↓ 是
-                                                   卖出 → 允许重入？
-                                                        ↓ 是
-                                                   等待价格回到区间 → 重新买入
-                                                        ↓ 否
-                                                   等待当前窗口结束 → 下一个窗口
+窗口开始 → 获取实时价格 → 立即买入 → 监控止盈/止损
+                                      ↓
+                               价格触及止盈/止损？
+                               ↓ 是
+                              卖出 → 允许重入？
+                              ↓ 是          ↓ 否
+                        等待下一信号    等待窗口结束 → 下一轮
+                        重新买入
 ```
 
-### 止损 / 止盈 / 重入
+### 止盈 (TP) / 止损 (SL)
 
-- **止损**：持仓后价格跌破止损阈值，立即卖出。根据 `max-reentry` 参数决定是否允许在同一窗口内重新买入。
-- **止盈**：持仓后价格突破止盈阈值，立即卖出。根据 `max-tp-reentry` 参数决定是否允许重入。
-- **重入限额**：每个窗口独立计数。达到限额后该窗口永久阻断买入，等待下一个窗口。
-- 止损/止盈判断优先使用 `last_trade_price`（真实成交价），比 midpoint（买卖价均值）更及时。
+基于买入价格的百分比计算阈值：
 
-### 窗口切换
+| 方向 | 阈值计算 | 示例（入场 50¢） |
+|---|---|---|
+| **止盈** | `entry_price × (1 + tp_pct)` | tp_pct=0.50 → 75¢ 以上卖出 |
+| **止损** | `entry_price × (1 - sl_pct)` | sl_pct=0.30 → 35¢ 以下卖出 |
 
-- 窗口结束前 5 秒（`WINDOW_END_BUFFER`）提前结束监控，避免边界问题。
-- 窗口结束后自动链式切换到下一个窗口，无需重新搜索市场。
-- 如果当前窗口已开始超过 5 秒，自动跳过并等待下一个窗口。
+价格判断使用**乐观/悲观聚合**：
+- 止盈取 `max(midpoint, last_trade_price, best_ask)` — 任一信号触发即卖出
+- 止损取 `min(midpoint, last_trade_price, best_bid)` — 任一信号触发即卖出
 
-## 环境要求
+### 重入机制
 
-- **Python 3.11+**
-- **Node.js 16+**（Polymarket CLI 依赖）
-- **网络代理**（中国大陆用户需要，Polymarket API 无法直接访问）
-- macOS / Linux
+止损/止盈卖出后，可在同一窗口内重新买入：
 
-## 从零开始配置
+- `max_sl_reentry` — 止损后允许重入次数（0=禁用）
+- `max_tp_reentry` — 止盈后允许重入次数（0=禁用）
+- 每个窗口独立计数，达到上限后该窗口阻断买入
 
-### 第 1 步：安装 Python 3.11
+### 轮数控制
+
+- `--rounds N` 或 YAML `rounds: N` — 运行 N 个完整窗口后退出
+- 省略或 `rounds: null` — 无限循环运行
+- **已跳过的窗口不计数**（如启动时当前窗口已过半）
+
+## 使用方法
+
+### 方式一：YAML 配置（推荐）
 
 ```bash
-# macOS (Homebrew)
-brew install python@3.11
-
-# Ubuntu / Debian
-sudo add-apt-repository ppa:deadsnakes/ppa
-sudo apt install python3.11 python3.11-venv python3.11-dev
-
-# 验证
-python3.11 --version
+cp strategy.yaml.example strategy.yaml
+# 编辑 strategy.yaml
+python3.11 run.py --config strategy.yaml --dry
 ```
 
-### 第 2 步：克隆项目并安装依赖
+配置文件示例：
+
+```yaml
+market:
+  asset: btc              # btc 或 eth
+  timeframe: 5m           # 5m, 15m, 4h
+
+strategy:
+  type: immediate         # 立即执行策略
+
+params:
+  side: up                # up 或 down
+  amount: 5.0             # 每笔交易金额 (USD)
+  tp_pct: 0.50            # 止盈 +50%
+  sl_pct: 0.30            # 止损 -30%
+  max_sl_reentry: 0       # 止损后不重入
+  max_tp_reentry: 0       # 止盈后不重入
+
+rounds: 1                 # 运行 1 轮后停止（省略则无限运行）
+```
+
+### 方式二：命令行参数
+
+```bash
+python3.11 run.py \
+  --side up \
+  --amount 5 \
+  --tp-pct 0.50 \
+  --sl-pct 0.30 \
+  --max-reentry 1 \
+  --max-tp-reentry 0 \
+  --rounds 3 \
+  --dry
+```
+
+### 方式三：交互模式
+
+```bash
+python3.11 run.py --dry
+```
+
+程序会依次提示输入交易参数。
+
+### 参数说明
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--config` | — | YAML 配置文件路径（覆盖其他参数） |
+| `--side` | up | 交易方向：`up`（看涨）或 `down`（看跌） |
+| `--amount` | 5.0 | 每笔交易金额（美元） |
+| `--tp-pct` | 0.50 | 止盈百分比（0.50 = 入场价 +50% 卖出） |
+| `--sl-pct` | 0.30 | 止损百分比（0.30 = 入场价 -30% 卖出） |
+| `--max-reentry` | 0 | 止损后最大重入次数 |
+| `--max-tp-reentry` | 0 | 止盈后最大重入次数 |
+| `--rounds` | ∞ | 完整窗口轮数（省略=无限） |
+| `--dry` | off | 模拟模式，只记录不实际下单 |
+
+## 环境配置
+
+### 1. Python 3.11+
+
+```bash
+# macOS
+brew install python@3.11
+
+# Ubuntu
+sudo add-apt-repository ppa:deadsnakes/ppa
+sudo apt install python3.11 python3.11-venv
+```
+
+### 2. 项目依赖
 
 ```bash
 git clone https://github.com/ForrestLWL1203/btc-5m.git
 cd btc-5m
-python3.11 -m pip install -r requirements.txt
+pip3.11 install -r requirements.txt
 ```
 
-### 第 3 步：安装 Node.js 和 Polymarket CLI
+### 3. Polymarket 钱包
 
 ```bash
-# 安装 Node.js（macOS）
-brew install node
-
-# 安装 Node.js（Ubuntu）
-curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-sudo apt install nodejs
-
-# 验证
-node --version
-
-# 安装 Polymarket CLI
+# 方式一：CLI 引导（推荐）
 npm install -g polymarket
-```
-
-### 第 4 步：配置 Polymarket 账户
-
-实盘交易前需要配置钱包凭证。凭证文件位于 `~/.config/polymarket/config.json`。
-
-**方式一：使用 Polymarket CLI（推荐）**
-
-```bash
 polymarket setup
-```
 
-CLI 会交互式引导你生成或导入私钥。
-
-**方式二：手动创建配置文件**
-
-如果你已有 Polymarket 钱包私钥，可以直接创建配置文件：
-
-```bash
+# 方式二：手动创建
 mkdir -p ~/.config/polymarket
 cat > ~/.config/polymarket/config.json << 'EOF'
 {
@@ -106,206 +166,116 @@ cat > ~/.config/polymarket/config.json << 'EOF'
   "signature_type": "proxy"
 }
 EOF
-
-# 设置文件权限，防止其他用户读取
 chmod 600 ~/.config/polymarket/config.json
 ```
 
-> **安全提醒**：私钥即代表你的全部资金控制权。切勿分享给任何人，切勿提交到 Git 仓库。
-
-配置字段说明：
-
 | 字段 | 值 | 说明 |
 |---|---|---|
-| `private_key` | `0x...` | Polygon 钱包私钥。可通过 MetaMask 等钱包工具导出。 |
-| `chain_id` | `137` | 固定值，表示 Polygon 主网 |
-| `signature_type` | `"proxy"` | Polymarket Magic Link 钱包用 `"proxy"`，普通 EOA 钱包用 `"eoa"`，多签钱包用 `"gnosis-safe"` |
+| `private_key` | `0x...` | Polygon 钱包私钥 |
+| `chain_id` | `137` | Polygon 主网 |
+| `signature_type` | `"proxy"` | Magic Link 钱包用 `proxy`，EOA 用 `eoa` |
 
-### 第 5 步：充值 USDC
+钱包需要在 **Polygon 网络** 上持有 USDC。
 
-钱包需要在 **Polygon 网络** 上持有 USDC 才能交易。从交易所提币 USDC 到你的钱包地址即可，注意务必选择 Polygon 网络。
-
-### 第 6 步：配置网络代理（中国大陆用户）
-
-Polymarket API 在中国大陆无法直接访问，需要配置代理：
+### 4. 网络代理（中国大陆）
 
 ```bash
-# 将以下内容添加到 ~/.zshrc 或 ~/.bashrc（替换为你自己的代理端口）
-export http_proxy=http://127.0.0.1:7897
+# .env 文件
+HTTPS_PROXY=http://127.0.0.1:7897
+
+# 或环境变量
 export https_proxy=http://127.0.0.1:7897
-
-# 立即生效
-source ~/.zshrc   # 或 source ~/.bashrc
 ```
 
-常见代理软件端口：Clash `7897`、V2Ray `10809`、Shadowsocks `1080`。
-
-验证代理是否生效：
+验证连通性：
 
 ```bash
-curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 "https://gamma-api.polymarket.com/markets?limit=1"
-# 返回 200 表示正常
+curl -s -o /dev/null -w "%{http_code}" "https://gamma-api.polymarket.com/markets?limit=1"
+# 返回 200 即正常
 ```
 
-### 第 7 步：验证安装（Dry Run）
+### 5. Dry Run 验证
 
 ```bash
-python3.11 btc5m_trade.py \
-  --side up --amount 1 \
-  --buy-low 0.45 --buy-high 0.55 \
-  --stop-loss 0.35 --take-profit 0.80 \
-  --max-reentry 1 --max-tp-reentry 0 \
-  --dry
+python3.11 run.py --side up --amount 1 --dry
 ```
 
-正常输出示例：
-
-```
-21:40:00.453 INFO — === BTC 5-Min Up/Down Trader Started ===
-21:40:00.453 INFO — Side: UP | Buy: $1.0 if 45¢ < UP < 55¢ | Stop-loss: <35¢ | Take-profit: >80¢
-21:40:00.453 INFO — [DRY-RUN MODE — no orders will be placed]
-21:40:01.070 INFO — Subscribed to tokens: [...]
-21:40:01.316 INFO — [DRY-RUN] Would BUY $1.0 UP @ 0.525 (1.9048 shares)
-```
-
-看到 `[DRY-RUN] Would BUY` 表示 WebSocket 和 API 全部连通，策略正常运行。
-
-确认无误后去掉 `--dry` 即可实盘交易。
-
-## 使用方法
-
-### 交互模式（引导式配置）
-
-```bash
-python3.11 btc5m_trade.py --dry
-```
-
-程序会依次提示输入所有交易参数。
-
-### 命令行模式（直接指定参数）
-
-```bash
-# 模拟运行（不实际下单）
-python3.11 btc5m_trade.py \
-  --side up \
-  --amount 1 \
-  --buy-low 0.45 \
-  --buy-high 0.55 \
-  --stop-loss 0.35 \
-  --take-profit 0.80 \
-  --max-reentry 1 \
-  --max-tp-reentry 0 \
-  --dry
-
-# 实盘交易（去掉 --dry）
-python3.11 btc5m_trade.py \
-  --side up \
-  --amount 5 \
-  --buy-low 0.45 \
-  --buy-high 0.55 \
-  --stop-loss 0.30 \
-  --take-profit 0.80 \
-  --max-reentry 0 \
-  --max-tp-reentry 0
-```
-
-### 参数说明
-
-| 参数 | 说明 | 示例 |
-|---|---|---|
-| `--side` | 交易方向：`up`（看涨）或 `down`（看跌） | `up` |
-| `--amount` | 每笔交易金额（美元） | `1` |
-| `--buy-low` | 买入区间下限（0-1） | `0.45`（45¢） |
-| `--buy-high` | 买入区间上限（0-1） | `0.55`（55¢） |
-| `--stop-loss` | 止损阈值，低于此价卖出 | `0.35`（35¢） |
-| `--take-profit` | 止盈阈值，高于此价卖出 | `0.80`（80¢） |
-| `--max-reentry` | 止损后最大重入次数 | `1` |
-| `--max-tp-reentry` | 止盈后最大重入次数 | `0` |
-| `--dry` | 模拟模式，只记录不实际下单 | — |
-
-### 网络代理
-
-如果无法直接访问 Polymarket API，需要设置代理：
-
-```bash
-export http_proxy=http://127.0.0.1:7897
-export https_proxy=http://127.0.0.1:7897
-python3.11 btc5m_trade.py --dry
-```
+看到 `[DRY-RUN] Would BUY` 表示 WebSocket + API 全部连通。确认无误后去掉 `--dry` 实盘交易。
 
 ## 项目结构
 
 ```
-btc5m/
-├── config.py      # 所有配置常量（阈值、重试次数、API 地址等）
-├── auth.py        # 从 Polymarket CLI 配置加载凭证，构建 ClobClient
-├── client.py      # ClobClient 单例，提供价格查询和 tick size 缓存
-├── market.py      # 市场发现，通过 slug 精确查询 Gamma API
-├── stream.py      # WebSocket 实时价格流（支持断线重连）
-├── trading.py     # 交易操作：FAK 市价单 + GTD 限价单回退
-├── monitor.py     # 异步监控循环，事件驱动的买入/止损/止盈
-└── notify.py      # macOS 通知
+polybot/                        # 交易包
+├── core/                       # 核心基础设施
+│   ├── auth.py                 # 钱包凭证 + ClobClient 初始化
+│   ├── client.py               # ClobClient 单例，REST 价格查询
+│   ├── config.py               # 默认常量
+│   ├── log_formatter.py        # 结构化日志（console + JSONL）
+│   └── state.py                # MonitorState — 交易状态
+├── market/                     # 市场数据层
+│   ├── market.py               # MarketWindow + slug 发现
+│   ├── series.py               # MarketSeries — 市场身份定义
+│   └── stream.py               # WebSocket 实时价格流
+├── strategies/                 # 可插拔买入策略
+│   ├── base.py                 # Strategy ABC（仅 should_buy）
+│   └── immediate.py            # ImmediateStrategy — 窗口开即买
+├── trading/                    # 订单执行 + 监控
+│   ├── monitor.py              # 异步事件驱动监控循环
+│   └── trading.py              # FAK 市价单 + GTC 限价回退
+├── config_loader.py            # YAML 加载 + 工厂函数
+└── trade_config.py             # TradeConfig — 通用参数 + check_exit()
 
-tests/             # 单元测试（pytest）
-├── test_trading.py   # FAK 部分成交、GTD 下单数量
-├── test_monitor.py   # 状态流转、并发锁、卖出失败恢复
-├── test_market.py    # slug 计算、窗口发现
-└── test_stream.py    # 事件解析、缓存清理
-
-btc5m_trade.py     # 异步入口（asyncio.run）
-requirements.txt   # Python 依赖
+run.py                          # 入口点
+strategy.yaml.example           # 配置文件示例
+tests/                          # 单元测试（101 tests）
 ```
+
+## 支持市场
+
+| 市场 | Asset | Timeframe | 窗口时长 |
+|---|---|---|---|
+| btc-updown-5m | BTC | 5m | 5 分钟 |
+| btc-updown-15m | BTC | 15m | 15 分钟 |
+| btc-updown-4h | BTC | 4h | 4 小时 |
+| eth-updown-5m | ETH | 5m | 5 分钟 |
+| eth-updown-15m | ETH | 15m | 15 分钟 |
+| eth-updown-4h | ETH | 4h | 4 小时 |
 
 ## 架构细节
 
-### 订单机制
+### 订单执行
 
-1. **FAK（Fill-And-Kill）市价单**：允许部分成交，未成交部分自动重试。适合快速进出市场。
-2. **GTD（Good-Til-Date）限价单回退**：如果 FAK 重试全部失败，以当前 midpoint 价格挂限价单，自动在窗口结束时过期。无需维护 heartbeat。
+1. **FAK 市价单**：允许部分成交，10 次重试（100ms 间隔），1 秒内完成
+2. **GTC 限价回退**：FAK 全部失败后以 midpoint 挂限价单
+
+### WebSocket 实时定价
+
+- 连接 `wss://ws-subscriptions-clob.polymarket.com/ws/market`
+- 事件：`best_bid_ask`、`price_change`、`last_trade_price`
+- 窗口切换通过 `switch_tokens()` 复用连接，无需重连
+- 断线自动重连（指数退避 1s → 30s）
 
 ### 市场发现
 
-slug 格式为 `btc-updown-5m-{UnixEpoch}`，其中 epoch 即为窗口开始时间戳。通过计算当前时间对应的 5 分钟边界，直接向 Gamma API 查询单条市场记录，无需批量拉取。
-
-### WebSocket 价格流
-
-- 连接 `wss://ws-subscriptions-clob.polymarket.com/ws/market`
-- 处理 `best_bid_ask`、`price_change`、`last_trade_price` 三类事件
-- 断线自动重连，指数退避（1s → 30s，最多 10 次）
-- 每 10 秒发送 `{}` 保活
-
-### 匹配引擎重启
-
-HTTP 425 错误表示 Polymarket 匹配引擎正在重启（每周二 7:00 AM ET）。遇到时自动指数退避重试（2s → 30s，最多 3 次）。
+Slug 格式：`{slug_prefix}-{UnixEpoch}`，epoch 即窗口开始时间戳。通过 Gamma API 精确查询单条记录。
 
 ## 日志
 
-日志输出到控制台和 `log/btc5m_trade.log`（轮转 10MB，保留 5 份备份）。
+双输出 — 控制台（人类可读）+ `log/` 目录（JSONL 结构化日志，供前端消费）。
 
 ```
-21:40:21.756 WARNING — STOP-LOSS triggered at UP=0.34 (<35¢) [1/2] [source=last_trade_price] reentry=True
-21:40:52.632 INFO    — Price 0.455 moved into buy range — buying now!
-21:45:58.851 WARNING — TAKE-PROFIT triggered at UP=0.805 (>80¢) [source=best_bid_ask] reentry=False
+14:40:00.453 INFO — === BTC 5m Up/Down Trader Started ===
+14:40:00.453 INFO — Strategy: ImmediateStrategy | Side: UP | Amount: $5.0 | TP: +50% | SL: -30%
+14:40:01.316 INFO — [DRY-RUN] Would BUY $5.0 UP @ 0.525 (9.5238 shares)
+14:40:21.756 WARNING — STOP-LOSS triggered at UP=0.34 (<35¢) reentry=False
 ```
 
 ## 测试
 
-项目使用 pytest 进行单元测试，覆盖交易逻辑、状态流转、市场发现和 WebSocket 事件解析，无需连接外部 API。
-
 ```bash
 python3.11 -m pytest tests/ -v
+# 101 tests
 ```
-
-## 依赖
-
-- **Python 3.11+**
-- `py-clob-client >= 0.34.6` — Polymarket CLOB SDK
-- `websockets >= 12.0` — WebSocket 客户端
-- `python-dotenv` — 环境变量
-- `requests` — Gamma API 市场查询
-- `eth-account` — 钱包签名
-- `pytest >= 8.0` — 单元测试框架
-- `pytest-asyncio >= 0.23` — 异步测试支持
 
 ## 风险提示
 

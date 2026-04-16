@@ -1,12 +1,12 @@
-"""Unit tests for btc5m.trading — order execution logic."""
+"""Unit tests for polybot.trading.trading — order execution logic."""
 
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from btc5m import config
-from btc5m.trading import (
+from polybot.core import config
+from polybot.trading.trading import (
     OrderResult,
     _post_fak_market,
     _post_gtd_limit,
@@ -42,7 +42,7 @@ async def test_fak_buy_partial_fill_dollar_tracking():
     ]
     mock_client = _mock_client(fills)
 
-    with patch("btc5m.trading.get_client", return_value=mock_client):
+    with patch("polybot.trading.trading.get_client", return_value=mock_client):
         result = await _post_fak_market(
             token_id="token-1",
             amount=5.0,  # $5 to spend
@@ -71,7 +71,7 @@ async def test_fak_buy_single_full_fill():
     ]
     mock_client = _mock_client(fills)
 
-    with patch("btc5m.trading.get_client", return_value=mock_client):
+    with patch("polybot.trading.trading.get_client", return_value=mock_client):
         result = await _post_fak_market(
             token_id="token-1",
             amount=5.0,
@@ -97,7 +97,7 @@ async def test_fak_sell_partial_fill_share_tracking():
     ]
     mock_client = _mock_client(fills)
 
-    with patch("btc5m.trading.get_client", return_value=mock_client):
+    with patch("polybot.trading.trading.get_client", return_value=mock_client):
         result = await _post_fak_market(
             token_id="token-1",
             amount=10.0,  # 10 shares to sell
@@ -122,7 +122,7 @@ async def test_fak_no_fill_returns_failure():
     ] * 3
     mock_client = _mock_client(fills)
 
-    with patch("btc5m.trading.get_client", return_value=mock_client):
+    with patch("polybot.trading.trading.get_client", return_value=mock_client):
         result = await _post_fak_market(
             token_id="token-1",
             amount=5.0,
@@ -144,8 +144,8 @@ async def test_gtd_buy_size_is_shares():
     mock_client.create_order.return_value = {}
     mock_client.post_order.return_value = {"orderID": "gtd-1", "status": "LIVE"}
 
-    with patch("btc5m.trading.get_client", return_value=mock_client), \
-         patch("btc5m.trading.round_to_tick", return_value=0.50):
+    with patch("polybot.trading.trading.get_client", return_value=mock_client), \
+         patch("polybot.trading.trading.round_to_tick", return_value=0.50):
         result = await _post_gtd_limit(
             token_id="token-1",
             amount=5.0,  # $5
@@ -168,8 +168,8 @@ async def test_gtd_sell_size_is_shares_directly():
     mock_client.create_order.return_value = {}
     mock_client.post_order.return_value = {"orderID": "gtd-2", "status": "LIVE"}
 
-    with patch("btc5m.trading.get_client", return_value=mock_client), \
-         patch("btc5m.trading.round_to_tick", return_value=0.50):
+    with patch("polybot.trading.trading.get_client", return_value=mock_client), \
+         patch("polybot.trading.trading.round_to_tick", return_value=0.50):
         result = await _post_gtd_limit(
             token_id="token-1",
             amount=10.0,  # 10 shares
@@ -193,8 +193,8 @@ async def test_cancel_all_is_async():
     mock_client = MagicMock()
     mock_client.cancel_all.return_value = None
 
-    with patch("btc5m.trading.get_client", return_value=mock_client), \
-         patch("btc5m.trading.stop_heartbeat"):
+    with patch("polybot.trading.trading.get_client", return_value=mock_client), \
+         patch("polybot.trading.trading.stop_heartbeat"):
         await cancel_all_open_orders()
 
     mock_client.cancel_all.assert_called_once()

@@ -1,11 +1,11 @@
-"""Unit tests for btc5m.stream — event parsing, cache clearing."""
+"""Unit tests for polybot.market.stream — event parsing, cache clearing."""
 
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from btc5m.stream import PriceStream, PriceUpdate
+from polybot.market.stream import PriceStream, PriceUpdate
 
 
 # ─── PriceUpdate ──────────────────────────────────────────────────────────────
@@ -164,7 +164,7 @@ async def test_reconnect_clears_prices():
 
     # Simulate reconnect logic (extracted from _recv_loop)
     mock_ws = AsyncMock()
-    with patch("btc5m.stream.websockets.connect", return_value=mock_ws):
+    with patch("polybot.market.stream.websockets.connect", return_value=mock_ws):
         stream._ws = await websockets_connect_stub()
         await stream._subscribe(["t1"])
         stream._prices.clear()  # This is what the code does after reconnect

@@ -8,9 +8,9 @@ from typing import Optional
 from py_clob_client.clob_types import MarketOrderArgs, OrderArgs, OrderType
 from py_clob_client.order_builder.constants import BUY, SELL
 
-from . import config
-from .client import get_client, get_midpoint, round_to_tick
-from .log_formatter import TRADE, log_event
+from polybot.core import config
+from polybot.core.client import get_client, get_midpoint, round_to_tick
+from polybot.core.log_formatter import TRADE, log_event
 
 log = logging.getLogger(__name__)
 
