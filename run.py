@@ -27,7 +27,7 @@ from polybot.config_loader import load_config, build_series, build_strategy, bui
 from polybot.market.market import find_next_window
 from polybot.core.log_formatter import ConsoleFormatter, JsonFormatter
 from polybot.trading.monitor import monitor_window
-from polybot.market.series import MarketSeries
+from polybot.market.series import MarketSeries, KNOWN_SERIES
 from polybot.strategies.base import Strategy
 from polybot.trade_config import TradeConfig
 
@@ -182,13 +182,18 @@ async def main() -> None:
         epilog="""
 Examples:
   python3.11 run.py --config strategy.yaml --dry     # YAML config + dry-run
-  python3.11 run.py --side up --amount 5 --dry       # CLI args
+  python3.11 run.py --market eth-updown-5m --side up --amount 5 --dry
   python3.11 run.py                                   # interactive mode
         """,
     )
     parser.add_argument(
         "--config", type=str,
         help="Path to YAML config file (overrides all other args)"
+    )
+    parser.add_argument(
+        "--market", type=str,
+        choices=list(KNOWN_SERIES.keys()),
+        help="Market series preset (e.g. btc-updown-5m, eth-updown-4h)"
     )
     parser.add_argument(
         "--side", choices=["up", "down"],
@@ -246,13 +251,13 @@ Examples:
         }
         trade_config = _build_trade_config_from_cli(cfg, rounds=args.rounds)
         strategy = build_strategy({})
-        series = MarketSeries.from_known("btc-updown-5m")
+        series = MarketSeries.from_known(args.market or "btc-updown-5m")
     else:
         # Interactive mode
         cfg = _interactive_config()
         trade_config = _build_trade_config_from_cli(cfg, rounds=args.rounds)
         strategy = build_strategy({})
-        series = MarketSeries.from_known("btc-updown-5m")
+        series = MarketSeries.from_known(args.market or "btc-updown-5m")
 
     dry_run = args.dry
 
@@ -282,8 +287,8 @@ Examples:
             window = find_next_window()
 
             if window is None:
-                log.warning("No window found, retrying in 60s...")
-                await asyncio.sleep(60)
+                log.warning("No window found, retrying in 10s...")
+                await asyncio.sleep(10)
                 continue
 
             log.info("Next window: %s", window.short_label)

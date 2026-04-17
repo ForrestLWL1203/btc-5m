@@ -316,6 +316,21 @@ async def test_handle_opening_price_already_bought():
     mock_buy.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_handle_opening_price_buy_failed_sets_exit():
+    """Buy failure sets exit_triggered=True to prevent infinite re-buy."""
+    window = _make_window()
+    state = _make_state()
+    tc = _tc()
+
+    mock_result = MagicMock(success=False, message="Insufficient balance")
+    with patch("polybot.trading.monitor.buy_token", new_callable=AsyncMock, return_value=mock_result):
+        await _handle_opening_price(window, state, "up-token-123", 0.50, dry_run=False, trade_config=tc)
+
+    assert state.bought is False
+    assert state.exit_triggered is True
+
+
 # ─── monitor_window WS reuse ─────────────────────────────────────────────────
 
 @pytest.mark.asyncio
@@ -510,8 +525,8 @@ async def test_deferred_signal_stored_when_locked():
 
 
 @pytest.mark.asyncio
-async def test_post_buy_tp_check():
-    """After buy, deferred TP signal triggers sell via _check_sl_tp."""
+async def test_post_buy_deferred_signal_discarded():
+    """After buy, deferred signal is discarded (stale price context for new position)."""
     window = _make_window()
     state = _make_state()
     tc = _tc()
@@ -529,16 +544,14 @@ async def test_post_buy_tp_check():
 
     mock_buy_result = MagicMock(success=True, filled_size=10.0, avg_price=0.50)
     mock_sell = AsyncMock(return_value=MagicMock(success=True))
-    mock_cancel = AsyncMock()
 
     with patch("polybot.trading.monitor.buy_token", new_callable=AsyncMock, return_value=mock_buy_result), \
          patch("polybot.trading.monitor.sell_token", mock_sell), \
-         patch("polybot.trading.monitor.cancel_all_open_orders", mock_cancel):
+         patch("polybot.trading.monitor.cancel_all_open_orders", new_callable=AsyncMock):
         await _handle_opening_price(window, state, "up-token-123", 0.50, dry_run=False, trade_config=tc)
 
-    # Buy succeeded, then deferred signal triggered TP
-    assert state.bought is False  # sold via TP
-    assert state.tp_count == 1
-    mock_sell.assert_called_once()
-    # Pending signal should be cleared
+    # Buy succeeded, deferred signal should be discarded (not processed)
+    assert state.bought is True
+    assert state.tp_count == 0
+    mock_sell.assert_not_called()
     assert state._pending_signal is None

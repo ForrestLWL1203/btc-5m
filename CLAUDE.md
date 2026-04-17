@@ -12,11 +12,14 @@ Automated Polymarket trading bot for BTC/ETH Up/Down markets across multiple tim
 # Install dependencies (Python 3.11+ required)
 python3.11 -m pip install -r requirements.txt
 
-# YAML config + dry-run (recommended)
-python3.11 run.py --config strategy.yaml --dry
+# CLI args + dry-run (recommended for testing)
+python3.11 run.py --market btc-updown-5m --side up --amount 1 --tp-pct 0.30 --sl-pct 0.30 --dry
 
-# CLI args
-python3.11 run.py --side up --amount 5 --dry
+# Live trading (remove --dry)
+python3.11 run.py --market btc-updown-5m --side up --amount 1 --tp-pct 0.30 --sl-pct 0.30 --rounds 1
+
+# YAML config
+python3.11 run.py --config strategy.yaml --dry
 
 # Interactive mode
 python3.11 run.py
@@ -32,7 +35,7 @@ polybot/                    # Trading package
 ├── core/                   # Core infrastructure
 │   ├── __init__.py
 │   ├── auth.py             # Loads CLI config, builds CLOBClient
-│   ├── client.py           # CLOB singleton, REST price helpers
+│   ├── client.py           # CLOB singleton, REST helpers, order param prefetch
 │   ├── config.py           # Fallback constants (legacy defaults)
 │   ├── log_formatter.py    # Structured JSON + console logging
 │   └── state.py            # MonitorState — trading state for the monitoring loop
@@ -48,25 +51,26 @@ polybot/                    # Trading package
 └── trading/                # Order execution + monitoring
     ├── __init__.py
     ├── monitor.py          # Async monitoring loop (WS event-driven)
-    └── trading.py          # buy_token() / sell_token() with FOK + GTC fallback
+    └── trading.py          # buy_token() / sell_token() with FOK + GTD fallback
 
-run.py                      # Entry point (--config YAML / CLI args / interactive)
+run.py                      # Entry point (--config YAML / --market / CLI args / interactive)
 strategy.yaml.example       # Example config file
+docs/polymarket_api.md      # Polymarket API reference
 requirements.txt            # Python dependencies
 ```
 
 ## Architecture
 
 - **`core/auth.py`**: Reads `~/.config/polymarket/config.json` for private key / signature type. Initializes `ClobClient` with `signature_type=1` (proxy/Magic wallet).
-- **`core/client.py`**: Lazy `ClobClient` singleton. Provides REST fallback: `get_midpoint()`, `get_tick_size()`, `round_to_tick()`.
+- **`core/client.py`**: Lazy `ClobClient` singleton. REST helpers: `get_midpoint()`, `get_tick_size()`, `get_token_balance(safe)`, `round_to_tick()`. Order param prefetch: `prefetch_order_params()` + `get_order_options()` to skip SDK internal API calls during order placement.
 - **`core/config.py`**: Legacy constants — still used as defaults when no Strategy/Series is provided.
 - **`core/log_formatter.py`**: `ConsoleFormatter` (human-readable with `[EVENT_TYPE]` prefix) and `JsonFormatter` (JSONL for frontend).
 - **`core/state.py`**: `MonitorState` dataclass — tracks buy/hold state, entry price, SL/TP counts, deferred signals, trade lock.
 - **`market/market.py`**: Slug number = Unix epoch of window start. Fetches from Gamma API. Accepts `MarketSeries` for multi-market support.
 - **`market/series.py`**: `MarketSeries` frozen dataclass — defines a market series (asset, timeframe, slug params, window buffer). `KNOWN_SERIES` registry for known BTC/ETH markets.
 - **`market/stream.py`**: `PriceStream` class — WebSocket connection to `wss://ws-subscriptions-clob.polymarket.com/ws/market`. Subscribes to token IDs, emits `PriceUpdate` via callback. Handles `PING` every 10s.
-- **`trading/trading.py`**: FOK market orders with **10× retry at 100ms** (1 second total). Falls back to GTC limit at midpoint if FOK fails.
-- **`trading/monitor.py`**: Async event-driven loop. `PriceStream` callbacks immediately trigger buy / stop-loss / take-profit. Uses optimistic/pessimistic price aggregation (TP=max of midpoint/trade/ask, SL=min of midpoint/trade/bid). Deferred signal mechanism for race conditions.
+- **`trading/trading.py`**: FOK market orders with **10× retry at 100ms** (1 second total). Falls back to GTD limit at midpoint if FOK fails. Uses `PartialCreateOrderOptions` to skip SDK overhead.
+- **`trading/monitor.py`**: Async event-driven loop. `PriceStream` callbacks immediately trigger buy / stop-loss / take-profit. Uses optimistic/pessimistic price aggregation (TP=max of midpoint/trade/ask, SL=min of midpoint/trade/bid). Deferred signal mechanism for race conditions. Sell with balance-refreshing retry (`_sell_with_retry`) and residual cleanup (`_cleanup_residual`). Prefetches order params during WS pre-connect.
 - **`strategies/base.py`**: `Strategy` ABC with single method `should_buy(price, state) -> bool`. Buy logic only.
 - **`strategies/immediate.py`**: `ImmediateStrategy` — `should_buy()` always returns `True`. Buys immediately at first price.
 - **`trade_config.py`**: `TradeConfig` dataclass — common trading params (side, amount, tp_pct, sl_pct, max_*_reentry, rounds) shared across all strategies. Contains `check_exit()` for TP/SL logic.
@@ -91,6 +95,10 @@ requirements.txt            # Python dependencies
 - **Unsubscribe**: `{"assets_ids": [...], "operation": "unsubscribe"}`
 - **Heartbeat**: Send `PING` every 10 seconds
 - **Key events**: `best_bid_ask`, `price_change`, `last_trade_price`, `tick_size_change`, `new_market`, `market_resolved`
+
+## API Reference
+
+See [docs/polymarket_api.md](docs/polymarket_api.md) for complete Polymarket API documentation (CLOB, Gamma, Data APIs, order types, fill tracking, WebSocket, fees).
 
 ## Dependencies
 

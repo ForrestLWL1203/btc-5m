@@ -9,8 +9,18 @@ from typing import Optional
 from eth_account import Account
 
 from py_clob_client.client import ClobClient
+from py_clob_client.http_helpers import helpers as _http_helpers
 
 from . import config
+
+
+def _configure_proxy() -> None:
+    """Inject HTTPS proxy into py-clob-client's httpx client."""
+    proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
+    if proxy and hasattr(_http_helpers, "_http_client"):
+        _http_helpers._http_client = _http_helpers._http_client.__class__(
+            http2=True, proxy=proxy,
+        )
 
 # Suppress eth_account warnings
 Account.enable_unaudited_hdwallet_features()
@@ -46,6 +56,9 @@ def create_clob_client(
     """
     # Load from CLI config as base
     cli_cfg = _load_cli_config()
+
+    # Ensure proxy is configured before first API call
+    _configure_proxy()
 
     pk = key or cli_cfg.get("private_key")
     if not pk:

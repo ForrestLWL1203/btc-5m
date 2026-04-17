@@ -9,7 +9,7 @@ from py_clob_client.clob_types import MarketOrderArgs, OrderArgs, OrderType
 from py_clob_client.order_builder.constants import BUY, SELL
 
 from polybot.core import config
-from polybot.core.client import get_client, get_midpoint, round_to_tick
+from polybot.core.client import get_client, get_midpoint, get_order_options, round_to_tick
 from polybot.core.log_formatter import TRADE, log_event
 
 log = logging.getLogger(__name__)
@@ -70,78 +70,69 @@ def _is_425_error(exc: Exception) -> bool:
     return "425" in msg or "too early" in msg
 
 
-async def _post_fak_market(
+async def _post_fok_market(
     token_id: str, amount: float, side: str, retry_count: int, retry_interval: float
 ) -> OrderResult:
     """
-    Attempt a FAK (Fill-And-Kill) market order with retry.
+    Attempt a FOK (Fill-Or-Kill) market order with retry.
 
-    FAK allows partial fills — any amount filled is considered success.
-    Remaining unfilled portion is retried.  After exhausting retries,
-    returns whatever was filled (success if > 0, failure otherwise).
+    FOK either fills the entire order or nothing — no partial fills.
+    Retries up to retry_count times with retry_interval between attempts.
     """
     side_const = BUY if side == BUY else SELL
     engine_retry = 0
     max_engine_retries = 3
     engine_backoff = 2.0
-    remaining_amount = amount
-    total_filled = 0.0
-    weighted_price_sum = 0.0
-    order_ids: list[str] = []
 
     for attempt in range(1, retry_count + 1):
-        if remaining_amount <= 0:
-            break
-
         try:
             client = get_client()
             args = MarketOrderArgs(
                 token_id=token_id,
-                amount=remaining_amount,
+                amount=amount,
                 side=side_const,
-                order_type=OrderType.FAK,
             )
-            signed = client.create_market_order(args)
-            resp = client.post_order(signed, OrderType.FAK)
+            options = get_order_options(token_id)
+            signed = client.create_market_order(args, options=options)
+            resp = client.post_order(signed, OrderType.FOK)
 
             resp_id = resp.get("orderID") or resp.get("orderId") or resp.get("id", "")
             status = resp.get("status", "").upper()
             filled = float(resp.get("sizeFilled", resp.get("filledSize", 0)))
             price = float(resp.get("avgPrice", resp.get("price", 0.0)))
 
-            if filled > 0:
-                total_filled += filled
-                if price > 0:
-                    weighted_price_sum += filled * price
-                    # For BUY: amount is dollars, sizeFilled is shares —
-                    # convert filled shares back to dollars for accurate remaining.
-                    if side == BUY:
-                        filled_cost = filled * price
-                    else:
-                        filled_cost = filled  # SELL: both amount and sizeFilled are in shares
-                    remaining_amount -= filled_cost
-                order_ids.append(str(resp_id))
-                log_event(log, logging.INFO, TRADE, {
-                    "action": "FAK_PARTIAL",
-                    "side": side,
-                    "order_id": resp_id,
-                    "filled": filled,
-                    "price": price,
-                    "remaining": remaining_amount,
-                    "attempt": attempt,
-                })
+            log_event(log, logging.DEBUG, TRADE, {
+                "action": "FOK_RAW_RESP",
+                "side": side,
+                "order_id": resp_id,
+                "status": status,
+                "filled": filled,
+                "price": price,
+                "raw_keys": list(resp.keys()),
+                "attempt": attempt,
+            })
 
-                if remaining_amount <= 0:
-                    avg_price = weighted_price_sum / total_filled if total_filled > 0 else 0.0
-                    return OrderResult(
-                        success=True,
-                        order_id=order_ids[-1],
-                        filled_size=total_filled,
-                        avg_price=avg_price,
-                        message=f"FAK fully filled in {attempt} attempts",
-                    )
-            else:
-                log.debug("FAK attempt %d: no fill, status=%s", attempt, status)
+            # FOK response never includes filled/price — estimate from amount
+            # Actual balance will be queried separately after buy/sell
+            filled_size = filled if filled > 0 else amount
+            avg_price = price if price > 0 else 0.0
+
+            log_event(log, logging.INFO, TRADE, {
+                "action": "FOK_FILLED",
+                "side": side,
+                "order_id": resp_id,
+                "filled_size": filled_size,
+                "avg_price": avg_price,
+                "attempt": attempt,
+            })
+
+            return OrderResult(
+                success=True,
+                order_id=str(resp_id),
+                filled_size=filled_size,
+                avg_price=avg_price,
+                message=f"FOK filled (attempt {attempt})",
+            )
 
         except Exception as e:
             if _is_425_error(e) and engine_retry < max_engine_retries:
@@ -154,31 +145,12 @@ async def _post_fak_market(
                 engine_backoff = min(engine_backoff * 2, 30.0)
                 continue
 
-            log.debug("FAK attempt %d failed: %s", attempt, e)
+            log.debug("FOK attempt %d failed: %s", attempt, e)
 
         if attempt < retry_count:
             await asyncio.sleep(retry_interval)
 
-    # Partial fill after exhausting retries
-    if total_filled > 0:
-        avg_price = weighted_price_sum / total_filled
-        log_event(log, logging.WARNING, TRADE, {
-            "action": "FAK_PARTIAL_TOTAL",
-            "side": side,
-            "filled": total_filled,
-            "requested": amount,
-            "avg_price": avg_price,
-            "attempts": retry_count,
-        })
-        return OrderResult(
-            success=True,
-            order_id=order_ids[-1] if order_ids else None,
-            filled_size=total_filled,
-            avg_price=avg_price,
-            message=f"FAK partial fill ({total_filled}/{amount})",
-        )
-
-    return OrderResult(success=False, message=f"FAK failed after {retry_count} attempts (no fills)")
+    return OrderResult(success=False, message=f"FOK failed after {retry_count} attempts")
 
 
 async def _post_gtd_limit(
@@ -218,7 +190,7 @@ async def _post_gtd_limit(
             side=side_const,
             expiration=expiration if use_gtd else 0,
         )
-        signed = client.create_order(args)
+        signed = client.create_order(args, options=get_order_options(token_id))
         order_type = OrderType.GTD if use_gtd else OrderType.GTC
         resp = client.post_order(signed, order_type)
 
@@ -267,7 +239,7 @@ async def buy_up(
         "label": label,
     })
 
-    result = await _post_fak_market(
+    result = await _post_fok_market(
         token_id=token_id,
         amount=amount,
         side=BUY,
@@ -278,11 +250,11 @@ async def buy_up(
     if result.success:
         return result
 
-    # FAK failed — try GTD limit at current midpoint
+    # FOK failed — try GTD limit at current midpoint
     if config.FALLBACK_GTC:
         log_event(log, logging.WARNING, TRADE, {
             "action": "GTD_FALLBACK",
-            "reason": "FAK buy failed",
+            "reason": "FOK buy failed",
         })
         mid = get_midpoint(token_id)
         if mid:
@@ -314,7 +286,7 @@ async def sell_up(
     # Stop heartbeat — we're exiting, no more GTC orders to keep alive
     stop_heartbeat()
 
-    result = await _post_fak_market(
+    result = await _post_fok_market(
         token_id=token_id,
         amount=size,
         side=SELL,
@@ -328,7 +300,7 @@ async def sell_up(
     if config.FALLBACK_GTC:
         log_event(log, logging.WARNING, TRADE, {
             "action": "GTD_FALLBACK",
-            "reason": "FAK sell failed",
+            "reason": "FOK sell failed",
         })
         fallback_price = price_hints or get_midpoint(token_id)
         if fallback_price:

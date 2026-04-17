@@ -9,10 +9,16 @@
 pip3.11 install -r requirements.txt
 
 # Dry run（模拟，不下单）
-python3.11 run.py --config strategy.yaml --dry
+python3.11 run.py --market btc-updown-5m --side up --amount 1 --tp-pct 0.30 --sl-pct 0.30 --dry
 
-# CLI 参数模式
-python3.11 run.py --side up --amount 5 --tp-pct 0.50 --sl-pct 0.30 --dry
+# 实盘交易（去掉 --dry）
+python3.11 run.py --market btc-updown-5m --side up --amount 1 --tp-pct 0.30 --sl-pct 0.30
+
+# 指定轮数（运行 1 轮后自动停止）
+python3.11 run.py --market btc-updown-5m --side up --amount 1 --tp-pct 0.30 --sl-pct 0.30 --rounds 1
+
+# YAML 配置模式
+python3.11 run.py --config strategy.yaml --dry
 
 # 交互模式（引导式输入）
 python3.11 run.py --dry
@@ -41,7 +47,7 @@ python3.11 run.py --dry
 
 | 方向 | 阈值计算 | 示例（入场 50¢） |
 |---|---|---|
-| **止盈** | `entry_price × (1 + tp_pct)` | tp_pct=0.50 → 75¢ 以上卖出 |
+| **止盈** | `entry_price × (1 + tp_pct)` | tp_pct=0.30 → 65¢ 以上卖出 |
 | **止损** | `entry_price × (1 - sl_pct)` | sl_pct=0.30 → 35¢ 以下卖出 |
 
 价格判断使用**乐观/悲观聚合**：
@@ -64,7 +70,30 @@ python3.11 run.py --dry
 
 ## 使用方法
 
-### 方式一：YAML 配置（推荐）
+### 方式一：命令行参数（推荐）
+
+```bash
+# 买涨，BTC 5分钟市场
+python3.11 run.py \
+  --market btc-updown-5m \
+  --side up \
+  --amount 1 \
+  --tp-pct 0.30 \
+  --sl-pct 0.30 \
+  --max-reentry 0 \
+  --max-tp-reentry 0 \
+  --rounds 1
+
+# 买跌，ETH 5分钟市场
+python3.11 run.py \
+  --market eth-updown-5m \
+  --side down \
+  --amount 1 \
+  --tp-pct 0.30 \
+  --sl-pct 0.30
+```
+
+### 方式二：YAML 配置
 
 ```bash
 cp strategy.yaml.example strategy.yaml
@@ -84,27 +113,13 @@ strategy:
 
 params:
   side: up                # up 或 down
-  amount: 5.0             # 每笔交易金额 (USD)
-  tp_pct: 0.50            # 止盈 +50%
+  amount: 1.0             # 每笔交易金额 (USD)
+  tp_pct: 0.30            # 止盈 +30%
   sl_pct: 0.30            # 止损 -30%
   max_sl_reentry: 0       # 止损后不重入
   max_tp_reentry: 0       # 止盈后不重入
 
 rounds: 1                 # 运行 1 轮后停止（省略则无限运行）
-```
-
-### 方式二：命令行参数
-
-```bash
-python3.11 run.py \
-  --side up \
-  --amount 5 \
-  --tp-pct 0.50 \
-  --sl-pct 0.30 \
-  --max-reentry 1 \
-  --max-tp-reentry 0 \
-  --rounds 3 \
-  --dry
 ```
 
 ### 方式三：交互模式
@@ -120,9 +135,10 @@ python3.11 run.py --dry
 | 参数 | 默认值 | 说明 |
 |---|---|---|
 | `--config` | — | YAML 配置文件路径（覆盖其他参数） |
+| `--market` | btc-updown-5m | 市场预设（见支持市场表） |
 | `--side` | up | 交易方向：`up`（看涨）或 `down`（看跌） |
 | `--amount` | 5.0 | 每笔交易金额（美元） |
-| `--tp-pct` | 0.50 | 止盈百分比（0.50 = 入场价 +50% 卖出） |
+| `--tp-pct` | 0.50 | 止盈百分比（0.30 = 入场价 +30% 卖出） |
 | `--sl-pct` | 0.30 | 止损百分比（0.30 = 入场价 -30% 卖出） |
 | `--max-reentry` | 0 | 止损后最大重入次数 |
 | `--max-tp-reentry` | 0 | 止盈后最大重入次数 |
@@ -180,11 +196,9 @@ chmod 600 ~/.config/polymarket/config.json
 ### 4. 网络代理（中国大陆）
 
 ```bash
-# .env 文件
+# .env 文件（已 .gitignore）
 HTTPS_PROXY=http://127.0.0.1:7897
-
-# 或环境变量
-export https_proxy=http://127.0.0.1:7897
+HTTP_PROXY=http://127.0.0.1:7897
 ```
 
 验证连通性：
@@ -197,10 +211,10 @@ curl -s -o /dev/null -w "%{http_code}" "https://gamma-api.polymarket.com/markets
 ### 5. Dry Run 验证
 
 ```bash
-python3.11 run.py --side up --amount 1 --dry
+python3.11 run.py --market btc-updown-5m --side up --amount 1 --tp-pct 0.30 --sl-pct 0.30 --dry
 ```
 
-看到 `[DRY-RUN] Would BUY` 表示 WebSocket + API 全部连通。确认无误后去掉 `--dry` 实盘交易。
+看到 `[DRY-RUN MODE]` 和 WebSocket 价格更新表示全部连通。确认无误后去掉 `--dry` 实盘交易。
 
 ## 项目结构
 
@@ -208,7 +222,7 @@ python3.11 run.py --side up --amount 1 --dry
 polybot/                        # 交易包
 ├── core/                       # 核心基础设施
 │   ├── auth.py                 # 钱包凭证 + ClobClient 初始化
-│   ├── client.py               # ClobClient 单例，REST 价格查询
+│   ├── client.py               # ClobClient 单例，REST 查询，预缓存
 │   ├── config.py               # 默认常量
 │   ├── log_formatter.py        # 结构化日志（console + JSONL）
 │   └── state.py                # MonitorState — 交易状态
@@ -221,18 +235,19 @@ polybot/                        # 交易包
 │   └── immediate.py            # ImmediateStrategy — 窗口开即买
 ├── trading/                    # 订单执行 + 监控
 │   ├── monitor.py              # 异步事件驱动监控循环
-│   └── trading.py              # FAK 市价单 + GTC 限价回退
+│   └── trading.py              # FOK 市价单 + GTD 限价回退
 ├── config_loader.py            # YAML 加载 + 工厂函数
 └── trade_config.py             # TradeConfig — 通用参数 + check_exit()
 
 run.py                          # 入口点
 strategy.yaml.example           # 配置文件示例
-tests/                          # 单元测试（101 tests）
+docs/polymarket_api.md          # Polymarket API 参考文档
+tests/                          # 单元测试（102 tests）
 ```
 
 ## 支持市场
 
-| 市场 | Asset | Timeframe | 窗口时长 |
+| `--market` 参数 | Asset | Timeframe | 窗口时长 |
 |---|---|---|---|
 | btc-updown-5m | BTC | 5m | 5 分钟 |
 | btc-updown-15m | BTC | 15m | 15 分钟 |
@@ -245,8 +260,21 @@ tests/                          # 单元测试（101 tests）
 
 ### 订单执行
 
-1. **FAK 市价单**：允许部分成交，10 次重试（100ms 间隔），1 秒内完成
-2. **GTC 限价回退**：FAK 全部失败后以 midpoint 挂限价单
+1. **FOK 市价单**：全部成交或全部失败，带重试（最多 10 次，100ms 间隔）
+2. **GTD 限价回退**：FOK 全部失败后以 midpoint 挂限价单，自动过期无需心跳
+
+### 余额管理
+
+- 买入 FOK 成功后立即查询 API 获取精确持仓（`get_token_balance`）
+- 卖出前再次查询余额确保不超额（安全截断：floor 到 4 位小数 - 1 tick）
+- 卖出失败自动重试，每次重试重新查询余额
+- 极小残留（< 0.05 shares）自动跳过清理
+
+### 买入延迟优化
+
+- WS 连接后立即预缓存 tick_size / neg_risk / fee_rate（省 ~700ms）
+- 传 `PartialCreateOrderOptions` 跳过 SDK 内部 API 调用
+- 优化后买入延迟：~0.6s（原 ~1.9s）
 
 ### WebSocket 实时定价
 
@@ -261,20 +289,20 @@ Slug 格式：`{slug_prefix}-{UnixEpoch}`，epoch 即窗口开始时间戳。通
 
 ## 日志
 
-双输出 — 控制台（人类可读）+ `log/` 目录（JSONL 结构化日志，供前端消费）。
+双输出 — 控制台（人类可读）+ `log/` 目录（JSONL 结构化日志 + 人可读 .log 文件）。
 
 ```
-14:40:00.453 INFO — === BTC 5m Up/Down Trader Started ===
-14:40:00.453 INFO — Strategy: ImmediateStrategy | Side: UP | Amount: $5.0 | TP: +50% | SL: -30%
-14:40:01.316 INFO — [DRY-RUN] Would BUY $5.0 UP @ 0.525 (9.5238 shares)
-14:40:21.756 WARNING — STOP-LOSS triggered at UP=0.34 (<35¢) reentry=False
+20:15:00.962 INFO — === BTC 5m Up/Down Trader Started ===
+20:15:00.962 INFO — Strategy: ImmediateStrategy | Side: UP | Amount: $1.0 | TP: +30% | SL: -30%
+20:15:03.842 INFO — [TRADE] BUY_FILLED side=UP price=0.4750 shares=2.1978
+20:15:30.685 WARNING — [SIGNAL] STOP_LOSS price=0.3300 threshold=0.3325
 ```
 
 ## 测试
 
 ```bash
 python3.11 -m pytest tests/ -v
-# 101 tests
+# 102 tests
 ```
 
 ## 风险提示

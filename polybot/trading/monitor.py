@@ -33,6 +33,137 @@ log = logging.getLogger(__name__)
 _PREOPEN_BUFFER = 10  # seconds before window start to wake up
 
 
+async def _get_exact_holding(token_id: str, estimated: float) -> float:
+    """Query exact token balance from API; fall back to estimated size."""
+    from polybot.core.client import get_token_balance
+    exact = await asyncio.to_thread(get_token_balance, token_id)
+    if exact is not None and exact > 0:
+        log_event(log, logging.INFO, TRADE, {
+            "action": "BALANCE_QUERY",
+            "token": token_id[:20],
+            "exact": exact,
+            "estimated": estimated,
+        })
+        return exact
+    # Fallback: truncate estimated balance to be safe
+    truncated = int(estimated * 10_000) / 10_000
+    if truncated > 0:
+        log_event(log, logging.WARNING, TRADE, {
+            "action": "BALANCE_FALLBACK",
+            "token": token_id[:20],
+            "estimated": estimated,
+            "truncated": truncated,
+        })
+        return truncated
+    return estimated
+
+
+async def _sell_with_retry(
+    token_id: str, estimated_size: float, reason: str,
+    window_end_epoch: Optional[int] = None, max_attempts: int = 3,
+) -> bool:
+    """Sell with balance-refreshing retry. Re-queries balance on each attempt.
+
+    After successful sell, cleans up residual balance if > dust threshold.
+    Returns True if sell succeeded, False if all attempts failed.
+    """
+    for attempt in range(max_attempts):
+        sell_size = await _get_exact_holding(token_id, estimated_size)
+        if sell_size <= 0:
+            log_event(log, logging.DEBUG, TRADE, {
+                "action": "SELL_SKIP",
+                "reason": reason,
+                "message": "balance is 0",
+            })
+            return True
+        result = await sell_token(
+            token_id, sell_size, reason,
+            window_end_epoch=window_end_epoch,
+        )
+        if result.success:
+            await _cleanup_residual(
+                token_id, reason, window_end_epoch,
+                original_size=sell_size,
+            )
+            return True
+        log_event(log, logging.ERROR, TRADE, {
+            "action": "SELL_RETRY",
+            "attempt": f"{attempt + 1}/{max_attempts}",
+            "reason": reason,
+            "sell_size": sell_size,
+            "message": result.message,
+        })
+        if attempt < max_attempts - 1:
+            await asyncio.sleep(0.3)
+    log_event(log, logging.CRITICAL, TRADE, {
+        "action": "SELL_FAILED_ALL",
+        "reason": reason,
+        "estimated_size": estimated_size,
+    })
+    return False
+
+
+_DUST_THRESHOLD = 0.05  # shares — skip cleanup below this (~$0.02)
+
+
+async def _cleanup_residual(
+    token_id: str, reason: str,
+    window_end_epoch: Optional[int] = None,
+    original_size: float = 0.0,
+) -> None:
+    """Query balance after sell and clean up any residual dust.
+
+    Uses raw (non-truncated) balance and waits for chain settlement.
+    Skips cleanup if balance hasn't settled yet (still ≈ original_size).
+    """
+    from polybot.core.client import get_token_balance
+
+    # Wait longer for chain settlement (1s is often not enough)
+    for delay in (3.0, 5.0):
+        await asyncio.sleep(delay)
+        residual = await asyncio.to_thread(get_token_balance, token_id, False)
+        if residual is None or residual < _DUST_THRESHOLD:
+            if residual is not None and residual > 0:
+                log_event(log, logging.INFO, TRADE, {
+                    "action": "CLEANUP_DUST",
+                    "token": token_id[:20],
+                    "residual": residual,
+                    "note": "below dust threshold, skipping",
+                })
+            return
+        # Balance ≈ original holding → first sell hasn't settled yet, skip
+        if original_size > 0 and residual >= original_size * 0.8:
+            log_event(log, logging.INFO, TRADE, {
+                "action": "CLEANUP_SKIP",
+                "token": token_id[:20],
+                "residual": residual,
+                "original_size": original_size,
+                "note": "balance not settled yet, likely stale",
+            })
+            continue
+        # Genuine residual detected
+        break
+    else:
+        # All attempts showed balance ≈ original → nothing to clean
+        return
+
+    log_event(log, logging.INFO, TRADE, {
+        "action": "CLEANUP_RESIDUAL",
+        "token": token_id[:20],
+        "residual": residual,
+    })
+    result = await sell_token(
+        token_id, residual, f"Cleanup residual ({reason})",
+        window_end_epoch=window_end_epoch,
+    )
+    if not result.success:
+        log_event(log, logging.WARNING, TRADE, {
+            "action": "CLEANUP_FAILED",
+            "residual": residual,
+            "message": result.message,
+        })
+
+
 def _side_token(window: MarketWindow, trade_config: TradeConfig) -> tuple[str, str]:
     """Return (buy_token, price_token) based on trade side."""
     if trade_config.side == "down":
@@ -75,21 +206,10 @@ async def _monitor_single_window(
                 })
                 await cancel_all_open_orders()
                 if not dry_run:
-                    for sell_attempt in range(3):
-                        result = await sell_token(
-                            buy_token_id, state.holding_size, "Window expired",
-                            window_end_epoch=window.end_epoch,
-                        )
-                        if result.success:
-                            break
-                        log_event(log, logging.ERROR, TRADE, {
-                            "action": "SELL_FAILED",
-                            "reason": f"Window expired sell attempt {sell_attempt + 1}/3",
-                            "message": result.message,
-                            "window": window.short_label,
-                        })
-                        if sell_attempt < 2:
-                            await asyncio.sleep(0.5)
+                    await _sell_with_retry(
+                        buy_token_id, state.holding_size, "Window expired",
+                        window_end_epoch=window.end_epoch,
+                    )
             # Always pre-fetch next window on expiry to avoid stale fallback
             fetch_task = asyncio.create_task(
                 asyncio.to_thread(_find_next_window_after, window.end_epoch)
@@ -112,21 +232,10 @@ async def _monitor_single_window(
             )
             await cancel_all_open_orders()
             if not dry_run:
-                for sell_attempt in range(3):
-                    result = await sell_token(
-                        buy_token_id, state.holding_size, f"Window ending in {remaining}s",
-                        window_end_epoch=window.end_epoch,
-                    )
-                    if result.success:
-                        break
-                    log_event(log, logging.ERROR, TRADE, {
-                        "action": "SELL_FAILED",
-                        "reason": f"Window end sell attempt {sell_attempt + 1}/3",
-                        "message": result.message,
-                        "window": window.short_label,
-                    })
-                    if sell_attempt < 2:
-                        await asyncio.sleep(0.5)
+                await _sell_with_retry(
+                    buy_token_id, state.holding_size, f"Window ending in {remaining}s",
+                    window_end_epoch=window.end_epoch,
+                )
             await asyncio.sleep(remaining)
             try:
                 next_win = fetch_task.result()
@@ -269,6 +378,11 @@ async def monitor_window(
         ws = PriceStream(on_price=new_callback)
         await ws.connect(token_ids)
 
+    # Pre-fetch order params during wait time to reduce buy latency
+    from polybot.core.client import prefetch_order_params
+    for tid in token_ids:
+        await asyncio.to_thread(prefetch_order_params, tid)
+
     # Wait for window start if not yet started
     if elapsed_since_start < 0:
         wait_sec = window.start_epoch - now_epoch
@@ -397,17 +511,11 @@ async def _check_sl_tp(
         state.bought = False
         await cancel_all_open_orders()
         if not dry_run:
-            result = await sell_token(
+            success = await _sell_with_retry(
                 buy_token_id, state.holding_size, f"Take-profit @ {tp_price}",
                 window_end_epoch=window.end_epoch,
             )
-            if not result.success:
-                log_event(log, logging.ERROR, TRADE, {
-                    "action": "SELL_FAILED",
-                    "reason": "Take-profit sell failed",
-                    "message": result.message,
-                    "window": window.short_label,
-                })
+            if not success:
                 state.bought = True
         else:
             log_event(log, logging.INFO, TRADE, {
@@ -437,17 +545,11 @@ async def _check_sl_tp(
         state.bought = False
         await cancel_all_open_orders()
         if not dry_run:
-            result = await sell_token(
+            success = await _sell_with_retry(
                 buy_token_id, state.holding_size, f"Stop-loss @ {sl_price}",
                 window_end_epoch=window.end_epoch,
             )
-            if not result.success:
-                log_event(log, logging.ERROR, TRADE, {
-                    "action": "SELL_FAILED",
-                    "reason": "Stop-loss sell failed",
-                    "message": result.message,
-                    "window": window.short_label,
-                })
+            if not success:
                 state.bought = True
         else:
             log_event(log, logging.INFO, TRADE, {
@@ -578,8 +680,20 @@ async def _handle_opening_price(
                 window_end_epoch=window.end_epoch,
             )
             if result.success:
-                if result.filled_size > 0:
+                # Query exact balance from API instead of estimating
+                from polybot.core.client import get_token_balance
+                exact_balance = await asyncio.to_thread(get_token_balance, buy_token_id)
+                if exact_balance is not None and exact_balance > 0:
+                    state.holding_size = exact_balance
+                    log_event(log, logging.DEBUG, TRADE, {
+                        "action": "BALANCE_CONFIRMED",
+                        "token": buy_token_id[:20],
+                        "shares": exact_balance,
+                    })
+                elif result.filled_size > 0 and result.avg_price > 0:
                     state.holding_size = result.filled_size
+                elif result.avg_price > 0:
+                    state.holding_size = trade_config.amount / result.avg_price
                 else:
                     state.holding_size = trade_config.amount / price if price > 0 else trade_config.amount
                 state.entry_price = price
@@ -591,19 +705,19 @@ async def _handle_opening_price(
                     "shares": state.holding_size,
                     "window": window.short_label,
                 })
-                # Check deferred signal for immediate SL/TP after buy
+                # Discard deferred signal — it's from before this buy,
+                # price context is stale for the new position
                 if state._pending_signal is not None:
-                    deferred = state._pending_signal
-                    state._pending_signal = None
-                    log_event(log, logging.INFO, SIGNAL, {
-                        "action": "DEFERRED_SIGNAL_PROCESSING",
+                    log_event(log, logging.DEBUG, SIGNAL, {
+                        "action": "DEFERRED_SIGNAL_DISCARDED",
                         "window": window.short_label,
-                        "deferred_source": deferred.source,
-                        "deferred_midpoint": deferred.midpoint,
+                        "deferred_source": state._pending_signal.source,
+                        "deferred_midpoint": state._pending_signal.midpoint,
                     })
-                    await _check_sl_tp(deferred, state, window, buy_token_id, dry_run, trade_config)
+                    state._pending_signal = None
             else:
                 state.bought = False
+                state.exit_triggered = True
                 log_event(log, logging.WARNING, TRADE, {
                     "action": "BUY_FAILED",
                     "side": trade_config.side.upper(),
@@ -624,14 +738,12 @@ async def _handle_opening_price(
                 "window": window.short_label,
                 "dry_run": True,
             })
-            # Check deferred signal for immediate SL/TP after buy
+            # Discard deferred signal — stale price context for new position
             if state._pending_signal is not None:
-                deferred = state._pending_signal
-                state._pending_signal = None
-                log_event(log, logging.INFO, SIGNAL, {
-                    "action": "DEFERRED_SIGNAL_PROCESSING",
+                log_event(log, logging.DEBUG, SIGNAL, {
+                    "action": "DEFERRED_SIGNAL_DISCARDED",
                     "window": window.short_label,
-                    "deferred_source": deferred.source,
-                    "deferred_midpoint": deferred.midpoint,
+                    "deferred_source": state._pending_signal.source,
+                    "deferred_midpoint": state._pending_signal.midpoint,
                 })
-                await _check_sl_tp(deferred, state, window, buy_token_id, dry_run, trade_config)
+                state._pending_signal = None
