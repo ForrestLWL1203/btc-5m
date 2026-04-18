@@ -23,11 +23,12 @@ from pathlib import Path
 from dotenv import load_dotenv
 load_dotenv()
 
-from polybot.config_loader import load_config, build_series, build_strategy, build_trade_config
+from polybot.config_loader import load_config, build_series, build_strategy, build_trade_config, build_direction_config
 from polybot.market.market import find_next_window
 from polybot.core.log_formatter import ConsoleFormatter, JsonFormatter
 from polybot.trading.monitor import monitor_window
 from polybot.market.series import MarketSeries, KNOWN_SERIES
+from polybot.predict.history import WindowHistory
 from polybot.strategies.base import Strategy
 from polybot.trade_config import TradeConfig
 
@@ -237,6 +238,7 @@ Examples:
         trade_config = build_trade_config(yaml_cfg)
         strategy = build_strategy(yaml_cfg)
         series = build_series(yaml_cfg)
+        dir_cfg = build_direction_config(yaml_cfg, series)
     elif any(getattr(args, field) is not None
              for field in ["side", "amount", "tp_pct", "sl_pct",
                            "max_reentry", "max_tp_reentry"]):
@@ -252,14 +254,34 @@ Examples:
         trade_config = _build_trade_config_from_cli(cfg, rounds=args.rounds)
         strategy = build_strategy({})
         series = MarketSeries.from_known(args.market or "btc-updown-5m")
+        dir_cfg = {"predictor": None, "fallback_side": None}
     else:
         # Interactive mode
         cfg = _interactive_config()
         trade_config = _build_trade_config_from_cli(cfg, rounds=args.rounds)
         strategy = build_strategy({})
         series = MarketSeries.from_known(args.market or "btc-updown-5m")
+        dir_cfg = {"predictor": None, "fallback_side": None}
 
     dry_run = args.dry
+
+    # Direction prediction setup
+    predictor = dir_cfg.get("predictor")
+    fallback_side = dir_cfg.get("fallback_side")
+    history = None
+    if predictor is not None:
+        import time as _time
+        history = WindowHistory.for_timeframe(series.timeframe)
+        log.info("Backfilling %s history (%d windows)...", series.timeframe, history._buf.maxlen)
+        history.backfill(
+            slug_prefix=series.slug_prefix,
+            slug_step=series.slug_step,
+            count=history._buf.maxlen,
+            current_epoch=int(_time.time()),
+        )
+        log.info("History backfilled: %d windows", len(history))
+    if fallback_side and predictor is None:
+        trade_config.side = fallback_side
 
     # Set up file logging with market-specific names
     _setup_file_logging(series.slug_prefix)
@@ -297,6 +319,7 @@ Examples:
             next_win, ws, monitored = await monitor_window(
                 window, dry_run=dry_run, existing_ws=ws,
                 trade_config=trade_config, strategy=strategy, series=series,
+                predictor=predictor, history=history,
             )
             if monitored:
                 completed += 1
@@ -310,6 +333,7 @@ Examples:
                 next_win, ws, monitored = await monitor_window(
                     next_win, dry_run=dry_run, preopened=True, existing_ws=ws,
                     trade_config=trade_config, strategy=strategy, series=series,
+                    predictor=predictor, history=history,
                 )
                 if monitored:
                     completed += 1
@@ -323,6 +347,7 @@ Examples:
                     next_win, ws, monitored = await monitor_window(
                         next_win, dry_run=dry_run, preopened=True, existing_ws=ws,
                         trade_config=trade_config, strategy=strategy, series=series,
+                        predictor=predictor, history=history,
                     )
                     if monitored:
                         completed += 1
