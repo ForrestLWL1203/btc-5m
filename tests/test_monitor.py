@@ -562,10 +562,11 @@ async def test_post_buy_deferred_signal_discarded():
 
 class TestDirectionPrediction:
     @pytest.mark.asyncio
-    async def test_predictor_sets_side_at_window_start(self):
-        """Predictor is called at window start and sets trade_config.side."""
+    async def test_predictor_sets_side_with_candle_data(self):
+        """Predictor uses Binance K-line data to determine direction."""
         import datetime
         from polybot.trading.monitor import monitor_window
+        from polybot.predict.kline import KlineCandle
 
         utc = datetime.timezone.utc
         now = int(time.time())
@@ -581,9 +582,14 @@ class TestDirectionPrediction:
 
         predictor = MomentumPredictor(
             MarketSeries.from_known("btc-updown-5m"),
-            fallback_side="down",
         )
         tc = TradeConfig(side="up")
+
+        # Create bullish candle data → predict should return "up"
+        bullish_candles = [
+            KlineCandle(open_time=1000 + i, open=99 + i, high=101 + i, low=98 + i, close=100 + i, volume=100.0)
+            for i in range(20)
+        ]
 
         mock_ws = MagicMock()
         mock_ws.set_on_price = MagicMock()
@@ -594,17 +600,17 @@ class TestDirectionPrediction:
         with patch("polybot.trading.monitor.find_next_window", return_value=None), \
              patch("polybot.trading.monitor.get_midpoint_async", new_callable=AsyncMock, return_value=None), \
              patch("polybot.predict.kline.BinanceKlineFetcher") as MockFetcher:
-            MockFetcher.return_value.fetch.return_value = []  # empty → fallback
+            MockFetcher.return_value.fetch.return_value = bullish_candles
             await monitor_window(
                 window, dry_run=True, preopened=True, existing_ws=mock_ws,
                 trade_config=tc, predictor=predictor,
             )
 
-        assert tc.side == "down"  # fallback_side used when no candles
+        assert tc.side == "up"  # bullish candles → predicted "up"
 
     @pytest.mark.asyncio
-    async def test_window_skipped_when_direction_unclear_no_fallback(self):
-        """Window is skipped when predictor returns None and no fallback_side."""
+    async def test_window_skipped_when_no_prediction(self):
+        """Window is skipped when predictor returns None (no candle data)."""
         import datetime
         from polybot.trading.monitor import monitor_window
 
@@ -620,7 +626,6 @@ class TestDirectionPrediction:
             slug="btc-updown-5m-test",
         )
 
-        # No fallback_side → predict returns None when data insufficient
         predictor = MomentumPredictor(
             MarketSeries.from_known("btc-updown-5m"),
         )
@@ -634,7 +639,7 @@ class TestDirectionPrediction:
 
         with patch("polybot.trading.monitor.find_next_window", return_value=None), \
              patch("polybot.predict.kline.BinanceKlineFetcher") as MockFetcher:
-            MockFetcher.return_value.fetch.return_value = []  # empty → None
+            MockFetcher.return_value.fetch.return_value = []  # empty → None → skip
             next_win, returned_ws, monitored = await monitor_window(
                 window, dry_run=True, preopened=True, existing_ws=mock_ws,
                 trade_config=tc, predictor=predictor,

@@ -176,14 +176,13 @@ class TestYamlRoundTrip:
 class TestBuildDirectionConfig:
     def test_momentum_type_creates_predictor(self):
         cfg = {
-            "direction": {"type": "momentum", "fallback_side": "up"},
+            "direction": {"type": "momentum"},
             "market": {"asset": "btc", "timeframe": "5m"},
         }
         series = build_series(cfg)
         result = build_direction_config(cfg, series)
         assert result["predictor"] is not None
         assert isinstance(result["predictor"], MomentumPredictor)
-        assert result["fallback_side"] == "up"
 
     def test_fixed_type_no_predictor(self):
         cfg = {
@@ -197,7 +196,6 @@ class TestBuildDirectionConfig:
         cfg = {}
         result = build_direction_config(cfg, MarketSeries.from_known("btc-updown-5m"))
         assert result["predictor"] is None
-        assert result["fallback_side"] is None
 
     def test_registry_has_momentum(self):
         assert "momentum" in DIRECTION_REGISTRY

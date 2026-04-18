@@ -44,16 +44,6 @@ class TestMomentumPredictorV2:
         p = MomentumPredictor(_btc_5m())
         assert p.predict([]) is None
 
-    def test_predict_uses_fallback_side(self):
-        """When candles insufficient but fallback_side set, return fallback."""
-        p = MomentumPredictor(_btc_5m(), fallback_side="down")
-        assert p.predict([]) == "down"
-
-    def test_predict_fallback_none_when_not_set(self):
-        """When candles insufficient and no fallback, return None."""
-        p = MomentumPredictor(_btc_5m())
-        assert p.predict([]) is None
-
     def test_is_direction_predictor_subclass(self):
         assert issubclass(MomentumPredictor, DirectionPredictor)
 

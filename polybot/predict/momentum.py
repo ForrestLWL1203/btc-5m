@@ -26,8 +26,8 @@ class MomentumPredictor(DirectionPredictor):
       4. Volume confirmation (10%) — volume trend direction
     """
 
-    def __init__(self, series: MarketSeries, fallback_side: Optional[str] = None):
-        self.fallback_side = fallback_side
+    def __init__(self, series: MarketSeries):
+        self.fallback_side = None
 
         if series.slug_step <= 300:  # 5m
             self.trend_n = 12

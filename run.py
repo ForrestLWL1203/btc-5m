@@ -266,9 +266,6 @@ Examples:
 
     # Direction prediction setup
     predictor = dir_cfg.get("predictor")
-    fallback_side = dir_cfg.get("fallback_side")
-    if fallback_side and predictor is None:
-        trade_config.side = fallback_side
 
     # Set up file logging with market-specific names
     _setup_file_logging(series.slug_prefix)

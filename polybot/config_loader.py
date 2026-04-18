@@ -98,11 +98,10 @@ def build_direction_config(cfg: dict, series: MarketSeries) -> dict:
 
     Returns dict with keys:
         predictor: DirectionPredictor instance or None
-        fallback_side: "up"/"down"/None
     """
     dir_cfg = cfg.get("direction")
     if not dir_cfg:
-        return {"predictor": None, "fallback_side": None}
+        return {"predictor": None}
 
     dir_type = dir_cfg.get("type", "fixed")
     fallback = dir_cfg.get("fallback_side")
@@ -117,7 +116,4 @@ def build_direction_config(cfg: dict, series: MarketSeries) -> dict:
             f"Available: {', '.join(DIRECTION_REGISTRY.keys())}"
         )
 
-    return {
-        "predictor": cls(series, fallback_side=fallback),
-        "fallback_side": fallback,
-    }
+    return {"predictor": cls(series)}
