@@ -118,6 +118,6 @@ def build_direction_config(cfg: dict, series: MarketSeries) -> dict:
         )
 
     return {
-        "predictor": cls(series),
+        "predictor": cls(series, fallback_side=fallback),
         "fallback_side": fallback,
     }
