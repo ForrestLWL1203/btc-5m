@@ -342,6 +342,8 @@ async def monitor_window(
         strategy = ImmediateStrategy()
 
     # Direction prediction — runs once per window
+    # Must complete before any buy. If predictor can't determine direction and
+    # no fallback_side is configured, skip this window entirely.
     if predictor is not None:
         from polybot.predict.kline import BinanceKlineFetcher
         candles = []
@@ -359,10 +361,13 @@ async def monitor_window(
             })
         else:
             log_event(log, logging.WARNING, SIGNAL, {
-                "action": "DIRECTION_UNCLEAR",
+                "action": "DIRECTION_SKIP",
                 "window": window.short_label,
                 "candles": len(candles),
+                "reason": "direction unclear, no fallback_side",
             })
+            next_win = _find_and_preopen_next_window(window)
+            return next_win, existing_ws, False
 
     state = MonitorState()
     ws: Optional[PriceStream] = existing_ws
