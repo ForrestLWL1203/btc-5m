@@ -28,7 +28,6 @@ from polybot.market.market import find_next_window
 from polybot.core.log_formatter import ConsoleFormatter, JsonFormatter
 from polybot.trading.monitor import monitor_window
 from polybot.market.series import MarketSeries, KNOWN_SERIES
-from polybot.predict.history import WindowHistory
 from polybot.strategies.base import Strategy
 from polybot.trade_config import TradeConfig
 
@@ -268,18 +267,6 @@ Examples:
     # Direction prediction setup
     predictor = dir_cfg.get("predictor")
     fallback_side = dir_cfg.get("fallback_side")
-    history = None
-    if predictor is not None:
-        import time as _time
-        history = WindowHistory.for_timeframe(series.timeframe)
-        log.info("Backfilling %s history (%d windows)...", series.timeframe, history._buf.maxlen)
-        history.backfill(
-            slug_prefix=series.slug_prefix,
-            slug_step=series.slug_step,
-            count=history._buf.maxlen,
-            current_epoch=int(_time.time()),
-        )
-        log.info("History backfilled: %d windows", len(history))
     if fallback_side and predictor is None:
         trade_config.side = fallback_side
 
@@ -319,7 +306,7 @@ Examples:
             next_win, ws, monitored = await monitor_window(
                 window, dry_run=dry_run, existing_ws=ws,
                 trade_config=trade_config, strategy=strategy, series=series,
-                predictor=predictor, history=history,
+                predictor=predictor,
             )
             if monitored:
                 completed += 1
@@ -333,7 +320,7 @@ Examples:
                 next_win, ws, monitored = await monitor_window(
                     next_win, dry_run=dry_run, preopened=True, existing_ws=ws,
                     trade_config=trade_config, strategy=strategy, series=series,
-                    predictor=predictor, history=history,
+                    predictor=predictor,
                 )
                 if monitored:
                     completed += 1
@@ -347,7 +334,7 @@ Examples:
                     next_win, ws, monitored = await monitor_window(
                         next_win, dry_run=dry_run, preopened=True, existing_ws=ws,
                         trade_config=trade_config, strategy=strategy, series=series,
-                        predictor=predictor, history=history,
+                        predictor=predictor,
                     )
                     if monitored:
                         completed += 1
