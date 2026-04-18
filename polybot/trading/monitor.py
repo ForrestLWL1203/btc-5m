@@ -23,9 +23,8 @@ from polybot.market.market import (
 from polybot.market.series import MarketSeries
 from polybot.core.state import MonitorState
 from polybot.market.stream import PriceStream, PriceUpdate
-from polybot.predict.momentum import DirectionPredictor
 from polybot.strategies.base import Strategy
-from polybot.strategies.immediate import ImmediateStrategy
+from polybot.strategies.immediate import FixedSideStrategy
 from polybot.trade_config import ExitReason, TradeConfig
 from .trading import buy_token, cancel_all_open_orders, sell_token
 
@@ -165,9 +164,9 @@ async def _cleanup_residual(
         })
 
 
-def _side_token(window: MarketWindow, trade_config: TradeConfig) -> tuple[str, str]:
+def _side_token(window: MarketWindow, side: str) -> tuple[str, str]:
     """Return (buy_token, price_token) based on trade side."""
-    if trade_config.side == "down":
+    if side == "down":
         return window.down_token, window.down_token
     return window.up_token, window.up_token
 
@@ -180,11 +179,12 @@ async def _monitor_single_window(
     trade_config: TradeConfig,
     strategy: Optional[Strategy] = None,
     series: Optional[MarketSeries] = None,
+    side: str = "up",
 ) -> Optional[MarketWindow]:
     """
     Monitor a single window until expiry or exit_triggered, then clean up.
     """
-    buy_token_id, _ = _side_token(window, trade_config)
+    buy_token_id, _ = _side_token(window, side)
     buffer = series.window_end_buffer if series else config.WINDOW_END_BUFFER
     effective_end = window.end_epoch - buffer
     fetch_task = None
@@ -213,7 +213,7 @@ async def _monitor_single_window(
                     )
             # Always pre-fetch next window on expiry to avoid stale fallback
             fetch_task = asyncio.create_task(
-                asyncio.to_thread(_find_next_window_after, window.end_epoch)
+                asyncio.to_thread(_find_next_window_after, window.end_epoch, series)
             )
             break
 
@@ -229,7 +229,7 @@ async def _monitor_single_window(
             })
             # Pre-fetch next window while we sleep
             fetch_task = asyncio.create_task(
-                asyncio.to_thread(_find_next_window_after, window.end_epoch)
+                asyncio.to_thread(_find_next_window_after, window.end_epoch, series)
             )
             await cancel_all_open_orders()
             if not dry_run:
@@ -255,7 +255,7 @@ async def _monitor_single_window(
             })
             # Pre-fetch next window while we sleep
             fetch_task = asyncio.create_task(
-                asyncio.to_thread(_find_next_window_after, window.end_epoch)
+                asyncio.to_thread(_find_next_window_after, window.end_epoch, series)
             )
             await asyncio.sleep(remaining)
             try:
@@ -278,18 +278,19 @@ async def _monitor_single_window(
     return None
 
 
-def _find_next_window_after(after_epoch: int) -> Optional[MarketWindow]:
+def _find_next_window_after(after_epoch: int, series: Optional[MarketSeries] = None) -> Optional[MarketWindow]:
     """Find the next window after the given epoch (delegates to market.find_window_after)."""
-    return find_window_after(after_epoch)
+    return find_window_after(after_epoch, series)
 
 
 def _find_and_preopen_next_window(
     current_window: MarketWindow,
+    series: Optional[MarketSeries] = None,
 ) -> Optional[MarketWindow]:
     """
     Find the window that starts after current_window.end_epoch and return it.
     """
-    next_win = _find_next_window_after(current_window.end_epoch)
+    next_win = _find_next_window_after(current_window.end_epoch, series)
     if next_win is None:
         log_event(log, logging.WARNING, WINDOW, {
             "action": "NOT_FOUND",
@@ -319,7 +320,6 @@ async def monitor_window(
     trade_config: Optional[TradeConfig] = None,
     strategy: Optional[Strategy] = None,
     series: Optional[MarketSeries] = None,
-    predictor: Optional[DirectionPredictor] = None,
 ) -> tuple[Optional[MarketWindow], Optional[PriceStream], bool]:
     """
     Monitor a trading window using WebSocket real-time price updates.
@@ -329,8 +329,8 @@ async def monitor_window(
         dry_run: If True, log actions but don't place orders.
         preopened: If True, skip the stale check.
         existing_ws: Reuse this WS connection instead of creating a new one.
-        trade_config: Common trading parameters (TP/SL, amount, side, etc).
-        strategy: Buy decision logic (only should_buy).
+        trade_config: Common trading parameters (TP/SL, amount, etc).
+        strategy: Strategy handling direction + buy decision.
         series: Market series definition (uses config defaults if None).
 
     Returns (next_window, ws, monitored) — monitored is False if window was skipped.
@@ -339,35 +339,29 @@ async def monitor_window(
     if trade_config is None:
         trade_config = TradeConfig()
     if strategy is None:
-        strategy = ImmediateStrategy()
+        strategy = FixedSideStrategy()
 
-    # Direction prediction — runs once per window
-    # Must complete before any buy. If predictor can't determine direction and
-    # no fallback_side is configured, skip this window entirely.
-    if predictor is not None:
+    # Resolve direction — strategy.get_side() runs once per window
+    candles = None
+    if series is not None:
         from polybot.predict.kline import BinanceKlineFetcher
-        candles = []
-        if series is not None:
-            fetcher = BinanceKlineFetcher(series)
-            candles = await asyncio.to_thread(fetcher.fetch)
-        direction = predictor.predict(candles)
-        if direction is not None:
-            trade_config.side = direction
-            log_event(log, logging.INFO, SIGNAL, {
-                "action": "DIRECTION_PREDICTED",
-                "side": direction.upper(),
-                "window": window.short_label,
-                "candles": len(candles),
-            })
-        else:
-            log_event(log, logging.WARNING, SIGNAL, {
-                "action": "DIRECTION_SKIP",
-                "window": window.short_label,
-                "candles": len(candles),
-                "reason": "direction unclear, no fallback_side",
-            })
-            next_win = _find_and_preopen_next_window(window)
-            return next_win, existing_ws, False
+        fetcher = BinanceKlineFetcher(series)
+        candles = await asyncio.to_thread(fetcher.fetch)
+    side = strategy.get_side(candles)
+    if side is None:
+        log_event(log, logging.WARNING, SIGNAL, {
+            "action": "DIRECTION_SKIP",
+            "window": window.short_label,
+            "candles": len(candles) if candles else 0,
+            "reason": "strategy returned no side",
+        })
+        next_win = _find_and_preopen_next_window(window, series)
+        return next_win, existing_ws, False
+    log_event(log, logging.INFO, SIGNAL, {
+        "action": "SIDE_RESOLVED",
+        "side": side.upper(),
+        "window": window.short_label,
+    })
 
     state = MonitorState()
     ws: Optional[PriceStream] = existing_ws
@@ -385,14 +379,14 @@ async def monitor_window(
             "elapsed": elapsed_since_start,
             "reason": f"started >{skip_threshold}s ago",
         })
-        next_win = _find_and_preopen_next_window(window)
+        next_win = _find_and_preopen_next_window(window, series)
         return next_win, ws, False
 
-    buy_token_id, price_token_id = _side_token(window, trade_config)
+    buy_token_id, price_token_id = _side_token(window, side)
     token_ids = [window.up_token, window.down_token]
     new_callback = functools.partial(
         _on_price_update, window=window, state=state, dry_run=dry_run,
-        trade_config=trade_config, strategy=strategy,
+        trade_config=trade_config, strategy=strategy, side=side,
     )
 
     if ws is not None:
@@ -425,7 +419,7 @@ async def monitor_window(
     log_event(log, logging.INFO, WINDOW, {
         "action": "STARTED",
         "window": window.short_label,
-        "side": trade_config.side.upper(),
+        "side": side.upper(),
         "buy_token": buy_token_id[:20],
         "price_token": price_token_id[:20],
     })
@@ -450,7 +444,7 @@ async def monitor_window(
                 "window": window.short_label,
             })
             await _handle_opening_price(
-                window, state, buy_token_id, opening_price, dry_run, trade_config, strategy,
+                window, state, buy_token_id, opening_price, dry_run, trade_config, strategy, side,
             )
     else:
         log_event(log, logging.WARNING, SIGNAL, {
@@ -460,7 +454,7 @@ async def monitor_window(
 
     # Monitor until window expires or exit triggered (ws is NOT closed inside)
     next_win = await _monitor_single_window(
-        window, state, ws, dry_run, trade_config, strategy, series,
+        window, state, ws, dry_run, trade_config, strategy, series, side,
     )
 
     if next_win is not None:
@@ -495,6 +489,7 @@ async def _check_sl_tp(
     buy_token_id: str,
     dry_run: bool,
     trade_config: TradeConfig,
+    side: str = "up",
 ) -> bool:
     """
     Check SL/TP thresholds using optimistic/pessimistic price signals.
@@ -528,7 +523,7 @@ async def _check_sl_tp(
         state.tp_count += 1
         log_event(log, logging.WARNING, SIGNAL, {
             "action": "TAKE_PROFIT",
-            "side": trade_config.side.upper(),
+            "side": side.upper(),
             "price": tp_price,
             "threshold": signal.threshold,
             "source": update.source,
@@ -562,9 +557,10 @@ async def _check_sl_tp(
         state.stop_loss_count += 1
         log_event(log, logging.WARNING, SIGNAL, {
             "action": "STOP_LOSS",
-            "side": trade_config.side.upper(),
+            "side": side.upper(),
             "price": sl_price,
             "threshold": signal.threshold,
+            "effective_sl_pct": round(signal.effective_sl_pct, 2),
             "source": update.source,
             "fresh_trade": fresh_trade,
             "reentry": signal.can_reenter,
@@ -602,15 +598,16 @@ async def _on_price_update(
     dry_run: bool,
     trade_config: TradeConfig,
     strategy: Optional[Strategy] = None,
+    side: str = "up",
 ) -> None:
     """
     Called by PriceStream whenever a price update arrives.
     Triggers buy / stop-loss / take-profit immediately on signal.
     """
     if strategy is None:
-        strategy = ImmediateStrategy()
+        strategy = FixedSideStrategy()
 
-    buy_token_id, price_token_id = _side_token(window, trade_config)
+    buy_token_id, price_token_id = _side_token(window, side)
 
     if update.token_id != price_token_id:
         return
@@ -630,7 +627,7 @@ async def _on_price_update(
 
     log.debug(
         "WS price update | %s: %s (source=%s, bid=%s, ask=%s)",
-        trade_config.side.upper(), price, update.source,
+        side.upper(), price, update.source,
         update.best_bid, update.best_ask,
     )
 
@@ -671,16 +668,16 @@ async def _on_price_update(
                 log_event(log, logging.INFO, SIGNAL, {
                     "action": "BUY_SIGNAL",
                     "price": price,
-                    "side": trade_config.side.upper(),
+                    "side": side.upper(),
                     "window": window.short_label,
                 })
                 await _handle_opening_price(
-                    window, state, buy_token_id, price, dry_run, trade_config, strategy,
+                    window, state, buy_token_id, price, dry_run, trade_config, strategy, side,
                 )
             return
 
         # Already holding — check stop-loss / take-profit
-        await _check_sl_tp(update, state, window, buy_token_id, dry_run, trade_config)
+        await _check_sl_tp(update, state, window, buy_token_id, dry_run, trade_config, side)
 
 
 async def _handle_opening_price(
@@ -691,10 +688,11 @@ async def _handle_opening_price(
     dry_run: bool,
     trade_config: TradeConfig,
     strategy: Optional[Strategy] = None,
+    side: str = "up",
 ) -> None:
     """Handle the opening price check and buy decision."""
     if strategy is None:
-        strategy = ImmediateStrategy()
+        strategy = FixedSideStrategy()
 
     if state.bought:
         return
@@ -729,7 +727,7 @@ async def _handle_opening_price(
                 state.entry_price = price
                 log_event(log, logging.INFO, TRADE, {
                     "action": "BUY_FILLED",
-                    "side": trade_config.side.upper(),
+                    "side": side.upper(),
                     "price": price,
                     "amount": trade_config.amount,
                     "shares": state.holding_size,
@@ -750,7 +748,7 @@ async def _handle_opening_price(
                 state.exit_triggered = True
                 log_event(log, logging.WARNING, TRADE, {
                     "action": "BUY_FAILED",
-                    "side": trade_config.side.upper(),
+                    "side": side.upper(),
                     "price": price,
                     "message": result.message,
                     "window": window.short_label,
@@ -761,7 +759,7 @@ async def _handle_opening_price(
             state.entry_price = price
             log_event(log, logging.INFO, TRADE, {
                 "action": "BUY",
-                "side": trade_config.side.upper(),
+                "side": side.upper(),
                 "price": price,
                 "amount": trade_config.amount,
                 "shares": state.holding_size,

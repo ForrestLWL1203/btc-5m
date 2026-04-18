@@ -4,8 +4,8 @@ from pathlib import Path
 from typing import Optional
 
 from polybot.market.series import MarketSeries, KNOWN_SERIES, TIMEFRAME_SECONDS, _default_buffer
-from polybot.predict.momentum import MomentumPredictor
-from polybot.strategies.immediate import ImmediateStrategy
+from polybot.strategies.immediate import FixedSideStrategy
+from polybot.strategies.momentum import MomentumStrategy
 from .trade_config import TradeConfig
 
 try:
@@ -51,27 +51,30 @@ def build_series(cfg: dict) -> MarketSeries:
 
 
 STRATEGY_REGISTRY: dict[str, type] = {
-    "immediate": ImmediateStrategy,
-}
-
-DIRECTION_REGISTRY: dict[str, type] = {
-    "momentum": MomentumPredictor,
+    "immediate": FixedSideStrategy,
+    "momentum": MomentumStrategy,
 }
 
 
-def build_strategy(cfg: dict) -> ImmediateStrategy:
-    """Build Strategy from config dict. Strategy only contains buy decision logic."""
+def build_strategy(cfg: dict, series: Optional[MarketSeries] = None) -> FixedSideStrategy | MomentumStrategy:
+    """Build Strategy from config dict. Strategy handles direction + buy decision."""
     strat_cfg = cfg.get("strategy", {})
     strat_type = strat_cfg.get("type", "immediate")
 
-    cls = STRATEGY_REGISTRY.get(strat_type)
-    if cls is None:
-        raise ValueError(
-            f"Unknown strategy type: {strat_type}. "
-            f"Available: {', '.join(STRATEGY_REGISTRY.keys())}"
-        )
+    if strat_type == "immediate":
+        # Try strategy.side first, fall back to params.side for backward compat
+        side = strat_cfg.get("side") or cfg.get("params", {}).get("side", "up")
+        return FixedSideStrategy(side=side)
 
-    return cls()
+    if strat_type == "momentum":
+        if series is None:
+            raise ValueError("MomentumStrategy requires a market series")
+        return MomentumStrategy(series=series)
+
+    raise ValueError(
+        f"Unknown strategy type: {strat_type}. "
+        f"Available: {', '.join(STRATEGY_REGISTRY.keys())}"
+    )
 
 
 def build_trade_config(cfg: dict) -> TradeConfig:
@@ -83,37 +86,12 @@ def build_trade_config(cfg: dict) -> TradeConfig:
         rounds_val = None
 
     return TradeConfig(
-        side=params.get("side", "up"),
         amount=params.get("amount", 5.0),
         tp_pct=params.get("tp_pct", 0.50),
         sl_pct=params.get("sl_pct", 0.30),
+        tp_price=params.get("tp_price"),
+        sl_price=params.get("sl_price"),
         max_sl_reentry=params.get("max_sl_reentry", 0),
         max_tp_reentry=params.get("max_tp_reentry", 0),
         rounds=int(rounds_val) if rounds_val is not None else None,
     )
-
-
-def build_direction_config(cfg: dict, series: MarketSeries) -> dict:
-    """Build direction prediction config.
-
-    Returns dict with keys:
-        predictor: DirectionPredictor instance or None
-    """
-    dir_cfg = cfg.get("direction")
-    if not dir_cfg:
-        return {"predictor": None}
-
-    dir_type = dir_cfg.get("type", "fixed")
-    fallback = dir_cfg.get("fallback_side")
-
-    if dir_type == "fixed":
-        return {"predictor": None, "fallback_side": fallback}
-
-    cls = DIRECTION_REGISTRY.get(dir_type)
-    if cls is None:
-        raise ValueError(
-            f"Unknown direction type: {dir_type}. "
-            f"Available: {', '.join(DIRECTION_REGISTRY.keys())}"
-        )
-
-    return {"predictor": cls(series)}

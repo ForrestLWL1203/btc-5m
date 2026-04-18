@@ -1,4 +1,4 @@
-"""Tests for polybot.predict.momentum V2 — Binance K-line signals."""
+"""Tests for polybot.predict.momentum V3 — 7 technical indicators."""
 
 import pytest
 from polybot.predict.kline import KlineCandle
@@ -22,7 +22,7 @@ def _candle(close: float, open_val=None, volume=100.0, offset=0) -> KlineCandle:
     )
 
 
-class TestMomentumPredictorV2:
+class TestMomentumPredictorV3:
     def test_predict_up_on_rising_prices(self):
         """Consistently rising prices → predict 'up'."""
         p = MomentumPredictor(_btc_5m())
@@ -47,14 +47,23 @@ class TestMomentumPredictorV2:
     def test_is_direction_predictor_subclass(self):
         assert issubclass(MomentumPredictor, DirectionPredictor)
 
-    def test_timeframe_scaling_5m(self):
+    def test_timeframe_params_5m(self):
         p = MomentumPredictor(_btc_5m())
         assert p.trend_n == 12
         assert p.ema_short == 10
         assert p.ema_long == 30
+        assert p.macd_fast == 12
+        assert p.macd_slow == 26
+        assert p.macd_signal == 9
+        assert p.boll_period == 20
+        assert p.roc_period == 10
 
-    def test_timeframe_scaling_4h(self):
+    def test_timeframe_params_4h(self):
         p = MomentumPredictor(MarketSeries.from_known("btc-updown-4h"))
         assert p.trend_n == 6
         assert p.ema_short == 8
-        assert p.ema_long == 20
+        assert p.macd_fast == 6
+        assert p.macd_slow == 13
+        assert p.macd_signal == 5
+        assert p.boll_period == 12
+        assert p.roc_period == 6

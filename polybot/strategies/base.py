@@ -1,21 +1,27 @@
-"""Strategy protocol — abstract interface for buy decisions.
+"""Strategy protocol — abstract interface for buy + direction decisions.
 
-A Strategy encapsulates only the "when to buy" logic.
-All other trading parameters (amount, TP/SL, re-entry, rounds) live in TradeConfig.
+A Strategy encapsulates both "which side to buy" and "when to buy" logic.
+Common trading parameters (amount, TP/SL, re-entry, rounds) live in TradeConfig.
 
 To add a new strategy:
   1. Create polybot/strategies/your_strategy.py
-  2. Implement the Strategy ABC (just should_buy)
+  2. Implement get_side() and should_buy()
   3. Register it in polybot/config_loader.py STRATEGY_REGISTRY
 """
 
 from abc import ABC, abstractmethod
+from typing import Optional
 
 from polybot.core.state import MonitorState
 
 
 class Strategy(ABC):
-    """Abstract trading strategy — only decides whether to buy."""
+    """Abstract trading strategy — decides direction and whether to buy."""
+
+    @abstractmethod
+    def get_side(self, candles: Optional[list] = None) -> Optional[str]:
+        """Return 'up', 'down', or None (skip window). Called once per window."""
+        ...
 
     @abstractmethod
     def should_buy(self, price: float, state: MonitorState) -> bool:

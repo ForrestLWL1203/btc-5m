@@ -12,8 +12,11 @@ Automated Polymarket trading bot for BTC/ETH Up/Down markets across multiple tim
 # Install dependencies (Python 3.11+ required)
 python3.11 -m pip install -r requirements.txt
 
-# CLI args + dry-run (recommended for testing)
+# CLI — fixed side + dry-run (recommended for testing)
 python3.11 run.py --market btc-updown-5m --side up --amount 1 --tp-pct 0.30 --sl-pct 0.30 --dry
+
+# CLI — momentum auto-prediction
+python3.11 run.py --market btc-updown-5m --strategy momentum --amount 1 --tp-price 0.80 --sl-pct 0.50 --rounds 1
 
 # Live trading (remove --dry)
 python3.11 run.py --market btc-updown-5m --side up --amount 1 --tp-pct 0.30 --sl-pct 0.30 --rounds 1
@@ -30,7 +33,7 @@ python3.11 run.py
 ```
 polybot/                    # Trading package
 ├── __init__.py
-├── config_loader.py        # YAML config loading + strategy/direction registry
+├── config_loader.py        # YAML config loading + strategy registry
 ├── trade_config.py         # TradeConfig dataclass — common params + check_exit()
 ├── core/                   # Core infrastructure
 │   ├── __init__.py
@@ -47,11 +50,14 @@ polybot/                    # Trading package
 ├── predict/                # Auto direction prediction
 │   ├── __init__.py         # Package exports
 │   ├── history.py          # WindowHistory ring buffer + Gamma API backfill
-│   └── momentum.py         # MomentumPredictor — weighted voting signals
-├── strategies/             # Pluggable buy strategies
+│   ├── indicators.py       # 7 technical indicators (EMA, RSI, MACD, Bollinger, ROC, etc.)
+│   ├── kline.py            # KlineCandle dataclass + BinanceKlineFetcher
+│   └── momentum.py         # MomentumPredictor V3 — 7-signal weighted voting
+├── strategies/             # Pluggable trading strategies
 │   ├── __init__.py
-│   ├── base.py             # Strategy ABC (should_buy only)
-│   └── immediate.py        # ImmediateStrategy — buy at first price
+│   ├── base.py             # Strategy ABC (get_side + should_buy)
+│   ├── immediate.py        # FixedSideStrategy — fixed direction, buy at first price
+│   └── momentum.py         # MomentumStrategy — wraps MomentumPredictor
 └── trading/                # Order execution + monitoring
     ├── __init__.py
     ├── monitor.py          # Async monitoring loop (WS event-driven)
@@ -74,22 +80,24 @@ requirements.txt            # Python dependencies
 - **`market/series.py`**: `MarketSeries` frozen dataclass — defines a market series (asset, timeframe, slug params, window buffer). `KNOWN_SERIES` registry for known BTC/ETH markets.
 - **`market/stream.py`**: `PriceStream` class — WebSocket connection to `wss://ws-subscriptions-clob.polymarket.com/ws/market`. Subscribes to token IDs, emits `PriceUpdate` via callback. Handles `PING` every 10s.
 - **`trading/trading.py`**: FOK market orders with **10× retry at 100ms** (1 second total). Falls back to GTD limit at midpoint if FOK fails. Uses `PartialCreateOrderOptions` to skip SDK overhead.
-- **`trading/monitor.py`**: Async event-driven loop. `PriceStream` callbacks immediately trigger buy / stop-loss / take-profit. Uses optimistic/pessimistic price aggregation (TP=max of midpoint/trade/ask, SL=min of midpoint/trade/bid). Deferred signal mechanism for race conditions. Sell with balance-refreshing retry (`_sell_with_retry`) and residual cleanup (`_cleanup_residual`). Prefetches order params during WS pre-connect. Supports optional `DirectionPredictor` — called once per window to auto-set `trade_config.side`.
-- **`strategies/base.py`**: `Strategy` ABC with single method `should_buy(price, state) -> bool`. Buy logic only.
-- **`strategies/immediate.py`**: `ImmediateStrategy` — `should_buy()` always returns `True`. Buys immediately at first price.
-- **`trade_config.py`**: `TradeConfig` dataclass — common trading params (side, amount, tp_pct, sl_pct, max_*_reentry, rounds) shared across all strategies. Contains `check_exit()` for TP/SL logic.
-- **`predict/history.py`**: `WindowRecord` dataclass (window price data) + `WindowHistory` ring buffer with Gamma API concurrent backfill. Capacity per timeframe: 5m=100, 15m=30, 4h=6.
-- **`predict/momentum.py`**: `DirectionPredictor` ABC + `MomentumPredictor` V1 — 3 weighted signals (price momentum 50%, Up/Down price offset 30%, streak reversal 20%). Returns "up"/"down"/None per window.
-- **`config_loader.py`**: YAML config loading, `STRATEGY_REGISTRY`, `DIRECTION_REGISTRY`, `build_series()`, `build_strategy()`, `build_trade_config()`, and `build_direction_config()` factory functions.
+- **`trading/monitor.py`**: Async event-driven loop. `PriceStream` callbacks immediately trigger buy / stop-loss / take-profit. Uses optimistic/pessimistic price aggregation (TP=max of midpoint/trade/ask, SL=min of midpoint/trade/bid). Deferred signal mechanism for race conditions. Sell with balance-refreshing retry (`_sell_with_retry`) and residual cleanup (`_cleanup_residual`). Prefetches order params during WS pre-connect. Side resolved via `strategy.get_side(candles)` once per window.
+- **`strategies/base.py`**: `Strategy` ABC with `get_side(candles) -> Optional[str]` and `should_buy(price, state) -> bool`. Direction + buy logic unified.
+- **`strategies/immediate.py`**: `FixedSideStrategy(side)` — returns fixed direction, buys immediately. `ImmediateStrategy` alias for backward compat.
+- **`strategies/momentum.py`**: `MomentumStrategy` — wraps `MomentumPredictor`, returns predicted direction from k-line data.
+- **`trade_config.py`**: `TradeConfig` dataclass — common trading params (amount, tp_pct/sl_pct OR tp_price/sl_price, max_*_reentry, rounds). Supports both percentage and absolute price TP/SL. Absolute takes priority when both set. Progressive SL tightening on re-entry (10% per SL, floor at 5% of entry). Contains `check_exit()` for TP/SL logic.
+- **`predict/indicators.py`**: 7 technical indicator functions — `ema`, `rsi`, `trend_direction`, `volume_trend`, `macd`, `bollinger_pctb`, `price_roc`. Pure functions, neutral returns on insufficient data.
+- **`predict/momentum.py`**: `MomentumPredictor` V3 — 7-signal weighted voting (trend 20%, EMA 15%, RSI 10%, volume 5%, MACD 20%, Bollinger %B 15%, ROC 15%). Timeframe-adaptive parameters. Returns "up"/"down"/None per window.
+- **`config_loader.py`**: YAML config loading, `STRATEGY_REGISTRY` (immediate/momentum), `build_series()`, `build_strategy()`, `build_trade_config()` factory functions.
 
 ## Key TradeConfig Parameters
 
 | Parameter | Default | Description |
 |---|---|---|
-| `side` | up | Which token to buy (up/down) |
 | `amount` | 5.0 | USD per trade |
 | `tp_pct` | 0.50 | +50% from entry price → sell at entry * 1.50 |
 | `sl_pct` | 0.30 | -30% from entry price → sell at entry * 0.70 |
+| `tp_price` | None | Absolute price TP (overrides tp_pct if both set) |
+| `sl_price` | None | Absolute price SL (overrides sl_pct if both set) |
 | `max_sl_reentry` | 0 | Max re-buys after stop-loss (0 = disabled) |
 | `max_tp_reentry` | 0 | Max re-buys after take-profit (0 = disabled) |
 | `rounds` | None | Number of complete windows to run (None = infinite) |

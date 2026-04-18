@@ -4,10 +4,10 @@ import pytest
 import yaml
 from pathlib import Path
 
-from polybot.config_loader import load_config, build_series, build_strategy, build_trade_config, STRATEGY_REGISTRY, build_direction_config, DIRECTION_REGISTRY
+from polybot.config_loader import load_config, build_series, build_strategy, build_trade_config, STRATEGY_REGISTRY
 from polybot.market.series import MarketSeries
-from polybot.predict.momentum import MomentumPredictor
-from polybot.strategies.immediate import ImmediateStrategy
+from polybot.strategies.immediate import FixedSideStrategy
+from polybot.strategies.momentum import MomentumStrategy
 from polybot.trade_config import TradeConfig
 
 
@@ -80,20 +80,46 @@ class TestBuildStrategy:
     def test_default_immediate(self):
         cfg = {"strategy": {"type": "immediate"}}
         strat = build_strategy(cfg)
-        assert isinstance(strat, ImmediateStrategy)
+        assert isinstance(strat, FixedSideStrategy)
+        assert strat.get_side() == "up"
+
+    def test_immediate_with_side(self):
+        cfg = {"strategy": {"type": "immediate", "side": "down"}}
+        strat = build_strategy(cfg)
+        assert isinstance(strat, FixedSideStrategy)
+        assert strat.get_side() == "down"
+
+    def test_immediate_falls_back_to_params_side(self):
+        """Backward compat: strategy.side absent, falls back to params.side."""
+        cfg = {"params": {"side": "down"}}
+        strat = build_strategy(cfg)
+        assert isinstance(strat, FixedSideStrategy)
+        assert strat.get_side() == "down"
+
+    def test_momentum_creates_momentum_strategy(self):
+        series = MarketSeries.from_known("btc-updown-5m")
+        cfg = {"strategy": {"type": "momentum"}}
+        strat = build_strategy(cfg, series)
+        assert isinstance(strat, MomentumStrategy)
+
+    def test_momentum_without_series_raises(self):
+        cfg = {"strategy": {"type": "momentum"}}
+        with pytest.raises(ValueError, match="requires a market series"):
+            build_strategy(cfg, series=None)
 
     def test_empty_strategy_uses_defaults(self):
         strat = build_strategy({})
-        assert isinstance(strat, ImmediateStrategy)
+        assert isinstance(strat, FixedSideStrategy)
+        assert strat.get_side() == "up"
 
     def test_unknown_strategy_raises(self):
         cfg = {"strategy": {"type": "nonexistent"}}
         with pytest.raises(ValueError, match="Unknown strategy type"):
             build_strategy(cfg)
 
-    def test_registry_has_immediate(self):
+    def test_registry_has_both(self):
         assert "immediate" in STRATEGY_REGISTRY
-        assert STRATEGY_REGISTRY["immediate"] is ImmediateStrategy
+        assert "momentum" in STRATEGY_REGISTRY
 
 
 # ── build_trade_config ───────────────────────────────────────────────────────
@@ -102,7 +128,6 @@ class TestBuildStrategy:
 class TestBuildTradeConfig:
     def test_defaults(self):
         tc = build_trade_config({})
-        assert tc.side == "up"
         assert tc.amount == 5.0
         assert tc.tp_pct == 0.50
         assert tc.sl_pct == 0.30
@@ -113,7 +138,6 @@ class TestBuildTradeConfig:
     def test_custom_params(self):
         tc = build_trade_config({
             "params": {
-                "side": "down",
                 "amount": 10.0,
                 "tp_pct": 0.60,
                 "sl_pct": 0.40,
@@ -122,7 +146,6 @@ class TestBuildTradeConfig:
             },
             "rounds": 3,
         })
-        assert tc.side == "down"
         assert tc.amount == 10.0
         assert tc.tp_pct == 0.60
         assert tc.sl_pct == 0.40
@@ -147,9 +170,8 @@ class TestYamlRoundTrip:
         cfg_file = tmp_path / "full.yaml"
         cfg_file.write_text(yaml.dump({
             "market": {"asset": "btc", "timeframe": "5m"},
-            "strategy": {"type": "immediate"},
+            "strategy": {"type": "immediate", "side": "down"},
             "params": {
-                "side": "down",
                 "amount": 3.0,
                 "tp_pct": 0.40,
                 "sl_pct": 0.25,
@@ -160,42 +182,14 @@ class TestYamlRoundTrip:
         }))
         cfg = load_config(str(cfg_file))
         series = build_series(cfg)
-        strat = build_strategy(cfg)
+        strat = build_strategy(cfg, series)
         tc = build_trade_config(cfg)
 
         assert series.asset == "btc"
         assert series.timeframe == "5m"
-        assert isinstance(strat, ImmediateStrategy)
-        assert tc.side == "down"
+        assert isinstance(strat, FixedSideStrategy)
+        assert strat.get_side() == "down"
         assert tc.amount == 3.0
         assert tc.max_sl_reentry == 1
         assert tc.max_tp_reentry == 0
         assert tc.rounds == 2
-
-
-class TestBuildDirectionConfig:
-    def test_momentum_type_creates_predictor(self):
-        cfg = {
-            "direction": {"type": "momentum"},
-            "market": {"asset": "btc", "timeframe": "5m"},
-        }
-        series = build_series(cfg)
-        result = build_direction_config(cfg, series)
-        assert result["predictor"] is not None
-        assert isinstance(result["predictor"], MomentumPredictor)
-
-    def test_fixed_type_no_predictor(self):
-        cfg = {
-            "direction": {"type": "fixed", "fallback_side": "down"},
-        }
-        result = build_direction_config(cfg, MarketSeries.from_known("btc-updown-5m"))
-        assert result["predictor"] is None
-        assert result["fallback_side"] == "down"
-
-    def test_no_direction_block_returns_none(self):
-        cfg = {}
-        result = build_direction_config(cfg, MarketSeries.from_known("btc-updown-5m"))
-        assert result["predictor"] is None
-
-    def test_registry_has_momentum(self):
-        assert "momentum" in DIRECTION_REGISTRY

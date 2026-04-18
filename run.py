@@ -23,7 +23,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 load_dotenv()
 
-from polybot.config_loader import load_config, build_series, build_strategy, build_trade_config, build_direction_config
+from polybot.config_loader import load_config, build_series, build_strategy, build_trade_config
 from polybot.market.market import find_next_window
 from polybot.core.log_formatter import ConsoleFormatter, JsonFormatter
 from polybot.trading.monitor import monitor_window
@@ -164,15 +164,22 @@ def _interactive_config() -> dict:
 
 def _build_trade_config_from_cli(cfg: dict, rounds: int = None) -> TradeConfig:
     """Build TradeConfig from CLI/interactive config."""
-    return TradeConfig(
-        side=cfg["side"],
-        amount=cfg["amount"],
-        tp_pct=cfg["tp_pct"],
-        sl_pct=cfg["sl_pct"],
-        max_sl_reentry=cfg["max_reentry"],
-        max_tp_reentry=cfg["max_tp_reentry"],
-        rounds=rounds,
-    )
+    kwargs = {
+        "amount": cfg["amount"],
+        "max_sl_reentry": cfg.get("max_sl_reentry", cfg.get("max_reentry", 0)),
+        "max_tp_reentry": cfg.get("max_tp_reentry", cfg.get("max_tp_reentry", 0)),
+    }
+    if "tp_pct" in cfg:
+        kwargs["tp_pct"] = cfg["tp_pct"]
+    if "sl_pct" in cfg:
+        kwargs["sl_pct"] = cfg["sl_pct"]
+    if "tp_price" in cfg:
+        kwargs["tp_price"] = cfg["tp_price"]
+    if "sl_price" in cfg:
+        kwargs["sl_price"] = cfg["sl_price"]
+    if rounds is not None:
+        kwargs["rounds"] = rounds
+    return TradeConfig(**kwargs)
 
 
 async def main() -> None:
@@ -212,12 +219,24 @@ Examples:
         help="Stop-loss -%% from entry price (e.g. 0.30 = -30%%)"
     )
     parser.add_argument(
+        "--tp-price", type=float,
+        help="Take-profit at absolute price (e.g. 0.80 = sell at $0.80)"
+    )
+    parser.add_argument(
+        "--sl-price", type=float,
+        help="Stop-loss at absolute price (e.g. 0.35 = sell at $0.35)"
+    )
+    parser.add_argument(
         "--max-reentry", type=int,
         help="Max re-entry buys after stop-loss (0=disabled)"
     )
     parser.add_argument(
         "--max-tp-reentry", type=int,
         help="Max re-entry buys after take-profit (0=disabled)"
+    )
+    parser.add_argument(
+        "--strategy", choices=["immediate", "momentum"],
+        help="Trading strategy: immediate (fixed side) or momentum (auto-predict direction)"
     )
     parser.add_argument(
         "--dry", action="store_true",
@@ -234,50 +253,71 @@ Examples:
     if args.config:
         # YAML config mode — all settings from file
         yaml_cfg = load_config(args.config)
-        trade_config = build_trade_config(yaml_cfg)
-        strategy = build_strategy(yaml_cfg)
         series = build_series(yaml_cfg)
-        dir_cfg = build_direction_config(yaml_cfg, series)
+        strategy = build_strategy(yaml_cfg, series)
+        trade_config = build_trade_config(yaml_cfg)
     elif any(getattr(args, field) is not None
-             for field in ["side", "amount", "tp_pct", "sl_pct",
-                           "max_reentry", "max_tp_reentry"]):
-        # CLI args mode
-        cfg = {
-            "side": args.side or "up",
+             for field in ["strategy", "market", "side", "amount",
+                           "tp_pct", "sl_pct", "tp_price", "sl_price",
+                           "max_reentry", "max_tp_reentry", "rounds"]):
+        # CLI args mode — any trading-related flag triggers this
+        series = MarketSeries.from_known(args.market or "btc-updown-5m")
+        strategy_type = args.strategy or "immediate"
+        side = args.side or "up"
+        params = {
             "amount": args.amount or 5.0,
-            "tp_pct": args.tp_pct or 0.50,
-            "sl_pct": args.sl_pct or 0.30,
-            "max_reentry": args.max_reentry if args.max_reentry is not None else 0,
+            "max_sl_reentry": args.max_reentry if args.max_reentry is not None else 0,
             "max_tp_reentry": args.max_tp_reentry if args.max_tp_reentry is not None else 0,
         }
-        trade_config = _build_trade_config_from_cli(cfg, rounds=args.rounds)
-        strategy = build_strategy({})
-        series = MarketSeries.from_known(args.market or "btc-updown-5m")
-        dir_cfg = {"predictor": None, "fallback_side": None}
+        if args.tp_price is not None:
+            params["tp_price"] = args.tp_price
+        else:
+            params["tp_pct"] = args.tp_pct or 0.50
+        if args.sl_price is not None:
+            params["sl_price"] = args.sl_price
+        else:
+            params["sl_pct"] = args.sl_pct or 0.30
+        cfg = {
+            "strategy": {"type": strategy_type, "side": side},
+            "params": params,
+        }
+        strategy = build_strategy(cfg, series)
+        trade_config = _build_trade_config_from_cli(cfg["params"], rounds=args.rounds)
     else:
         # Interactive mode
-        cfg = _interactive_config()
-        trade_config = _build_trade_config_from_cli(cfg, rounds=args.rounds)
-        strategy = build_strategy({})
+        icfg = _interactive_config()
         series = MarketSeries.from_known(args.market or "btc-updown-5m")
-        dir_cfg = {"predictor": None, "fallback_side": None}
+        cfg = {
+            "strategy": {"type": "immediate", "side": icfg["side"]},
+            "params": {
+                "amount": icfg["amount"],
+                "tp_pct": icfg["tp_pct"],
+                "sl_pct": icfg["sl_pct"],
+                "max_sl_reentry": icfg["max_reentry"],
+                "max_tp_reentry": icfg["max_tp_reentry"],
+            },
+        }
+        strategy = build_strategy(cfg, series)
+        trade_config = _build_trade_config_from_cli(icfg, rounds=args.rounds)
 
     dry_run = args.dry
-
-    # Direction prediction setup
-    predictor = dir_cfg.get("predictor")
 
     # Set up file logging with market-specific names
     _setup_file_logging(series.slug_prefix)
 
+    # Get display side from strategy for logging
+    display_side = strategy.get_side() or "up"
+
     log.info("=== %s %s Up/Down Trader Started ===", series.asset.upper(), series.timeframe)
+    tp_desc = f"${trade_config.tp_price:.2f}" if trade_config.tp_price else f"+{trade_config.tp_pct * 100:.0f}%%"
+    sl_desc = f"${trade_config.sl_price:.2f}" if trade_config.sl_price else f"-{trade_config.sl_pct * 100:.0f}%%"
     log.info(
-        "Strategy: %s | Side: %s | Amount: $%.1f | TP: +%.0f%% | SL: -%.0f%%",
+        "Strategy: %s | Side: %s | Amount: $%.1f | TP: %s | SL: %s",
         type(strategy).__name__,
-        trade_config.side.upper(),
+        display_side.upper(),
         trade_config.amount,
-        trade_config.tp_pct * 100,
-        trade_config.sl_pct * 100,
+        tp_desc,
+        sl_desc,
     )
     if trade_config.rounds is not None:
         log.info("Rounds: %d", trade_config.rounds)
@@ -290,7 +330,7 @@ Examples:
     completed = 0
     try:
         while True:
-            window = find_next_window()
+            window = find_next_window(series)
 
             if window is None:
                 log.warning("No window found, retrying in 10s...")
@@ -303,7 +343,6 @@ Examples:
             next_win, ws, monitored = await monitor_window(
                 window, dry_run=dry_run, existing_ws=ws,
                 trade_config=trade_config, strategy=strategy, series=series,
-                predictor=predictor,
             )
             if monitored:
                 completed += 1
@@ -317,7 +356,6 @@ Examples:
                 next_win, ws, monitored = await monitor_window(
                     next_win, dry_run=dry_run, preopened=True, existing_ws=ws,
                     trade_config=trade_config, strategy=strategy, series=series,
-                    predictor=predictor,
                 )
                 if monitored:
                     completed += 1
@@ -331,7 +369,6 @@ Examples:
                     next_win, ws, monitored = await monitor_window(
                         next_win, dry_run=dry_run, preopened=True, existing_ws=ws,
                         trade_config=trade_config, strategy=strategy, series=series,
-                        predictor=predictor,
                     )
                     if monitored:
                         completed += 1

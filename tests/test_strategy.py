@@ -1,9 +1,9 @@
-"""Tests for TradeConfig (check_exit) and ImmediateStrategy (should_buy)."""
+"""Tests for TradeConfig (check_exit) and FixedSideStrategy (get_side + should_buy)."""
 
 import pytest
 
 from polybot.core.state import MonitorState
-from polybot.strategies.immediate import ImmediateStrategy
+from polybot.strategies.immediate import FixedSideStrategy, ImmediateStrategy
 from polybot.trade_config import ExitReason, TradeConfig
 
 
@@ -15,17 +15,44 @@ def _make_state(entry_price: float = 0.0, **kwargs) -> MonitorState:
     return state
 
 
-# ─── ImmediateStrategy ─────────────────────────────────────────────────────
+# ─── FixedSideStrategy ─────────────────────────────────────────────────────
 
 def test_should_buy_always_true():
     """should_buy returns True for any price."""
-    s = ImmediateStrategy()
+    s = FixedSideStrategy()
     state = _make_state()
     assert s.should_buy(0.50, state) is True
     assert s.should_buy(0.30, state) is True
     assert s.should_buy(0.70, state) is True
     assert s.should_buy(0.01, state) is True
     assert s.should_buy(0.99, state) is True
+
+
+def test_get_side_returns_configured():
+    """get_side returns the configured side."""
+    s_up = FixedSideStrategy(side="up")
+    assert s_up.get_side() == "up"
+    s_down = FixedSideStrategy(side="down")
+    assert s_down.get_side() == "down"
+
+
+def test_get_side_ignores_candles():
+    """FixedSideStrategy ignores candle data."""
+    s = FixedSideStrategy(side="up")
+    assert s.get_side(candles=[1, 2, 3]) == "up"
+
+
+def test_default_side_is_up():
+    """Default side is 'up'."""
+    s = FixedSideStrategy()
+    assert s.get_side() == "up"
+
+
+def test_backward_compat_alias():
+    """ImmediateStrategy is an alias for FixedSideStrategy."""
+    assert ImmediateStrategy is FixedSideStrategy
+    s = ImmediateStrategy(side="down")
+    assert s.get_side() == "down"
 
 
 # ─── TradeConfig.check_exit — TP ────────────────────────────────────────────
@@ -167,10 +194,11 @@ def test_default_tp_sl():
 def test_default_properties():
     """Default TradeConfig has expected property values."""
     tc = TradeConfig()
-    assert tc.side == "up"
     assert tc.amount == 5.0
     assert tc.tp_pct == 0.50
     assert tc.sl_pct == 0.30
+    assert tc.tp_price is None
+    assert tc.sl_price is None
     assert tc.max_sl_reentry == 0
     assert tc.max_tp_reentry == 0
     assert tc.rounds is None

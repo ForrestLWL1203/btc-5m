@@ -11,11 +11,11 @@ pip3.11 install -r requirements.txt
 # Dry run（模拟，不下单）
 python3.11 run.py --market btc-updown-5m --side up --amount 1 --tp-pct 0.30 --sl-pct 0.30 --dry
 
-# 实盘交易（去掉 --dry）
-python3.11 run.py --market btc-updown-5m --side up --amount 1 --tp-pct 0.30 --sl-pct 0.30
-
-# 指定轮数（运行 1 轮后自动停止）
+# 实盘交易 — 固定方向
 python3.11 run.py --market btc-updown-5m --side up --amount 1 --tp-pct 0.30 --sl-pct 0.30 --rounds 1
+
+# 实盘交易 — 动量自动预测方向
+python3.11 run.py --market btc-updown-5m --strategy momentum --amount 1 --tp-price 0.80 --sl-pct 0.50 --rounds 1
 
 # YAML 配置模式
 python3.11 run.py --config strategy.yaml --dry
@@ -26,30 +26,35 @@ python3.11 run.py --dry
 
 ## 策略说明
 
-### 自动方向预测（可选）
+### 策略类型
 
-启用后每个窗口自动判断买入方向（Up/Down），无需手动指定 `--side`。
+| 策略 | `--strategy` | 说明 |
+|---|---|---|
+| FixedSideStrategy | `immediate`（默认） | 固定方向，窗口开即买 |
+| MomentumStrategy | `momentum` | 自动预测方向（7 指标加权投票） |
 
-**启用方式**：YAML 配置中添加 `direction` 块：
-```yaml
-direction:
-  type: momentum          # 自动预测
-  fallback_side: up       # 历史数据不足时的默认方向
-```
+### MomentumStrategy — 自动方向预测
 
-**预测逻辑（MomentumPredictor V1）**：
+通过 Binance K线数据 + 7 个技术指标加权投票预测每窗口的买入方向。
+
+**7 信号加权（MomentumPredictor V3）**：
 
 | 信号 | 权重 | 说明 |
 |---|---|---|
-| 价格动量 | 50% | 最近 3 窗口 Up token 收盘价趋势 |
-| Up/Down 价差偏移 | 30% | Up token 价格偏离 0.50 的方向 |
-| 连续结果反转 | 20% | 连续同方向结果 → 预测反转 |
+| 趋势方向 | 20% | 最近 N 根 K 线涨跌比例 |
+| EMA 交叉 | 15% | 短期/长期 EMA 差值 |
+| RSI | 10% | 相对强弱指标（<40 超卖，>60 超买） |
+| 成交量确认 | 5% | 量价配合 |
+| MACD 直方图 | 20% | 动量 + 趋势方向 |
+| 布林 %B | 15% | 价格在布林带中的位置 |
+| 价格 ROC | 15% | N 周期价格变化率 |
 
-- 启动时自动从 Gamma API 回填历史数据（5m=100 窗口，15m=30，4h=6）
-- 历史不足 5 窗口时使用 `fallback_side`，未配置则跳过该窗口
-- 不配置 `direction` 块则行为与之前完全一致（手动 `--side`）
+- 使用 Binance K线数据（支持 5m/15m/4h）
+- 数据不足 15 根 K 线时跳过该窗口
+- CLI 启用：`--strategy momentum`
+- YAML 启用：`strategy.type: momentum`
 
-### ImmediateStrategy（默认）
+### FixedSideStrategy（默认）
 
 窗口开启后立即以首个价格买入，不做价格区间判断。买入后持续监控止盈/止损。
 
@@ -66,12 +71,15 @@ direction:
 
 ### 止盈 (TP) / 止损 (SL)
 
-基于买入价格的百分比计算阈值：
+支持**百分比**和**绝对价格**两种模式，可自由组合：
 
-| 方向 | 阈值计算 | 示例（入场 50¢） |
-|---|---|---|
-| **止盈** | `entry_price × (1 + tp_pct)` | tp_pct=0.30 → 65¢ 以上卖出 |
-| **止损** | `entry_price × (1 - sl_pct)` | sl_pct=0.30 → 35¢ 以下卖出 |
+| 模式 | 参数 | 阈值计算 | 示例 |
+|---|---|---|---|
+| 百分比 | `tp_pct` / `sl_pct` | `entry × (1 ± pct)` | tp_pct=0.30 → 入场 50¢ 时 65¢ 卖出 |
+| 绝对价格 | `tp_price` / `sl_price` | 固定价格 | tp_price=0.80 → 到 80¢ 即卖出 |
+
+- 两种模式可混合使用（如百分比止盈 + 绝对价格止损）
+- 同时设置百分比和绝对价格时，**绝对价格优先**
 
 价格判断使用**乐观/悲观聚合**：
 - 止盈取 `max(midpoint, last_trade_price, best_ask)` — 任一信号触发即卖出
@@ -96,23 +104,30 @@ direction:
 ### 方式一：命令行参数（推荐）
 
 ```bash
-# 买涨，BTC 5分钟市场
+# 固定方向 — 买涨，BTC 5分钟市场
 python3.11 run.py \
   --market btc-updown-5m \
   --side up \
   --amount 1 \
   --tp-pct 0.30 \
   --sl-pct 0.30 \
-  --max-reentry 0 \
-  --max-tp-reentry 0 \
   --rounds 1
 
-# 买跌，ETH 5分钟市场
+# 自动预测方向 — 动量策略
+python3.11 run.py \
+  --market btc-updown-5m \
+  --strategy momentum \
+  --amount 1 \
+  --tp-price 0.80 \
+  --sl-pct 0.50 \
+  --rounds 1
+
+# 绝对价格止盈 + 百分比止损
 python3.11 run.py \
   --market eth-updown-5m \
   --side down \
   --amount 1 \
-  --tp-pct 0.30 \
+  --tp-price 0.80 \
   --sl-pct 0.30
 ```
 
@@ -132,17 +147,15 @@ market:
   timeframe: 5m           # 5m, 15m, 4h
 
 strategy:
-  type: immediate         # 立即执行策略
-
-direction:
-  type: momentum          # 自动方向预测（可选，省略则用手动 side）
-  fallback_side: up       # 历史不足时的默认方向
+  type: immediate         # immediate（固定方向）或 momentum（自动预测）
+  side: up                # immediate 策略的固定方向
 
 params:
-  side: up                # up 或 down（direction: momentum 时被覆盖）
   amount: 1.0             # 每笔交易金额 (USD)
-  tp_pct: 0.30            # 止盈 +30%
-  sl_pct: 0.30            # 止损 -30%
+  tp_pct: 0.30            # 止盈 +30%（与 tp_price 二选一，绝对优先）
+  sl_pct: 0.30            # 止损 -30%（与 sl_price 二选一，绝对优先）
+  tp_price: null          # 绝对价格止盈（如 0.80 = 80¢）
+  sl_price: null          # 绝对价格止损
   max_sl_reentry: 0       # 止损后不重入
   max_tp_reentry: 0       # 止盈后不重入
 
@@ -163,10 +176,13 @@ python3.11 run.py --dry
 |---|---|---|
 | `--config` | — | YAML 配置文件路径（覆盖其他参数） |
 | `--market` | btc-updown-5m | 市场预设（见支持市场表） |
-| `--side` | up | 交易方向：`up`（看涨）或 `down`（看跌） |
+| `--strategy` | immediate | 策略：`immediate`（固定方向）或 `momentum`（自动预测） |
+| `--side` | up | 交易方向（immediate 策略必填） |
 | `--amount` | 5.0 | 每笔交易金额（美元） |
 | `--tp-pct` | 0.50 | 止盈百分比（0.30 = 入场价 +30% 卖出） |
 | `--sl-pct` | 0.30 | 止损百分比（0.30 = 入场价 -30% 卖出） |
+| `--tp-price` | — | 绝对价格止盈（与 tp-pct 二选一，绝对优先） |
+| `--sl-price` | — | 绝对价格止损（与 sl-pct 二选一，绝对优先） |
 | `--max-reentry` | 0 | 止损后最大重入次数 |
 | `--max-tp-reentry` | 0 | 止盈后最大重入次数 |
 | `--rounds` | ∞ | 完整窗口轮数（省略=无限） |
@@ -239,6 +255,9 @@ curl -s -o /dev/null -w "%{http_code}" "https://gamma-api.polymarket.com/markets
 
 ```bash
 python3.11 run.py --market btc-updown-5m --side up --amount 1 --tp-pct 0.30 --sl-pct 0.30 --dry
+
+# 或测试动量策略
+python3.11 run.py --market btc-updown-5m --strategy momentum --amount 1 --tp-pct 0.30 --sl-pct 0.30 --dry
 ```
 
 看到 `[DRY-RUN MODE]` 和 WebSocket 价格更新表示全部连通。确认无误后去掉 `--dry` 实盘交易。
@@ -259,10 +278,13 @@ polybot/                        # 交易包
 │   └── stream.py               # WebSocket 实时价格流
 ├── predict/                    # 自动方向预测
 │   ├── history.py              # WindowHistory 环形缓冲区 + Gamma API 回填
-│   └── momentum.py             # MomentumPredictor — 加权投票信号
-├── strategies/                 # 可插拔买入策略
-│   ├── base.py                 # Strategy ABC（仅 should_buy）
-│   └── immediate.py            # ImmediateStrategy — 窗口开即买
+│   ├── indicators.py           # 7 个技术指标（EMA, RSI, MACD, Bollinger, ROC 等）
+│   ├── kline.py                # KlineCandle + BinanceKlineFetcher
+│   └── momentum.py             # MomentumPredictor V3 — 7 信号加权投票
+├── strategies/                 # 可插拔交易策略
+│   ├── base.py                 # Strategy ABC（get_side + should_buy）
+│   ├── immediate.py            # FixedSideStrategy — 固定方向，窗口开即买
+│   └── momentum.py             # MomentumStrategy — 自动预测方向
 ├── trading/                    # 订单执行 + 监控
 │   ├── monitor.py              # 异步事件驱动监控循环
 │   └── trading.py              # FOK 市价单 + GTD 限价回退
@@ -272,7 +294,7 @@ polybot/                        # 交易包
 run.py                          # 入口点
 strategy.yaml.example           # 配置文件示例
 docs/polymarket_api.md          # Polymarket API 参考文档
-tests/                          # 单元测试（102 tests）
+tests/                          # 单元测试（186 tests）
 ```
 
 ## 支持市场
@@ -323,16 +345,16 @@ Slug 格式：`{slug_prefix}-{UnixEpoch}`，epoch 即窗口开始时间戳。通
 
 ```
 20:15:00.962 INFO — === BTC 5m Up/Down Trader Started ===
-20:15:00.962 INFO — Strategy: ImmediateStrategy | Side: UP | Amount: $1.0 | TP: +30% | SL: -30%
-20:15:03.842 INFO — [TRADE] BUY_FILLED side=UP price=0.4750 shares=2.1978
-20:15:30.685 WARNING — [SIGNAL] STOP_LOSS price=0.3300 threshold=0.3325
+20:15:00.962 INFO — Strategy: MomentumStrategy | Side: UP | Amount: $1.0 | TP: $0.80 | SL: -50%
+20:15:03.842 INFO — [TRADE] BUY_FILLED side=DOWN price=0.4750 shares=2.1053
+20:15:30.685 WARNING — [SIGNAL] STOP_LOSS price=0.2300 threshold=0.2375
 ```
 
 ## 测试
 
 ```bash
 python3.11 -m pytest tests/ -v
-# 102 tests
+# 186 tests
 ```
 
 ## 风险提示

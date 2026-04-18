@@ -4,7 +4,7 @@ import asyncio
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from polybot.predict.momentum import MomentumPredictor
+from polybot.strategies.momentum import MomentumStrategy
 from polybot.market.series import MarketSeries
 
 import pytest
@@ -52,7 +52,7 @@ def _make_update(token_id: str, midpoint: float, source: str = "best_bid_ask") -
 
 # Default TradeConfig: entry=0.50, TP threshold=0.80 (tp_pct=0.60), SL threshold=0.35 (sl_pct=0.30)
 def _tc(**overrides) -> TradeConfig:
-    defaults = dict(side="up", amount=5.0, tp_pct=0.60, sl_pct=0.30)
+    defaults = dict(amount=5.0, tp_pct=0.60, sl_pct=0.30)
     defaults.update(overrides)
     return TradeConfig(**defaults)
 
@@ -72,7 +72,7 @@ def test_monitor_state_has_trade_lock():
 
 @pytest.mark.asyncio
 async def test_on_price_buy_in_range():
-    """Price triggers buy via ImmediateStrategy."""
+    """Price triggers buy via FixedSideStrategy."""
     window = _make_window()
     state = _make_state()
     tc = _tc()
@@ -80,7 +80,7 @@ async def test_on_price_buy_in_range():
     update = _make_update("up-token-123", midpoint=0.50)
 
     with patch("polybot.trading.monitor._handle_opening_price", new_callable=AsyncMock) as mock_buy:
-        await _on_price_update(update, window, state, dry_run=True, trade_config=tc)
+        await _on_price_update(update, window, state, dry_run=True, trade_config=tc, side="up")
         mock_buy.assert_called_once()
 
 
@@ -94,7 +94,7 @@ async def test_on_price_wrong_token_ignored():
     update = _make_update("some-other-token", midpoint=0.50)
 
     with patch("polybot.trading.monitor._handle_opening_price", new_callable=AsyncMock) as mock_buy:
-        await _on_price_update(update, window, state, dry_run=True, trade_config=tc)
+        await _on_price_update(update, window, state, dry_run=True, trade_config=tc, side="up")
         mock_buy.assert_not_called()
 
 
@@ -117,7 +117,7 @@ async def test_on_price_stop_loss_triggers_sell():
 
     with patch("polybot.trading.monitor.sell_token", mock_sell), \
          patch("polybot.trading.monitor.cancel_all_open_orders", mock_cancel):
-        await _on_price_update(update, window, state, dry_run=False, trade_config=tc)
+        await _on_price_update(update, window, state, dry_run=False, trade_config=tc, side="up")
 
     mock_cancel.assert_called_once()
     mock_sell.assert_called_once()
@@ -142,7 +142,7 @@ async def test_on_price_stop_loss_with_reentry_allowed():
 
     with patch("polybot.trading.monitor.sell_token", mock_sell), \
          patch("polybot.trading.monitor.cancel_all_open_orders", mock_cancel):
-        await _on_price_update(update, window, state, dry_run=False, trade_config=tc)
+        await _on_price_update(update, window, state, dry_run=False, trade_config=tc, side="up")
 
     assert state.stop_loss_count == 1
     assert state.exit_triggered is False  # re-entry allowed
@@ -166,7 +166,7 @@ async def test_on_price_stop_loss_reentry_exhausted():
          patch("polybot.trading.monitor.cancel_all_open_orders", mock_cancel):
         # First stop-loss: reentry allowed (count=1 <= max=1)
         update1 = _make_update("up-token-123", midpoint=0.30)
-        await _on_price_update(update1, window, state, dry_run=False, trade_config=tc)
+        await _on_price_update(update1, window, state, dry_run=False, trade_config=tc, side="up")
         assert state.stop_loss_count == 1
         assert not state.buy_blocked_sl
 
@@ -175,14 +175,14 @@ async def test_on_price_stop_loss_reentry_exhausted():
 
         # Second stop-loss: count=2 > max=1 → blocked
         update2 = _make_update("up-token-123", midpoint=0.30)
-        await _on_price_update(update2, window, state, dry_run=False, trade_config=tc)
+        await _on_price_update(update2, window, state, dry_run=False, trade_config=tc, side="up")
         assert state.stop_loss_count == 2
 
         # Third price check should be blocked
         state.bought = False
         update3 = _make_update("up-token-123", midpoint=0.50)
         with patch("polybot.trading.monitor._handle_opening_price", new_callable=AsyncMock) as mock_buy:
-            await _on_price_update(update3, window, state, dry_run=True, trade_config=tc)
+            await _on_price_update(update3, window, state, dry_run=True, trade_config=tc, side="up")
             mock_buy.assert_not_called()
         assert state.buy_blocked_sl is True
 
@@ -206,7 +206,7 @@ async def test_on_price_take_profit_triggers_sell():
 
     with patch("polybot.trading.monitor.sell_token", mock_sell), \
          patch("polybot.trading.monitor.cancel_all_open_orders", mock_cancel):
-        await _on_price_update(update, window, state, dry_run=False, trade_config=tc)
+        await _on_price_update(update, window, state, dry_run=False, trade_config=tc, side="up")
 
     assert state.tp_count == 1
     assert state.exit_triggered is True
@@ -231,7 +231,7 @@ async def test_sell_failure_keeps_holding():
 
     with patch("polybot.trading.monitor.sell_token", mock_sell), \
          patch("polybot.trading.monitor.cancel_all_open_orders", mock_cancel):
-        await _on_price_update(update, window, state, dry_run=False, trade_config=tc)
+        await _on_price_update(update, window, state, dry_run=False, trade_config=tc, side="up")
 
     assert state.stop_loss_count == 1
     # Key assertion: bought stays True so next SL/TP check still works
@@ -258,9 +258,9 @@ async def test_concurrent_callbacks_skipped_when_locked():
 
     with patch("polybot.trading.monitor._handle_opening_price", side_effect=slow_buy):
         # Fire two callbacks concurrently
-        task1 = asyncio.create_task(_on_price_update(update, window, state, dry_run=True, trade_config=tc))
+        task1 = asyncio.create_task(_on_price_update(update, window, state, dry_run=True, trade_config=tc, side="up"))
         await asyncio.sleep(0.01)  # let first callback acquire lock
-        task2 = asyncio.create_task(_on_price_update(update, window, state, dry_run=True, trade_config=tc))
+        task2 = asyncio.create_task(_on_price_update(update, window, state, dry_run=True, trade_config=tc, side="up"))
         await asyncio.gather(task1, task2)
 
     # Only one should have entered the trade logic
@@ -283,7 +283,7 @@ async def test_dry_run_stop_loss_no_real_sell():
 
     with patch("polybot.trading.monitor.sell_token", new_callable=AsyncMock) as mock_sell, \
          patch("polybot.trading.monitor.cancel_all_open_orders", new_callable=AsyncMock):
-        await _on_price_update(update, window, state, dry_run=True, trade_config=tc)
+        await _on_price_update(update, window, state, dry_run=True, trade_config=tc, side="up")
 
     mock_sell.assert_not_called()
 
@@ -298,7 +298,7 @@ async def test_handle_opening_price_dry_run():
     tc = _tc()
 
     with patch("polybot.trading.monitor.buy_token", new_callable=AsyncMock):
-        await _handle_opening_price(window, state, "up-token-123", 0.50, dry_run=True, trade_config=tc)
+        await _handle_opening_price(window, state, "up-token-123", 0.50, dry_run=True, trade_config=tc, side="up")
 
     assert state.bought is True
     assert state.holding_size == pytest.approx(10.0)  # $5 / $0.50 = 10 shares
@@ -314,7 +314,7 @@ async def test_handle_opening_price_already_bought():
     tc = _tc()
 
     with patch("polybot.trading.monitor.buy_token", new_callable=AsyncMock) as mock_buy:
-        await _handle_opening_price(window, state, "up-token-123", 0.50, dry_run=False, trade_config=tc)
+        await _handle_opening_price(window, state, "up-token-123", 0.50, dry_run=False, trade_config=tc, side="up")
 
     mock_buy.assert_not_called()
 
@@ -328,7 +328,7 @@ async def test_handle_opening_price_buy_failed_sets_exit():
 
     mock_result = MagicMock(success=False, message="Insufficient balance")
     with patch("polybot.trading.monitor.buy_token", new_callable=AsyncMock, return_value=mock_result):
-        await _handle_opening_price(window, state, "up-token-123", 0.50, dry_run=False, trade_config=tc)
+        await _handle_opening_price(window, state, "up-token-123", 0.50, dry_run=False, trade_config=tc, side="up")
 
     assert state.bought is False
     assert state.exit_triggered is True
@@ -385,7 +385,7 @@ async def test_tp_triggers_on_last_trade_price():
 
     # First: seed a last_trade_price above TP
     trade_update = _make_update("up-token-123", midpoint=0.85, source="last_trade_price")
-    await _on_price_update(trade_update, window, state, dry_run=True, trade_config=tc)
+    await _on_price_update(trade_update, window, state, dry_run=True, trade_config=tc, side="up")
 
     # The last_trade_price at 0.85 should have triggered TP
     assert state.tp_count == 1
@@ -415,7 +415,7 @@ async def test_tp_triggers_on_best_ask():
     with patch("polybot.trading.monitor.sell_token", new_callable=AsyncMock) as mock_sell, \
          patch("polybot.trading.monitor.cancel_all_open_orders", new_callable=AsyncMock):
         mock_sell.return_value = MagicMock(success=True)
-        await _on_price_update(update, window, state, dry_run=False, trade_config=tc)
+        await _on_price_update(update, window, state, dry_run=False, trade_config=tc, side="up")
 
     assert state.tp_count == 1
     mock_sell.assert_called_once()
@@ -445,7 +445,7 @@ async def test_sl_triggers_on_best_bid():
     with patch("polybot.trading.monitor.sell_token", new_callable=AsyncMock) as mock_sell, \
          patch("polybot.trading.monitor.cancel_all_open_orders", new_callable=AsyncMock):
         mock_sell.return_value = MagicMock(success=True)
-        await _on_price_update(update, window, state, dry_run=False, trade_config=tc)
+        await _on_price_update(update, window, state, dry_run=False, trade_config=tc, side="up")
 
     assert state.stop_loss_count == 1
     mock_sell.assert_called_once()
@@ -466,7 +466,7 @@ async def test_sl_triggers_on_last_trade_price():
     with patch("polybot.trading.monitor.sell_token", new_callable=AsyncMock) as mock_sell, \
          patch("polybot.trading.monitor.cancel_all_open_orders", new_callable=AsyncMock):
         mock_sell.return_value = MagicMock(success=True)
-        await _on_price_update(trade_update, window, state, dry_run=False, trade_config=tc)
+        await _on_price_update(trade_update, window, state, dry_run=False, trade_config=tc, side="up")
 
     assert state.stop_loss_count == 1
 
@@ -489,7 +489,7 @@ async def test_stale_trade_price_ignored():
     update = _make_update("up-token-123", midpoint=0.75)
     with patch("polybot.trading.monitor.sell_token", new_callable=AsyncMock) as mock_sell, \
          patch("polybot.trading.monitor.cancel_all_open_orders", new_callable=AsyncMock):
-        await _on_price_update(update, window, state, dry_run=False, trade_config=tc)
+        await _on_price_update(update, window, state, dry_run=False, trade_config=tc, side="up")
 
     mock_sell.assert_not_called()
     assert state.tp_count == 0
@@ -514,12 +514,12 @@ async def test_deferred_signal_stored_when_locked():
     # First callback enters the lock with a TP-triggering update
     with patch("polybot.trading.monitor.sell_token", side_effect=slow_sell), \
          patch("polybot.trading.monitor.cancel_all_open_orders", new_callable=AsyncMock):
-        task1 = asyncio.create_task(_on_price_update(tp_update, window, state, dry_run=False, trade_config=tc))
+        task1 = asyncio.create_task(_on_price_update(tp_update, window, state, dry_run=False, trade_config=tc, side="up"))
         await asyncio.sleep(0.01)  # let first callback acquire lock
 
         # Second callback should store deferred signal
         state2_update = _make_update("up-token-123", midpoint=0.50)
-        await asyncio.create_task(_on_price_update(state2_update, window, state, dry_run=True, trade_config=tc))
+        await asyncio.create_task(_on_price_update(state2_update, window, state, dry_run=True, trade_config=tc, side="up"))
 
         await asyncio.gather(task1)
 
@@ -551,7 +551,7 @@ async def test_post_buy_deferred_signal_discarded():
     with patch("polybot.trading.monitor.buy_token", new_callable=AsyncMock, return_value=mock_buy_result), \
          patch("polybot.trading.monitor.sell_token", mock_sell), \
          patch("polybot.trading.monitor.cancel_all_open_orders", new_callable=AsyncMock):
-        await _handle_opening_price(window, state, "up-token-123", 0.50, dry_run=False, trade_config=tc)
+        await _handle_opening_price(window, state, "up-token-123", 0.50, dry_run=False, trade_config=tc, side="up")
 
     # Buy succeeded, deferred signal should be discarded (not processed)
     assert state.bought is True
@@ -560,10 +560,10 @@ async def test_post_buy_deferred_signal_discarded():
     assert state._pending_signal is None
 
 
-class TestDirectionPrediction:
+class TestDirectionViaStrategy:
     @pytest.mark.asyncio
-    async def test_predictor_sets_side_with_candle_data(self):
-        """Predictor uses Binance K-line data to determine direction."""
+    async def test_momentum_strategy_sets_side_with_candle_data(self):
+        """MomentumStrategy uses Binance K-line data to determine direction."""
         import datetime
         from polybot.trading.monitor import monitor_window
         from polybot.predict.kline import KlineCandle
@@ -580,10 +580,9 @@ class TestDirectionPrediction:
             slug="btc-updown-5m-test",
         )
 
-        predictor = MomentumPredictor(
-            MarketSeries.from_known("btc-updown-5m"),
-        )
-        tc = TradeConfig(side="up")
+        series = MarketSeries.from_known("btc-updown-5m")
+        strategy = MomentumStrategy(series)
+        tc = TradeConfig()
 
         # Create bullish candle data → predict should return "up"
         bullish_candles = [
@@ -603,14 +602,12 @@ class TestDirectionPrediction:
             MockFetcher.return_value.fetch.return_value = bullish_candles
             await monitor_window(
                 window, dry_run=True, preopened=True, existing_ws=mock_ws,
-                trade_config=tc, predictor=predictor,
+                trade_config=tc, strategy=strategy, series=series,
             )
-
-        assert tc.side == "up"  # bullish candles → predicted "up"
 
     @pytest.mark.asyncio
     async def test_window_skipped_when_no_prediction(self):
-        """Window is skipped when predictor returns None (no candle data)."""
+        """Window is skipped when MomentumStrategy returns None (no candle data)."""
         import datetime
         from polybot.trading.monitor import monitor_window
 
@@ -626,10 +623,9 @@ class TestDirectionPrediction:
             slug="btc-updown-5m-test",
         )
 
-        predictor = MomentumPredictor(
-            MarketSeries.from_known("btc-updown-5m"),
-        )
-        tc = TradeConfig(side="up")
+        series = MarketSeries.from_known("btc-updown-5m")
+        strategy = MomentumStrategy(series)
+        tc = TradeConfig()
 
         mock_ws = MagicMock()
         mock_ws.set_on_price = MagicMock()
@@ -642,8 +638,7 @@ class TestDirectionPrediction:
             MockFetcher.return_value.fetch.return_value = []  # empty → None → skip
             next_win, returned_ws, monitored = await monitor_window(
                 window, dry_run=True, preopened=True, existing_ws=mock_ws,
-                trade_config=tc, predictor=predictor,
+                trade_config=tc, strategy=strategy, series=series,
             )
 
         assert monitored is False  # window skipped
-        assert tc.side == "up"  # side unchanged
