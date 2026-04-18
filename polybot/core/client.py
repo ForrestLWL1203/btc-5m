@@ -80,16 +80,11 @@ def get_token_balance(token_id: str, safe: bool = True) -> Optional[float]:
             raw = float(resp["balance"]) / 1_000_000
             if not safe:
                 return raw
-            # Truncate to 4 decimal places, then subtract 1 tick for safety
+            # Truncate to 4 decimal places, then subtract safety margin
+            # Use proportional margin: min(tick, 1% of raw) to avoid destroying small balances
             tick = get_tick_size(token_id)
             truncated = int(raw * 10_000) / 10_000  # floor to 4 decimals
-            safe_balance = max(0.0, truncated - tick)
-            if safe_balance < raw * 0.99:
-                log.warning(
-                    "Balance safety gap too large: raw=%.6f safe=%.6f, using raw - tick",
-                    raw, safe_balance,
-                )
-                safe_balance = max(0.0, raw - tick)
+            safe_balance = max(0.0, truncated - min(tick, raw * 0.01))
             return safe_balance
         return None
     except Exception as e:

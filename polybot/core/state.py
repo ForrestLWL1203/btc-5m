@@ -19,6 +19,7 @@ class MonitorState:
     bought: bool = False
     holding_size: float = 0.0  # shares held
     entry_price: float = 0.0
+    original_entry_price: float = 0.0  # first buy price, preserved across re-entries
     exit_triggered: bool = False
     tp_count: int = 0      # take-profit exits this window
     stop_loss_count: int = 0  # stop-loss exits this window

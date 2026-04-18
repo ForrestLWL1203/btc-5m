@@ -103,7 +103,7 @@ async def _sell_with_retry(
     return False
 
 
-_DUST_THRESHOLD = 0.05  # shares — skip cleanup below this (~$0.02)
+_DUST_THRESHOLD = 0.005  # shares — skip cleanup below this (~$0.002)
 
 
 async def _cleanup_residual(
@@ -231,12 +231,15 @@ async def _monitor_single_window(
             fetch_task = asyncio.create_task(
                 asyncio.to_thread(_find_next_window_after, window.end_epoch, series)
             )
-            await cancel_all_open_orders()
-            if not dry_run:
-                await _sell_with_retry(
-                    buy_token_id, state.holding_size, f"Window ending in {remaining}s",
-                    window_end_epoch=window.end_epoch,
-                )
+            async with state.trade_lock:
+                await cancel_all_open_orders()
+                if not dry_run:
+                    await _sell_with_retry(
+                        buy_token_id, state.holding_size, f"Window ending in {remaining}s",
+                        window_end_epoch=window.end_epoch,
+                    )
+                state.bought = False
+                state.exit_triggered = True
             await asyncio.sleep(remaining)
             try:
                 next_win = fetch_task.result()
@@ -554,6 +557,19 @@ async def _check_sl_tp(
         return True
 
     if signal.reason == ExitReason.STOP_LOSS:
+        # SL time gate: wait until enough of the window has elapsed
+        # 5m: after halfway (2m30s) | 15m: last 5m | 4h: last 1h
+        now = time.time()
+        remaining = window.end_epoch - now
+        total = window.end_epoch - window.start_epoch
+        if total <= 300:       # ≤5m window
+            sl_allowed_after = total / 2
+        elif total <= 900:     # ≤15m window
+            sl_allowed_after = total - 300
+        else:                  # >15m (4h etc.)
+            sl_allowed_after = total - 3600
+        if remaining > sl_allowed_after:
+            return False
         state.stop_loss_count += 1
         log_event(log, logging.WARNING, SIGNAL, {
             "action": "STOP_LOSS",
@@ -664,6 +680,15 @@ async def _on_price_update(
                 })
                 state.buy_blocked_sl = True
                 return
+            # Re-entry price gates: only re-buy if price meets criteria
+            if state.stop_loss_count > 0:
+                # SL re-entry: require price recovery near original entry (within 5%)
+                if price < state.original_entry_price * 0.95:
+                    return
+            if state.tp_count > 0 and trade_config.tp_pct:
+                # TP re-entry: require pullback (price below half the gain)
+                if price > state.original_entry_price * (1 + trade_config.tp_pct * 0.5):
+                    return
             if strategy.should_buy(price, state):
                 log_event(log, logging.INFO, SIGNAL, {
                     "action": "BUY_SIGNAL",
@@ -725,6 +750,8 @@ async def _handle_opening_price(
                 else:
                     state.holding_size = trade_config.amount / price if price > 0 else trade_config.amount
                 state.entry_price = price
+                if state.original_entry_price == 0.0:
+                    state.original_entry_price = price
                 log_event(log, logging.INFO, TRADE, {
                     "action": "BUY_FILLED",
                     "side": side.upper(),
@@ -757,6 +784,8 @@ async def _handle_opening_price(
             state.bought = True
             state.holding_size = trade_config.amount / price if price > 0 else trade_config.amount
             state.entry_price = price
+            if state.original_entry_price == 0.0:
+                state.original_entry_price = price
             log_event(log, logging.INFO, TRADE, {
                 "action": "BUY",
                 "side": side.upper(),
