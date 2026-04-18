@@ -1,7 +1,7 @@
-"""Tests for polybot.predict.momentum — weighted voting signals."""
+"""Tests for polybot.predict.momentum V2 — Binance K-line signals."""
 
 import pytest
-from polybot.predict.history import WindowHistory, WindowRecord
+from polybot.predict.kline import KlineCandle
 from polybot.predict.momentum import MomentumPredictor, DirectionPredictor
 from polybot.market.series import MarketSeries
 
@@ -10,70 +10,61 @@ def _btc_5m() -> MarketSeries:
     return MarketSeries.from_known("btc-updown-5m")
 
 
-def _record(start: int, up_close: float, down_close: float, resolved=None) -> WindowRecord:
-    return WindowRecord(
-        window_start=start,
-        up_price_open=up_close - 0.02,
-        up_price_close=up_close,
-        down_price_open=down_close - 0.02,
-        down_price_close=down_close,
-        up_volume=1.0,
-        down_volume=1.0,
-        resolved_side=resolved,
+def _candle(close: float, open_val=None, volume=100.0, offset=0) -> KlineCandle:
+    o = open_val if open_val is not None else close - 1
+    return KlineCandle(
+        open_time=1000 + offset,
+        open=o,
+        high=max(o, close) + 0.5,
+        low=min(o, close) - 0.5,
+        close=close,
+        volume=volume,
     )
 
 
-class TestMomentumPredictor:
-    def test_predict_up_on_rising_up_token(self):
-        """Rising Up token close prices -> predict 'up'."""
+class TestMomentumPredictorV2:
+    def test_predict_up_on_rising_prices(self):
+        """Consistently rising prices → predict 'up'."""
         p = MomentumPredictor(_btc_5m())
-        h = WindowHistory(capacity=10)
-        h.record(_record(1000, up_close=0.50, down_close=0.50, resolved="up"))
-        h.record(_record(1300, up_close=0.55, down_close=0.45, resolved="up"))
-        h.record(_record(1600, up_close=0.60, down_close=0.40, resolved="up"))
-        h.record(_record(1900, up_close=0.65, down_close=0.35, resolved="up"))
-        h.record(_record(2200, up_close=0.70, down_close=0.30, resolved="up"))
-        result = p.predict(h)
-        assert result == "up"
+        candles = [_candle(100 + i * 2, offset=i) for i in range(20)]
+        assert p.predict(candles) == "up"
 
-    def test_predict_down_on_falling_up_token(self):
-        """Falling Up token close prices -> predict 'down'."""
+    def test_predict_down_on_falling_prices(self):
+        """Consistently falling prices with bearish candles → predict 'down'."""
         p = MomentumPredictor(_btc_5m())
-        h = WindowHistory(capacity=10)
-        h.record(_record(1000, up_close=0.60, down_close=0.40, resolved="down"))
-        h.record(_record(1300, up_close=0.55, down_close=0.45, resolved="down"))
-        h.record(_record(1600, up_close=0.50, down_close=0.50, resolved="down"))
-        h.record(_record(1900, up_close=0.45, down_close=0.55, resolved="down"))
-        h.record(_record(2200, up_close=0.40, down_close=0.60, resolved="down"))
-        result = p.predict(h)
-        assert result == "down"
+        candles = [_candle(140 - i * 2, open_val=141 - i * 2, offset=i) for i in range(20)]
+        assert p.predict(candles) == "down"
 
-    def test_predict_none_when_insufficient_history(self):
-        """Fewer than min_history records -> return None."""
+    def test_predict_none_on_insufficient_data(self):
         p = MomentumPredictor(_btc_5m())
-        h = WindowHistory(capacity=10)
-        h.record(_record(1000, up_close=0.55, down_close=0.45))
-        result = p.predict(h)
-        assert result is None
+        candles = [_candle(100, offset=i) for i in range(3)]
+        assert p.predict(candles) is None
 
-    def test_predict_streak_reversal(self):
-        """3+ consecutive 'up' results with flat prices -> streak reversal pushes 'down'."""
+    def test_predict_none_on_empty(self):
         p = MomentumPredictor(_btc_5m())
-        h = WindowHistory(capacity=10)
-        h.record(_record(1000, up_close=0.50, down_close=0.50, resolved="up"))
-        h.record(_record(1300, up_close=0.50, down_close=0.50, resolved="up"))
-        h.record(_record(1600, up_close=0.50, down_close=0.50, resolved="up"))
-        h.record(_record(1900, up_close=0.50, down_close=0.50, resolved="up"))
-        h.record(_record(2200, up_close=0.50, down_close=0.50, resolved="up"))
-        result = p.predict(h)
-        # With flat prices (no momentum, no offset) and 5 consecutive ups,
-        # streak reversal pushes score negative -> "down"
-        assert result == "down"
+        assert p.predict([]) is None
 
-    def test_empty_history_returns_none(self):
+    def test_predict_uses_fallback_side(self):
+        """When candles insufficient but fallback_side set, return fallback."""
+        p = MomentumPredictor(_btc_5m(), fallback_side="down")
+        assert p.predict([]) == "down"
+
+    def test_predict_fallback_none_when_not_set(self):
+        """When candles insufficient and no fallback, return None."""
         p = MomentumPredictor(_btc_5m())
-        h = WindowHistory(capacity=10)
-        assert p.predict(h) is None
+        assert p.predict([]) is None
 
     def test_is_direction_predictor_subclass(self):
         assert issubclass(MomentumPredictor, DirectionPredictor)
+
+    def test_timeframe_scaling_5m(self):
+        p = MomentumPredictor(_btc_5m())
+        assert p.trend_n == 12
+        assert p.ema_short == 10
+        assert p.ema_long == 30
+
+    def test_timeframe_scaling_4h(self):
+        p = MomentumPredictor(MarketSeries.from_known("btc-updown-4h"))
+        assert p.trend_n == 6
+        assert p.ema_short == 8
+        assert p.ema_long == 20

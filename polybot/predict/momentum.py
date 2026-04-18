@@ -1,98 +1,97 @@
-"""DirectionPredictor ABC and MomentumPredictor V1 — weighted voting signals."""
+"""DirectionPredictor ABC and MomentumPredictor V2 — Binance K-line signals."""
 
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import List, Optional
 
 from polybot.market.series import MarketSeries
-from .history import WindowHistory
+from .indicators import ema, rsi, trend_direction, volume_trend
+from .kline import KlineCandle
 
 
 class DirectionPredictor(ABC):
     """Abstract direction predictor — returns 'up', 'down', or None (skip)."""
 
     @abstractmethod
-    def predict(self, history: WindowHistory) -> Optional[str]:
+    def predict(self, candles: List[KlineCandle]) -> Optional[str]:
         ...
 
 
 class MomentumPredictor(DirectionPredictor):
-    """V1 predictor: weighted voting on 3 signals.
+    """V2 predictor: weighted voting on 4 technical indicators.
 
     Signals:
-      1. Price momentum (50%) — Up token close price trend over last N windows
-      2. Up/Down price offset (30%) — Up token price deviation from 0.50
-      3. Streak reversal (20%) — consecutive same-direction results -> mean reversion
+      1. Short-term trend (40%) — fraction of bullish candles
+      2. EMA crossover (30%) — short EMA vs long EMA
+      3. RSI (20%) — oversold → up, overbought → down
+      4. Volume confirmation (10%) — volume trend direction
     """
 
-    def __init__(self, series: MarketSeries):
-        self.lookback = 3
-        self.streak_threshold = 3 if series.slug_step <= 900 else 2
-        self.min_history = 5
+    def __init__(self, series: MarketSeries, fallback_side: Optional[str] = None):
+        self.fallback_side = fallback_side
 
-    def predict(self, history: WindowHistory) -> Optional[str]:
-        if len(history) < self.min_history:
-            return None
+        if series.slug_step <= 300:  # 5m
+            self.trend_n = 12
+            self.ema_short = 10
+            self.ema_long = 30
+            self.rsi_period = 14
+            self.min_candles = 15
+        elif series.slug_step <= 900:  # 15m
+            self.trend_n = 8
+            self.ema_short = 10
+            self.ema_long = 30
+            self.rsi_period = 14
+            self.min_candles = 30
+        else:  # 4h
+            self.trend_n = 6
+            self.ema_short = 8
+            self.ema_long = 20
+            self.rsi_period = 14
+            self.min_candles = 20
+
+    def predict(self, candles: List[KlineCandle]) -> Optional[str]:
+        if len(candles) < self.min_candles:
+            return self.fallback_side
 
         score = 0.0
-
-        # Signal 1: Price momentum (50%)
-        momentum = self._price_momentum(history)
-        score += momentum * 0.50
-
-        # Signal 2: Up/Down price offset (30%)
-        offset = self._price_offset(history)
-        score += offset * 0.30
-
-        # Signal 3: Streak reversal (20%)
-        reversal = self._streak_reversal(history)
-        score += reversal * 0.20
+        score += self._trend_signal(candles) * 0.40
+        score += self._ema_signal(candles) * 0.30
+        score += self._rsi_signal(candles) * 0.20
+        score += self._volume_signal(candles) * 0.10
 
         if score > 0:
             return "up"
         elif score < 0:
             return "down"
-        return None
+        return self.fallback_side
 
-    def _price_momentum(self, history: WindowHistory) -> float:
-        """Positive = Up token prices rising. Negative = falling."""
-        recent = history.last_n(self.lookback)
-        if len(recent) < 2:
+    def _trend_signal(self, candles: List[KlineCandle]) -> float:
+        """Positive = bullish trend. Range: [-1, 1]."""
+        td = trend_direction(candles, self.trend_n)
+        return (td - 0.5) * 2.0  # map [0,1] → [-1,1]
+
+    def _ema_signal(self, candles: List[KlineCandle]) -> float:
+        """Positive = short EMA above long EMA."""
+        short = ema(candles, self.ema_short)
+        long = ema(candles, self.ema_long)
+        if long == 0:
             return 0.0
-        first = recent[0].up_price_close
-        last = recent[-1].up_price_close
-        if first == 0:
-            return 0.0
-        return (last - first) / first
+        return (short - long) / long * 10.0  # scale up for sensitivity
 
-    def _price_offset(self, history: WindowHistory) -> float:
-        """Positive = Up token > 0.50. Negative = Up token < 0.50."""
-        latest = history.latest()
-        if latest is None:
-            return 0.0
-        return latest.up_price_close - 0.50
+    def _rsi_signal(self, candles: List[KlineCandle]) -> float:
+        """Positive = bet on up. RSI < 40 = oversold → buy up. RSI > 60 = overbought → buy down."""
+        r = rsi(candles, self.rsi_period)
+        if r < 40:
+            return (40 - r) / 40.0  # 0..1
+        elif r > 60:
+            return -(r - 60) / 40.0  # -1..0
+        return 0.0
 
-    def _streak_reversal(self, history: WindowHistory) -> float:
-        """Positive = bet on 'up' next. Negative = bet on 'down' next.
-
-        Consecutive same-direction results -> bet opposite (mean reversion).
-        """
-        records = history.records
-        if len(records) < self.streak_threshold:
-            return 0.0
-
-        streak_dir = records[-1].resolved_side
-        if streak_dir is None:
-            return 0.0
-
-        count = 0
-        for r in reversed(records):
-            if r.resolved_side == streak_dir:
-                count += 1
-            else:
-                break
-
-        if count < self.streak_threshold:
-            return 0.0
-
-        # Bet opposite direction
-        return -0.10 if streak_dir == "up" else 0.10
+    def _volume_signal(self, candles: List[KlineCandle]) -> float:
+        """Positive = volume confirming uptrend."""
+        vt = volume_trend(candles, self.trend_n)
+        td = trend_direction(candles, self.trend_n)
+        if td > 0.5 and vt > 1.0:
+            return min(vt - 1.0, 1.0)
+        elif td < 0.5 and vt > 1.0:
+            return -min(vt - 1.0, 1.0)
+        return 0.0
