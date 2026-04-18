@@ -23,6 +23,8 @@ from polybot.market.market import (
 from polybot.market.series import MarketSeries
 from polybot.core.state import MonitorState
 from polybot.market.stream import PriceStream, PriceUpdate
+from polybot.predict.history import WindowHistory, WindowRecord
+from polybot.predict.momentum import DirectionPredictor
 from polybot.strategies.base import Strategy
 from polybot.strategies.immediate import ImmediateStrategy
 from polybot.trade_config import ExitReason, TradeConfig
@@ -179,6 +181,7 @@ async def _monitor_single_window(
     trade_config: TradeConfig,
     strategy: Optional[Strategy] = None,
     series: Optional[MarketSeries] = None,
+    history: Optional[WindowHistory] = None,
 ) -> Optional[MarketWindow]:
     """
     Monitor a single window until expiry or exit_triggered, then clean up.
@@ -210,6 +213,11 @@ async def _monitor_single_window(
                         buy_token_id, state.holding_size, "Window expired",
                         window_end_epoch=window.end_epoch,
                     )
+            # Record window result in history
+            if history is not None and state.bought:
+                history.record(WindowRecord(
+                    window_start=window.start_epoch,
+                ))
             # Always pre-fetch next window on expiry to avoid stale fallback
             fetch_task = asyncio.create_task(
                 asyncio.to_thread(_find_next_window_after, window.end_epoch)
@@ -318,6 +326,8 @@ async def monitor_window(
     trade_config: Optional[TradeConfig] = None,
     strategy: Optional[Strategy] = None,
     series: Optional[MarketSeries] = None,
+    predictor: Optional[DirectionPredictor] = None,
+    history: Optional[WindowHistory] = None,
 ) -> tuple[Optional[MarketWindow], Optional[PriceStream], bool]:
     """
     Monitor a trading window using WebSocket real-time price updates.
@@ -338,6 +348,24 @@ async def monitor_window(
         trade_config = TradeConfig()
     if strategy is None:
         strategy = ImmediateStrategy()
+
+    # Direction prediction — runs once per window
+    if predictor is not None and history is not None:
+        direction = predictor.predict(history)
+        if direction is not None:
+            trade_config.side = direction
+            log_event(log, logging.INFO, SIGNAL, {
+                "action": "DIRECTION_PREDICTED",
+                "side": direction.upper(),
+                "window": window.short_label,
+                "history_len": len(history),
+            })
+        else:
+            log_event(log, logging.WARNING, SIGNAL, {
+                "action": "DIRECTION_UNCLEAR",
+                "window": window.short_label,
+                "history_len": len(history),
+            })
 
     state = MonitorState()
     ws: Optional[PriceStream] = existing_ws
@@ -430,7 +458,7 @@ async def monitor_window(
 
     # Monitor until window expires or exit triggered (ws is NOT closed inside)
     next_win = await _monitor_single_window(
-        window, state, ws, dry_run, trade_config, strategy, series,
+        window, state, ws, dry_run, trade_config, strategy, series, history,
     )
 
     if next_win is not None:

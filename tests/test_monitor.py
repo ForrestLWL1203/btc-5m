@@ -4,6 +4,10 @@ import asyncio
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from polybot.predict.history import WindowHistory, WindowRecord
+from polybot.predict.momentum import MomentumPredictor
+from polybot.market.series import MarketSeries
+
 import pytest
 
 from polybot.core import config
@@ -555,3 +559,52 @@ async def test_post_buy_deferred_signal_discarded():
     assert state.tp_count == 0
     mock_sell.assert_not_called()
     assert state._pending_signal is None
+
+
+class TestDirectionPrediction:
+    @pytest.mark.asyncio
+    async def test_predictor_sets_side_at_window_start(self):
+        """Predictor is called at window start and sets trade_config.side."""
+        import datetime
+        from polybot.trading.monitor import monitor_window
+
+        utc = datetime.timezone.utc
+        now = int(time.time())
+        start = (now // 300) * 300
+        window = MarketWindow(
+            question="Bitcoin Up or Down - Test",
+            up_token="up-tok",
+            down_token="down-tok",
+            start_time=datetime.datetime.fromtimestamp(start, tz=utc),
+            end_time=datetime.datetime.fromtimestamp(start + 300, tz=utc),
+            slug="btc-updown-5m-test",
+        )
+
+        history = WindowHistory(capacity=10)
+        for i in range(6):
+            history.record(WindowRecord(
+                window_start=start - (6 - i) * 300,
+                up_price_open=0.55, up_price_close=0.40,
+                down_price_open=0.45, down_price_close=0.60,
+                up_volume=1.0, down_volume=1.0, resolved_side="down",
+            ))
+
+        predictor = MomentumPredictor(
+            MarketSeries.from_known("btc-updown-5m")
+        )
+        tc = TradeConfig(side="up")
+
+        mock_ws = MagicMock()
+        mock_ws.set_on_price = MagicMock()
+        mock_ws.switch_tokens = AsyncMock()
+        mock_ws.get_latest_price = MagicMock(return_value=None)
+        mock_ws.close = AsyncMock()
+
+        with patch("polybot.trading.monitor.find_next_window", return_value=None), \
+             patch("polybot.trading.monitor.get_midpoint_async", new_callable=AsyncMock, return_value=None):
+            await monitor_window(
+                window, dry_run=True, preopened=True, existing_ws=mock_ws,
+                trade_config=tc, predictor=predictor, history=history,
+            )
+
+        assert tc.side == "down"
