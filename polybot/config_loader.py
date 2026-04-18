@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Optional
 
 from polybot.market.series import MarketSeries, KNOWN_SERIES, TIMEFRAME_SECONDS, _default_buffer
+from polybot.predict.momentum import MomentumPredictor
 from polybot.strategies.immediate import ImmediateStrategy
 from .trade_config import TradeConfig
 
@@ -53,6 +54,10 @@ STRATEGY_REGISTRY: dict[str, type] = {
     "immediate": ImmediateStrategy,
 }
 
+DIRECTION_REGISTRY: dict[str, type] = {
+    "momentum": MomentumPredictor,
+}
+
 
 def build_strategy(cfg: dict) -> ImmediateStrategy:
     """Build Strategy from config dict. Strategy only contains buy decision logic."""
@@ -86,3 +91,33 @@ def build_trade_config(cfg: dict) -> TradeConfig:
         max_tp_reentry=params.get("max_tp_reentry", 0),
         rounds=int(rounds_val) if rounds_val is not None else None,
     )
+
+
+def build_direction_config(cfg: dict, series: MarketSeries) -> dict:
+    """Build direction prediction config.
+
+    Returns dict with keys:
+        predictor: DirectionPredictor instance or None
+        fallback_side: "up"/"down"/None
+    """
+    dir_cfg = cfg.get("direction")
+    if not dir_cfg:
+        return {"predictor": None, "fallback_side": None}
+
+    dir_type = dir_cfg.get("type", "fixed")
+    fallback = dir_cfg.get("fallback_side")
+
+    if dir_type == "fixed":
+        return {"predictor": None, "fallback_side": fallback}
+
+    cls = DIRECTION_REGISTRY.get(dir_type)
+    if cls is None:
+        raise ValueError(
+            f"Unknown direction type: {dir_type}. "
+            f"Available: {', '.join(DIRECTION_REGISTRY.keys())}"
+        )
+
+    return {
+        "predictor": cls(series),
+        "fallback_side": fallback,
+    }

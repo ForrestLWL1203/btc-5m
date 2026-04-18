@@ -4,8 +4,9 @@ import pytest
 import yaml
 from pathlib import Path
 
-from polybot.config_loader import load_config, build_series, build_strategy, build_trade_config, STRATEGY_REGISTRY
+from polybot.config_loader import load_config, build_series, build_strategy, build_trade_config, STRATEGY_REGISTRY, build_direction_config, DIRECTION_REGISTRY
 from polybot.market.series import MarketSeries
+from polybot.predict.momentum import MomentumPredictor
 from polybot.strategies.immediate import ImmediateStrategy
 from polybot.trade_config import TradeConfig
 
@@ -170,3 +171,33 @@ class TestYamlRoundTrip:
         assert tc.max_sl_reentry == 1
         assert tc.max_tp_reentry == 0
         assert tc.rounds == 2
+
+
+class TestBuildDirectionConfig:
+    def test_momentum_type_creates_predictor(self):
+        cfg = {
+            "direction": {"type": "momentum", "fallback_side": "up"},
+            "market": {"asset": "btc", "timeframe": "5m"},
+        }
+        series = build_series(cfg)
+        result = build_direction_config(cfg, series)
+        assert result["predictor"] is not None
+        assert isinstance(result["predictor"], MomentumPredictor)
+        assert result["fallback_side"] == "up"
+
+    def test_fixed_type_no_predictor(self):
+        cfg = {
+            "direction": {"type": "fixed", "fallback_side": "down"},
+        }
+        result = build_direction_config(cfg, MarketSeries.from_known("btc-updown-5m"))
+        assert result["predictor"] is None
+        assert result["fallback_side"] == "down"
+
+    def test_no_direction_block_returns_none(self):
+        cfg = {}
+        result = build_direction_config(cfg, MarketSeries.from_known("btc-updown-5m"))
+        assert result["predictor"] is None
+        assert result["fallback_side"] is None
+
+    def test_registry_has_momentum(self):
+        assert "momentum" in DIRECTION_REGISTRY
