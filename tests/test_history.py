@@ -1,6 +1,7 @@
 """Tests for polybot.predict.history — ring buffer, recording, backfill."""
 
 import pytest
+from unittest.mock import patch, MagicMock
 from polybot.predict.history import WindowRecord, WindowHistory
 
 
@@ -77,3 +78,43 @@ class TestWindowHistoryRingBuffer:
         h.record(_record(1300))
         result = h.last_n(10)
         assert len(result) == 2
+
+
+class TestBackfill:
+    def _mock_market_response(self, slug, up_close=0.55, down_close=0.45, resolved="up"):
+        """Return a mock Gamma API market dict."""
+        return {
+            "slug": slug,
+            "active": False,
+            "closed": True,
+            "clobTokenIds": '["up-tok","down-tok"]',
+            "outcomePrices": f'["{up_close}","{down_close}"]',
+            "endDate": "2026-04-18T12:05:00Z",
+            "eventStartTime": "2026-04-18T12:00:00Z",
+            "volume": "100.0",
+        }
+
+    @patch("polybot.predict.history._fetch_market_for_backfill")
+    def test_backfill_fills_history(self, mock_fetch):
+        mock_fetch.side_effect = lambda slug: self._mock_market_response(slug)
+        h = WindowHistory(capacity=5)
+        h.backfill("btc-updown-5m", slug_step=300, count=3, current_epoch=1900)
+        assert len(h) == 3
+
+    @patch("polybot.predict.history._fetch_market_for_backfill")
+    def test_backfill_skips_failed_fetches(self, mock_fetch):
+        def alternate(slug):
+            if "1600" in slug:
+                return None
+            return self._mock_market_response(slug)
+        mock_fetch.side_effect = alternate
+        h = WindowHistory(capacity=10)
+        h.backfill("btc-updown-5m", slug_step=300, count=3, current_epoch=1900)
+        assert len(h) == 2
+
+    @patch("polybot.predict.history._fetch_market_for_backfill")
+    def test_backfill_respects_capacity(self, mock_fetch):
+        mock_fetch.side_effect = lambda slug: self._mock_market_response(slug)
+        h = WindowHistory(capacity=2)
+        h.backfill("btc-updown-5m", slug_step=300, count=5, current_epoch=1900)
+        assert len(h) == 2
