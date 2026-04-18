@@ -26,6 +26,29 @@ python3.11 run.py --dry
 
 ## 策略说明
 
+### 自动方向预测（可选）
+
+启用后每个窗口自动判断买入方向（Up/Down），无需手动指定 `--side`。
+
+**启用方式**：YAML 配置中添加 `direction` 块：
+```yaml
+direction:
+  type: momentum          # 自动预测
+  fallback_side: up       # 历史数据不足时的默认方向
+```
+
+**预测逻辑（MomentumPredictor V1）**：
+
+| 信号 | 权重 | 说明 |
+|---|---|---|
+| 价格动量 | 50% | 最近 3 窗口 Up token 收盘价趋势 |
+| Up/Down 价差偏移 | 30% | Up token 价格偏离 0.50 的方向 |
+| 连续结果反转 | 20% | 连续同方向结果 → 预测反转 |
+
+- 启动时自动从 Gamma API 回填历史数据（5m=100 窗口，15m=30，4h=6）
+- 历史不足 5 窗口时使用 `fallback_side`，未配置则跳过该窗口
+- 不配置 `direction` 块则行为与之前完全一致（手动 `--side`）
+
 ### ImmediateStrategy（默认）
 
 窗口开启后立即以首个价格买入，不做价格区间判断。买入后持续监控止盈/止损。
@@ -111,8 +134,12 @@ market:
 strategy:
   type: immediate         # 立即执行策略
 
+direction:
+  type: momentum          # 自动方向预测（可选，省略则用手动 side）
+  fallback_side: up       # 历史不足时的默认方向
+
 params:
-  side: up                # up 或 down
+  side: up                # up 或 down（direction: momentum 时被覆盖）
   amount: 1.0             # 每笔交易金额 (USD)
   tp_pct: 0.30            # 止盈 +30%
   sl_pct: 0.30            # 止损 -30%
@@ -230,6 +257,9 @@ polybot/                        # 交易包
 │   ├── market.py               # MarketWindow + slug 发现
 │   ├── series.py               # MarketSeries — 市场身份定义
 │   └── stream.py               # WebSocket 实时价格流
+├── predict/                    # 自动方向预测
+│   ├── history.py              # WindowHistory 环形缓冲区 + Gamma API 回填
+│   └── momentum.py             # MomentumPredictor — 加权投票信号
 ├── strategies/                 # 可插拔买入策略
 │   ├── base.py                 # Strategy ABC（仅 should_buy）
 │   └── immediate.py            # ImmediateStrategy — 窗口开即买

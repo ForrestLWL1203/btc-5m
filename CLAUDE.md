@@ -30,7 +30,7 @@ python3.11 run.py
 ```
 polybot/                    # Trading package
 ├── __init__.py
-├── config_loader.py        # YAML config loading + strategy registry
+├── config_loader.py        # YAML config loading + strategy/direction registry
 ├── trade_config.py         # TradeConfig dataclass — common params + check_exit()
 ├── core/                   # Core infrastructure
 │   ├── __init__.py
@@ -44,6 +44,10 @@ polybot/                    # Trading package
 │   ├── market.py           # MarketWindow dataclass + slug discovery
 │   ├── series.py           # MarketSeries — market identity (asset, timeframe, slug params)
 │   └── stream.py           # WebSocket real-time price stream (PriceStream)
+├── predict/                # Auto direction prediction
+│   ├── __init__.py         # Package exports
+│   ├── history.py          # WindowHistory ring buffer + Gamma API backfill
+│   └── momentum.py         # MomentumPredictor — weighted voting signals
 ├── strategies/             # Pluggable buy strategies
 │   ├── __init__.py
 │   ├── base.py             # Strategy ABC (should_buy only)
@@ -70,11 +74,13 @@ requirements.txt            # Python dependencies
 - **`market/series.py`**: `MarketSeries` frozen dataclass — defines a market series (asset, timeframe, slug params, window buffer). `KNOWN_SERIES` registry for known BTC/ETH markets.
 - **`market/stream.py`**: `PriceStream` class — WebSocket connection to `wss://ws-subscriptions-clob.polymarket.com/ws/market`. Subscribes to token IDs, emits `PriceUpdate` via callback. Handles `PING` every 10s.
 - **`trading/trading.py`**: FOK market orders with **10× retry at 100ms** (1 second total). Falls back to GTD limit at midpoint if FOK fails. Uses `PartialCreateOrderOptions` to skip SDK overhead.
-- **`trading/monitor.py`**: Async event-driven loop. `PriceStream` callbacks immediately trigger buy / stop-loss / take-profit. Uses optimistic/pessimistic price aggregation (TP=max of midpoint/trade/ask, SL=min of midpoint/trade/bid). Deferred signal mechanism for race conditions. Sell with balance-refreshing retry (`_sell_with_retry`) and residual cleanup (`_cleanup_residual`). Prefetches order params during WS pre-connect.
+- **`trading/monitor.py`**: Async event-driven loop. `PriceStream` callbacks immediately trigger buy / stop-loss / take-profit. Uses optimistic/pessimistic price aggregation (TP=max of midpoint/trade/ask, SL=min of midpoint/trade/bid). Deferred signal mechanism for race conditions. Sell with balance-refreshing retry (`_sell_with_retry`) and residual cleanup (`_cleanup_residual`). Prefetches order params during WS pre-connect. Supports optional `DirectionPredictor` — called once per window to auto-set `trade_config.side`.
 - **`strategies/base.py`**: `Strategy` ABC with single method `should_buy(price, state) -> bool`. Buy logic only.
 - **`strategies/immediate.py`**: `ImmediateStrategy` — `should_buy()` always returns `True`. Buys immediately at first price.
 - **`trade_config.py`**: `TradeConfig` dataclass — common trading params (side, amount, tp_pct, sl_pct, max_*_reentry, rounds) shared across all strategies. Contains `check_exit()` for TP/SL logic.
-- **`config_loader.py`**: YAML config loading, `STRATEGY_REGISTRY`, `build_series()`, `build_strategy()`, and `build_trade_config()` factory functions.
+- **`predict/history.py`**: `WindowRecord` dataclass (window price data) + `WindowHistory` ring buffer with Gamma API concurrent backfill. Capacity per timeframe: 5m=100, 15m=30, 4h=6.
+- **`predict/momentum.py`**: `DirectionPredictor` ABC + `MomentumPredictor` V1 — 3 weighted signals (price momentum 50%, Up/Down price offset 30%, streak reversal 20%). Returns "up"/"down"/None per window.
+- **`config_loader.py`**: YAML config loading, `STRATEGY_REGISTRY`, `DIRECTION_REGISTRY`, `build_series()`, `build_strategy()`, `build_trade_config()`, and `build_direction_config()` factory functions.
 
 ## Key TradeConfig Parameters
 
