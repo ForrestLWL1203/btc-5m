@@ -61,7 +61,9 @@ def _fetch_market_by_slug(slug: str) -> Optional[dict]:
         resp.raise_for_status()
         data = resp.json()
         if isinstance(data, list) and data:
-            return data[0]
+            for market in data:
+                if market.get("slug") == slug:
+                    return market
         return None
     except Exception as e:
         log.debug("Failed to fetch market %s: %s", slug, e)
@@ -122,11 +124,18 @@ def _epoch_to_slug(n: int, series: Optional[MarketSeries] = None) -> str:
     return f"{config.SERIES_SLUG_PREFIX}-{n}"
 
 
-def _scan_forward(from_epoch: int, series: Optional[MarketSeries] = None, max_windows: int = 12) -> Optional[MarketWindow]:
+def _scan_forward(
+    from_epoch: int,
+    series: Optional[MarketSeries] = None,
+    max_windows: int = 12,
+    include_future: bool = False,
+) -> Optional[MarketWindow]:
     """Scan forward from a given epoch, querying one slug at a time.
 
-    Stops at the first active, not-yet-expired window.  Each iteration is a
-    single lightweight Gamma API call (1 result, not 1000).
+    Stops at the first matching window. By default this means an active,
+    not-yet-expired window. When include_future=True, future windows are also
+    allowed as long as they are not closed and their start is at or after the
+    requested epoch.
     """
     now = datetime.datetime.now(UTC)
     slug_step = series.slug_step if series else config.SLUG_STEP
@@ -139,15 +148,21 @@ def _scan_forward(from_epoch: int, series: Optional[MarketSeries] = None, max_wi
         m = _fetch_market_by_slug(slug)
         if m is None:
             continue
-        if not m.get("active") or m.get("closed"):
-            continue
-
-        end_dt = _parse_dt(m.get("endDate", ""))
-        if end_dt is None or end_dt <= now:
+        if m.get("closed"):
             continue
 
         window = _build_window(m, series)
         if window is None:
+            continue
+        if window.end_time <= now:
+            continue
+
+        if include_future:
+            if window.start_epoch < from_epoch:
+                continue
+            return window
+
+        if not m.get("active"):
             continue
 
         return window
@@ -203,7 +218,7 @@ def find_window_after(after_epoch: int, series: Optional[MarketSeries] = None) -
     slug_step = series.slug_step if series else config.SLUG_STEP
     # Ceiling division: round up to next boundary, but include current boundary
     next_boundary = -(-after_epoch // slug_step) * slug_step
-    window = _scan_forward(next_boundary, series)
+    window = _scan_forward(next_boundary, series, include_future=True)
     if window is None:
         log_event(log, logging.WARNING, MARKET, {
             "action": "NOT_FOUND",

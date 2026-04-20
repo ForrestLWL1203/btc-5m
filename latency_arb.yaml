@@ -1,0 +1,45 @@
+# Latency Arbitrage Strategy Configuration
+# Run: python3.11 run.py --config latency_arb.yaml --dry
+
+market:
+  asset: btc
+  timeframe: 5m
+
+rounds: 3
+
+strategy:
+  type: latency_arb
+  # Model coefficients from analysis/analyze_data.py regression
+  # Calibrate with: python3.11 analysis/analyze_data.py data/collect_btc-updown-5m_*.jsonl
+  coefficients:
+    ret_2s: 0.985070
+    ret_5s: -0.163321
+    velocity: 0.001246
+    abs_vel: 0.002184
+  edge_threshold: 0.02     # min |edge| to trigger trade (calibrated from data)
+  noise_threshold: 0.005   # min BTC return % to consider signal
+  max_data_age_ms: 800     # relaxed from 500ms; still filters clearly stale BTC data
+  min_entry_price: 0.25    # avoid entering once the token is already priced near one-sided territory
+  max_entry_price: 0.70    # don't buy tokens above this price
+  entry_window_sec: 240    # only trade in first 4min of 5m window
+  edge_exit_fraction: 0.3  # fast exit when edge decays below threshold * fraction
+  max_hold_sec: 2.0        # forced exit after 2s (optimal from analysis)
+  edge_decay_grace_ms: 300 # don't instantly exit on minor edge decay right after buy
+  persistence_ms: 200      # edge must persist for 200ms before entry
+  cooldown_sec: 1.0        # don't re-fire faster than once per second
+  min_reentry_gap_sec: 3.0 # spread trades across the 5m window, not a few clustered seconds
+  edge_rearm_threshold: 0.01 # require edge to cool off before the next entry can arm
+  phase_one_sec: 90        # first 90s is the main battleground
+  max_entries_phase_one: 2
+  phase_two_sec: 180       # allow only one more trade in the next 90s
+  max_entries_phase_two: 3
+  disable_after_sec: 180   # stop opening new positions after 3 minutes
+
+params:
+  amount: 1.0
+  tp_price: 0.80
+  sl_pct: 0.05           # latency arb uses edge/max_hold as primary exits; SL is only a 5% backstop
+  max_sl_reentry: 0
+  max_tp_reentry: 0
+  max_edge_reentry: 3
+  max_entries_per_window: 4

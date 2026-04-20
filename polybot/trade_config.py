@@ -4,7 +4,7 @@ Every strategy needs the same TP/SL, amount, re-entry limits, and round control.
 These are universal, not strategy-specific. Strategy only contains buy decision logic.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
 
@@ -44,6 +44,8 @@ class TradeConfig:
     # Re-entry and rounds
     max_sl_reentry: int = 0
     max_tp_reentry: int = 0
+    max_edge_reentry: int = 0
+    max_entries_per_window: Optional[int] = None
     rounds: Optional[int] = None  # None = infinite
 
     SL_TIGHTENING_STEP = 0.10  # each SL re-entry tightens by 10% absolute

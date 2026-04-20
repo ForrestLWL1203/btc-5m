@@ -1,0 +1,43 @@
+# Latency Arbitrage Strategy Configuration (faster re-entry variant)
+# Run: python3.11 run.py --config latency_arb_fast.yaml --dry
+
+market:
+  asset: btc
+  timeframe: 5m
+
+rounds: 3
+
+strategy:
+  type: latency_arb
+  coefficients:
+    ret_2s: 0.985070
+    ret_5s: -0.163321
+    velocity: 0.001246
+    abs_vel: 0.002184
+  edge_threshold: 0.02
+  noise_threshold: 0.005
+  max_data_age_ms: 800
+  min_entry_price: 0.25
+  max_entry_price: 0.70
+  entry_window_sec: 240
+  edge_exit_fraction: 0.3
+  max_hold_sec: 2.0
+  edge_decay_grace_ms: 300
+  persistence_ms: 200
+  cooldown_sec: 0.5
+  min_reentry_gap_sec: 3.0
+  edge_rearm_threshold: 0.01
+  phase_one_sec: 90
+  max_entries_phase_one: 2
+  phase_two_sec: 180
+  max_entries_phase_two: 3
+  disable_after_sec: 180
+
+params:
+  amount: 1.0
+  tp_price: 0.80
+  sl_pct: 0.05
+  max_sl_reentry: 0
+  max_tp_reentry: 0
+  max_edge_reentry: 3
+  max_entries_per_window: 4

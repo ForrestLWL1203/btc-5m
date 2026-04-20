@@ -1,7 +1,6 @@
 """Trading strategies package."""
 
 from .base import Strategy
-from .immediate import FixedSideStrategy, ImmediateStrategy
-from .momentum import MomentumStrategy
+from .latency_arb import LatencyArbStrategy
 
-__all__ = ["Strategy", "FixedSideStrategy", "ImmediateStrategy", "MomentumStrategy"]
+__all__ = ["Strategy", "LatencyArbStrategy"]

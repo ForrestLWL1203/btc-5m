@@ -4,8 +4,7 @@ from pathlib import Path
 from typing import Optional
 
 from polybot.market.series import MarketSeries, KNOWN_SERIES, TIMEFRAME_SECONDS, _default_buffer
-from polybot.strategies.immediate import FixedSideStrategy
-from polybot.strategies.momentum import MomentumStrategy
+from polybot.strategies.latency_arb import LatencyArbStrategy
 from .trade_config import TradeConfig
 
 try:
@@ -51,25 +50,40 @@ def build_series(cfg: dict) -> MarketSeries:
 
 
 STRATEGY_REGISTRY: dict[str, type] = {
-    "immediate": FixedSideStrategy,
-    "momentum": MomentumStrategy,
+    "latency_arb": LatencyArbStrategy,
 }
 
 
-def build_strategy(cfg: dict, series: Optional[MarketSeries] = None) -> FixedSideStrategy | MomentumStrategy:
+def build_strategy(cfg: dict, series: Optional[MarketSeries] = None):
     """Build Strategy from config dict. Strategy handles direction + buy decision."""
     strat_cfg = cfg.get("strategy", {})
-    strat_type = strat_cfg.get("type", "immediate")
+    strat_type = strat_cfg.get("type", "latency_arb")
 
-    if strat_type == "immediate":
-        # Try strategy.side first, fall back to params.side for backward compat
-        side = strat_cfg.get("side") or cfg.get("params", {}).get("side", "up")
-        return FixedSideStrategy(side=side)
-
-    if strat_type == "momentum":
+    if strat_type == "latency_arb":
         if series is None:
-            raise ValueError("MomentumStrategy requires a market series")
-        return MomentumStrategy(series=series)
+            raise ValueError("LatencyArbStrategy requires a market series")
+        return LatencyArbStrategy(
+            series=series,
+            coefficients=strat_cfg.get("coefficients"),
+            edge_threshold=strat_cfg.get("edge_threshold", 0.01),
+            noise_threshold=strat_cfg.get("noise_threshold", 0.005),
+            max_data_age_ms=strat_cfg.get("max_data_age_ms", 500.0),
+            min_entry_price=strat_cfg.get("min_entry_price", 0.0),
+            max_entry_price=strat_cfg.get("max_entry_price", 0.90),
+            entry_window_sec=strat_cfg.get("entry_window_sec", 240.0),
+            edge_exit_fraction=strat_cfg.get("edge_exit_fraction", 0.5),
+            max_hold_sec=strat_cfg.get("max_hold_sec", 2.0),
+            edge_decay_grace_ms=strat_cfg.get("edge_decay_grace_ms", 0.0),
+            persistence_ms=strat_cfg.get("persistence_ms", 200.0),
+            cooldown_sec=strat_cfg.get("cooldown_sec", 0.5),
+            min_reentry_gap_sec=strat_cfg.get("min_reentry_gap_sec", 0.0),
+            edge_rearm_threshold=strat_cfg.get("edge_rearm_threshold", 0.0),
+            phase_one_sec=strat_cfg.get("phase_one_sec", 0.0),
+            max_entries_phase_one=strat_cfg.get("max_entries_phase_one"),
+            phase_two_sec=strat_cfg.get("phase_two_sec", 0.0),
+            max_entries_phase_two=strat_cfg.get("max_entries_phase_two"),
+            disable_after_sec=strat_cfg.get("disable_after_sec", 0.0),
+        )
 
     raise ValueError(
         f"Unknown strategy type: {strat_type}. "
@@ -93,5 +107,7 @@ def build_trade_config(cfg: dict) -> TradeConfig:
         sl_price=params.get("sl_price"),
         max_sl_reentry=params.get("max_sl_reentry", 0),
         max_tp_reentry=params.get("max_tp_reentry", 0),
+        max_edge_reentry=params.get("max_edge_reentry", 0),
+        max_entries_per_window=params.get("max_entries_per_window"),
         rounds=int(rounds_val) if rounds_val is not None else None,
     )

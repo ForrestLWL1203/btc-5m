@@ -10,7 +10,9 @@ from polybot.market.market import (
     MarketWindow,
     _build_window,
     _epoch_to_slug,
+    _fetch_market_by_slug,
     _parse_dt,
+    _scan_forward,
     find_window_after,
 )
 
@@ -109,6 +111,26 @@ def test_build_window_fallback_start_from_end():
     assert window.start_time == window.end_time
 
 
+def test_fetch_market_by_slug_requires_exact_slug_match():
+    """Gamma slug queries may return nearby markets; we must keep only the exact slug."""
+
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return [
+                {"slug": "btc-updown-5m-1776681600", "question": "old"},
+                {"slug": "btc-updown-5m-1776681900", "question": "next"},
+            ]
+
+    with patch("polybot.market.market.requests.get", return_value=_Resp()):
+        market = _fetch_market_by_slug("btc-updown-5m-1776681900")
+
+    assert market is not None
+    assert market["slug"] == "btc-updown-5m-1776681900"
+
+
 # ─── MarketWindow properties ─────────────────────────────────────────────────
 
 def test_window_short_label():
@@ -164,3 +186,42 @@ def test_find_window_after_just_past_boundary():
     after_epoch = 1301
     result = -(-after_epoch // config.SLUG_STEP) * config.SLUG_STEP
     assert result == 1500
+
+
+def test_find_window_after_can_return_future_inactive_window():
+    """Chained window lookup should accept the next exact slug before it becomes active."""
+
+    raw_future = {
+        "question": "Bitcoin Up or Down - Apr 15 9:45AM-9:50AM ET",
+        "clobTokenIds": '["future-up", "future-down"]',
+        "eventStartTime": "2099-04-15T13:45:00Z",
+        "endDate": "2099-04-15T13:50:00Z",
+        "slug": "btc-updown-5m-1776260700",
+        "active": False,
+        "closed": False,
+    }
+
+    with patch("polybot.market.market._fetch_market_by_slug", return_value=raw_future):
+        window = find_window_after(1776260700)
+
+    assert window is not None
+    assert window.slug == "btc-updown-5m-1776260700"
+
+
+def test_scan_forward_active_mode_skips_future_inactive_window():
+    """Regular next-window discovery should still require active windows."""
+
+    raw_future = {
+        "question": "Bitcoin Up or Down - Apr 15 9:45AM-9:50AM ET",
+        "clobTokenIds": '["future-up", "future-down"]',
+        "eventStartTime": "2026-04-15T13:45:00Z",
+        "endDate": "2099-04-15T13:50:00Z",
+        "slug": "btc-updown-5m-1776260700",
+        "active": False,
+        "closed": False,
+    }
+
+    with patch("polybot.market.market._fetch_market_by_slug", return_value=raw_future):
+        window = _scan_forward(1776260700)
+
+    assert window is None

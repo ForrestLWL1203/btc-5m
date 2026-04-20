@@ -1,11 +1,10 @@
 #!/usr/bin/env python3.11
 """
-Polybot — Polymarket Up/Down trading bot
+Polybot — Polymarket Up/Down trading bot (Latency Arbitrage Strategy)
 
 Usage:
-  python3.11 run.py --config strategy.yaml --dry    # YAML config + dry-run
-  python3.11 run.py --side up --amount 5 --dry      # CLI args
-  python3.11 run.py                                  # interactive mode
+  python3.11 run.py --config latency_arb.yaml --dry    # YAML config + dry-run
+  python3.11 run.py --market btc-updown-5m --dry       # CLI args
 
 Requirements:
   - Python 3.11+ (py-clob-client dependency)
@@ -18,6 +17,7 @@ import logging
 import logging.handlers
 import os
 import sys
+import time
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -46,6 +46,7 @@ console.setFormatter(ConsoleFormatter(
 root_log.addHandler(console)
 
 log = logging.getLogger(__name__)
+_LAST_DRY_RUN = False
 
 # File and JSONL handlers — initialized lazily once we know the market series
 _file_handler = None
@@ -85,89 +86,14 @@ def _setup_file_logging(slug_prefix: str) -> None:
     root_log.addHandler(_jsonl_handler)
 
 
-def _prompt_choice(prompt_text: str, options: list[str], default: str) -> str:
-    """Prompt user to choose from options (case-insensitive match)."""
-    options_str = "/".join(o.upper() for o in options)
-    while True:
-        raw = input(f"{prompt_text} [{options_str}] (default: {default}): ").strip()
-        if not raw:
-            return default
-        if raw.lower() in [o.lower() for o in options]:
-            return raw.lower()
-        print(f"  Invalid — please choose from {options_str}")
-
-
-def _prompt_float(prompt_text: str, default: float, min_val: float = 0.0, max_val: float = 1.0) -> float:
-    """Prompt user for a float value within [min_val, max_val]."""
-    while True:
-        raw = input(f"{prompt_text} (default: {default}): ").strip()
-        if not raw:
-            return default
-        try:
-            val = float(raw)
-            if min_val <= val <= max_val:
-                return val
-            print(f"  Must be between {min_val} and {max_val}")
-        except ValueError:
-            print("  Invalid number")
-
-
-def _prompt_amount(prompt_text: str, default: float) -> float:
-    """Prompt user for a USD amount (must be positive)."""
-    while True:
-        raw = input(f"{prompt_text} (default: ${default}): ").strip()
-        if not raw:
-            return default
-        try:
-            val = float(raw)
-            if val > 0:
-                return val
-            print("  Must be a positive number")
-        except ValueError:
-            print("  Invalid number")
-
-
-def _interactive_config() -> dict:
-    """Collect trading parameters interactively. Returns dict of resolved values."""
-    print("\n=== Polymarket Up/Down Trading Setup ===")
-    print()
-
-    side = _prompt_choice("Buy UP or DOWN", ["up", "down"], "up")
-    amount = _prompt_amount("USD amount per trade", 5.0)
-    print()
-
-    print("Exit triggers — percentage from entry price:")
-    tp_pct = _prompt_float("  Take-profit +% (e.g. 0.50 = +50%)", 0.50, 0.01, 5.0)
-    sl_pct = _prompt_float("  Stop-loss -% (e.g. 0.30 = -30%)", 0.30, 0.01, 0.99)
-    print()
-
-    print("Re-entry after exit:")
-    max_reentry = _prompt_choice(
-        "  Max re-entry after stop-loss? (0=no, 1=allow one, etc.)",
-        ["0", "1"], "0",
-    )
-    max_tp_reentry = _prompt_choice(
-        "  Max re-entry after take-profit? (0=no, 1=allow one, etc.)",
-        ["0", "1"], "0",
-    )
-    print()
-
-    return {
-        "side": side,
-        "amount": amount,
-        "tp_pct": tp_pct,
-        "sl_pct": sl_pct,
-        "max_reentry": int(max_reentry),
-        "max_tp_reentry": int(max_tp_reentry),
-    }
-
-
 def _build_trade_config_from_cli(cfg: dict, rounds: int = None) -> TradeConfig:
     """Build TradeConfig from CLI/interactive config."""
     kwargs = {
         "amount": cfg["amount"],
         "max_sl_reentry": cfg.get("max_sl_reentry", cfg.get("max_reentry", 0)),
         "max_tp_reentry": cfg.get("max_tp_reentry", cfg.get("max_tp_reentry", 0)),
+        "max_edge_reentry": cfg.get("max_edge_reentry", 0),
+        "max_entries_per_window": cfg.get("max_entries_per_window"),
     }
     if "tp_pct" in cfg:
         kwargs["tp_pct"] = cfg["tp_pct"]
@@ -183,14 +109,14 @@ def _build_trade_config_from_cli(cfg: dict, rounds: int = None) -> TradeConfig:
 
 
 async def main() -> None:
+    global _LAST_DRY_RUN
     parser = argparse.ArgumentParser(
         description="Polybot — Polymarket Up/Down Trader",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python3.11 run.py --config strategy.yaml --dry     # YAML config + dry-run
-  python3.11 run.py --market eth-updown-5m --side up --amount 5 --dry
-  python3.11 run.py                                   # interactive mode
+  python3.11 run.py --config latency_arb.yaml --dry     # YAML config + dry-run
+  python3.11 run.py --market btc-updown-5m --dry        # CLI args with defaults
         """,
     )
     parser.add_argument(
@@ -201,10 +127,6 @@ Examples:
         "--market", type=str,
         choices=list(KNOWN_SERIES.keys()),
         help="Market series preset (e.g. btc-updown-5m, eth-updown-4h)"
-    )
-    parser.add_argument(
-        "--side", choices=["up", "down"],
-        help="Which side to buy (up/down)"
     )
     parser.add_argument(
         "--amount", type=float,
@@ -235,8 +157,16 @@ Examples:
         help="Max re-entry buys after take-profit (0=disabled)"
     )
     parser.add_argument(
-        "--strategy", choices=["immediate", "momentum"],
-        help="Trading strategy: immediate (fixed side) or momentum (auto-predict direction)"
+        "--max-edge-reentry", type=int,
+        help="Max re-entry buys after edge-based fast exits (0=disabled)"
+    )
+    parser.add_argument(
+        "--max-entries-per-window", type=int,
+        help="Hard cap on total entries inside one market window"
+    )
+    parser.add_argument(
+        "--strategy", choices=["latency_arb"],
+        help="Trading strategy (default: latency_arb)"
     )
     parser.add_argument(
         "--dry", action="store_true",
@@ -256,18 +186,15 @@ Examples:
         series = build_series(yaml_cfg)
         strategy = build_strategy(yaml_cfg, series)
         trade_config = build_trade_config(yaml_cfg)
-    elif any(getattr(args, field) is not None
-             for field in ["strategy", "market", "side", "amount",
-                           "tp_pct", "sl_pct", "tp_price", "sl_price",
-                           "max_reentry", "max_tp_reentry", "rounds"]):
-        # CLI args mode — any trading-related flag triggers this
+    else:
+        # CLI/interactive mode — latency_arb only
         series = MarketSeries.from_known(args.market or "btc-updown-5m")
-        strategy_type = args.strategy or "immediate"
-        side = args.side or "up"
         params = {
             "amount": args.amount or 5.0,
             "max_sl_reentry": args.max_reentry if args.max_reentry is not None else 0,
             "max_tp_reentry": args.max_tp_reentry if args.max_tp_reentry is not None else 0,
+            "max_edge_reentry": args.max_edge_reentry if args.max_edge_reentry is not None else 0,
+            "max_entries_per_window": args.max_entries_per_window,
         }
         if args.tp_price is not None:
             params["tp_price"] = args.tp_price
@@ -278,29 +205,14 @@ Examples:
         else:
             params["sl_pct"] = args.sl_pct or 0.30
         cfg = {
-            "strategy": {"type": strategy_type, "side": side},
+            "strategy": {"type": "latency_arb"},
             "params": params,
         }
         strategy = build_strategy(cfg, series)
         trade_config = _build_trade_config_from_cli(cfg["params"], rounds=args.rounds)
-    else:
-        # Interactive mode
-        icfg = _interactive_config()
-        series = MarketSeries.from_known(args.market or "btc-updown-5m")
-        cfg = {
-            "strategy": {"type": "immediate", "side": icfg["side"]},
-            "params": {
-                "amount": icfg["amount"],
-                "tp_pct": icfg["tp_pct"],
-                "sl_pct": icfg["sl_pct"],
-                "max_sl_reentry": icfg["max_reentry"],
-                "max_tp_reentry": icfg["max_tp_reentry"],
-            },
-        }
-        strategy = build_strategy(cfg, series)
-        trade_config = _build_trade_config_from_cli(icfg, rounds=args.rounds)
 
     dry_run = args.dry
+    _LAST_DRY_RUN = dry_run
 
     # Set up file logging with market-specific names
     _setup_file_logging(series.slug_prefix)
@@ -328,6 +240,11 @@ Examples:
 
     ws = None
     completed = 0
+
+    # Start strategy lifecycle (e.g. Binance WS for LatencyArbStrategy)
+    if hasattr(strategy, 'start'):
+        await strategy.start()
+
     try:
         while True:
             window = find_next_window(series)
@@ -382,11 +299,17 @@ Examples:
             if trade_config.rounds is not None and completed >= trade_config.rounds:
                 break
 
+            remaining_to_boundary = window.end_epoch - int(time.time())
+            if next_win is None and monitored and remaining_to_boundary > 0:
+                await asyncio.sleep(remaining_to_boundary)
+
             log.info("=== Window pair complete, restarting search ===")
     finally:
         if ws:
             await ws.close()
             log.info("WebSocket closed on exit")
+        if hasattr(strategy, 'stop'):
+            await strategy.stop()
 
 
 if __name__ == "__main__":
@@ -394,12 +317,15 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         log.info("Interrupted by user — attempting cleanup...")
-        try:
-            from polybot.core.client import get_client
-            client = get_client()
-            client.cancel_all()
-            log.info("Cancelled all open orders on exit")
-        except Exception as e:
-            log.warning("Cleanup failed: %s — please check for open orders manually", e)
+        if _LAST_DRY_RUN:
+            log.info("Dry-run exit: skipping cancel-all cleanup")
+        else:
+            try:
+                from polybot.core.client import get_client
+                client = get_client()
+                client.cancel_all()
+                log.info("Cancelled all open orders on exit")
+            except Exception as e:
+                log.warning("Cleanup failed: %s — please check for open orders manually", e)
         log.info("Exiting.")
         sys.exit(0)
