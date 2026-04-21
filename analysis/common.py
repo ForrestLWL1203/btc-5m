@@ -1,4 +1,4 @@
-"""Shared analysis helpers for latency-arb research scripts."""
+"""Shared analysis helpers for paired BTC + Polymarket research."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ class BinanceTick:
     qty: float
     side: str  # "buy" or "sell"
     exchange_ts: float = 0
+    source: str = "binance"
 
 
 @dataclass
@@ -53,7 +54,7 @@ class Snapshot:
 
 
 def load_data(filepath: str):
-    """Parse JSONL into binance/poly/snap/outcome lists."""
+    """Parse JSONL into btc/poly/snap/outcome lists."""
     binance = []
     poly = []
     snapshots = []
@@ -69,7 +70,7 @@ def load_data(filepath: str):
             if src == "binance":
                 binance.append(BinanceTick(
                     rec["ts"], rec["price"], rec["qty"],
-                    rec.get("side", "unknown"), rec.get("exchange_ts", 0),
+                    rec.get("side", "unknown"), rec.get("exchange_ts", 0), src,
                 ))
             elif src == "poly":
                 poly.append(PolyUpdate(
@@ -195,6 +196,79 @@ def compute_velocity(binance: list[BinanceTick], window_sec: float = 1.0):
         accelerations.append(acc)
 
     return velocities, accelerations
+
+
+def measure_reaction_latency(
+    binance: list[BinanceTick],
+    poly_dedup: list[PolyUpdate],
+    offsets: list[float] | None = None,
+) -> dict:
+    """Cross-correlation: BTC delta vs UP token delta at various offsets."""
+    up_lookup = SeriesLookup(
+        sorted([(p.ts, p.mid) for p in poly_dedup if p.token == "up"], key=lambda x: x[0])
+    )
+    if not up_lookup._ts or len(binance) < 20:
+        return {"error": "insufficient data"}
+
+    btc_ts = [b.ts for b in binance]
+    btc_prices = [b.price for b in binance]
+    start_ts = max(btc_ts[0], up_lookup._ts[0])
+    end_ts = min(btc_ts[-1], up_lookup._ts[-1])
+    offsets = offsets or [0, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 5.0]
+
+    results = {}
+    for offset in offsets:
+        btc_deltas = []
+        up_deltas = []
+
+        sample_ts = start_ts + 2.0
+        while sample_ts < end_ts - 2.0:
+            idx_now = bisect_right(btc_ts, sample_ts) - 1
+            idx_2s = bisect_right(btc_ts, sample_ts - 2.0) - 1
+            if idx_now < 0 or idx_2s < 0:
+                sample_ts += 0.5
+                continue
+
+            btc_now = btc_prices[idx_now]
+            btc_2s = btc_prices[idx_2s]
+            up_now = up_lookup.at(sample_ts + offset)
+            up_2s = up_lookup.at(sample_ts + offset - 2.0)
+
+            if btc_now and btc_2s and up_now is not None and up_2s is not None:
+                btc_deltas.append(btc_now - btc_2s)
+                up_deltas.append(up_now - up_2s)
+
+            sample_ts += 0.5
+
+        if len(btc_deltas) > 5:
+            n = len(btc_deltas)
+            mean_b = sum(btc_deltas) / n
+            mean_u = sum(up_deltas) / n
+            cov = sum((btc_deltas[i] - mean_b) * (up_deltas[i] - mean_u) for i in range(n)) / n
+            std_b = (sum((x - mean_b) ** 2 for x in btc_deltas) / n) ** 0.5
+            std_u = (sum((x - mean_u) ** 2 for x in up_deltas) / n) ** 0.5
+            corr = cov / (std_b * std_u) if std_b > 0 and std_u > 0 else 0
+            results[f"offset_{offset}s"] = {
+                "correlation": round(corr, 4),
+                "samples": n,
+                "btc_std": round(std_b, 2),
+                "up_std": round(std_u, 4),
+            }
+
+    return results
+
+
+def detect_reaction_lag(binance: list[BinanceTick], poly_dedup: list[PolyUpdate]) -> tuple[float, dict]:
+    """Return the best lag estimate plus the full correlation table."""
+    results = measure_reaction_latency(binance, poly_dedup)
+    if "error" in results or not results:
+        return 0.5, results
+
+    best_offset = max(
+        results.items(),
+        key=lambda item: item[1]["correlation"],
+    )[0].replace("offset_", "").replace("s", "")
+    return float(best_offset), results
 
 
 def fit_reaction_model(binance: list[BinanceTick], poly_dedup: list[PolyUpdate], lag: float = 0.5) -> dict:

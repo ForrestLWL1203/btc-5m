@@ -1,1 +1,1 @@
-"""Analysis utilities for latency-arbitrage research."""
+"""Analysis utilities for paired BTC + Polymarket research."""

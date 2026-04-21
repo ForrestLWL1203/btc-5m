@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Optional
 
 from polybot.market.series import MarketSeries, KNOWN_SERIES, TIMEFRAME_SECONDS, _default_buffer
-from polybot.strategies.latency_arb import LatencyArbStrategy
+from polybot.strategies.paired_window import PairedWindowStrategy
 from .trade_config import TradeConfig
 
 try:
@@ -48,51 +48,43 @@ def build_series(cfg: dict) -> MarketSeries:
         window_end_buffer=window_end_buffer,
     )
 
-
 STRATEGY_REGISTRY: dict[str, type] = {
-    "latency_arb": LatencyArbStrategy,
+    "paired_window": PairedWindowStrategy,
 }
 
 
 def build_strategy(cfg: dict, series: Optional[MarketSeries] = None):
-    """Build Strategy from config dict. Strategy handles direction + buy decision."""
+    """Build Strategy from config dict."""
     strat_cfg = cfg.get("strategy", {})
-    strat_type = strat_cfg.get("type", "latency_arb")
-
-    if strat_type == "latency_arb":
+    strat_type = strat_cfg.get("type")
+    if strat_type == "paired_window":
         if series is None:
-            raise ValueError("LatencyArbStrategy requires a market series")
-        return LatencyArbStrategy(
+            raise ValueError("PairedWindowStrategy requires a market series")
+        return PairedWindowStrategy(
             series=series,
-            coefficients=strat_cfg.get("coefficients"),
-            edge_threshold=strat_cfg.get("edge_threshold", 0.01),
-            noise_threshold=strat_cfg.get("noise_threshold", 0.005),
-            max_data_age_ms=strat_cfg.get("max_data_age_ms", 500.0),
-            min_entry_price=strat_cfg.get("min_entry_price", 0.0),
-            max_entry_price=strat_cfg.get("max_entry_price", 0.90),
-            entry_window_sec=strat_cfg.get("entry_window_sec", 240.0),
-            edge_exit_fraction=strat_cfg.get("edge_exit_fraction", 0.5),
-            max_hold_sec=strat_cfg.get("max_hold_sec", 2.0),
-            edge_decay_grace_ms=strat_cfg.get("edge_decay_grace_ms", 0.0),
-            persistence_ms=strat_cfg.get("persistence_ms", 200.0),
-            cooldown_sec=strat_cfg.get("cooldown_sec", 0.5),
-            min_reentry_gap_sec=strat_cfg.get("min_reentry_gap_sec", 0.0),
-            edge_rearm_threshold=strat_cfg.get("edge_rearm_threshold", 0.0),
-            phase_one_sec=strat_cfg.get("phase_one_sec", 0.0),
-            max_entries_phase_one=strat_cfg.get("max_entries_phase_one"),
-            phase_two_sec=strat_cfg.get("phase_two_sec", 0.0),
-            max_entries_phase_two=strat_cfg.get("max_entries_phase_two"),
-            disable_after_sec=strat_cfg.get("disable_after_sec", 0.0),
+            theta_pct=strat_cfg.get("theta_pct", 0.02),
+            entry_start_remaining_sec=strat_cfg.get("entry_start_remaining_sec", 270.0),
+            entry_end_remaining_sec=strat_cfg.get("entry_end_remaining_sec", 120.0),
+            persistence_sec=strat_cfg.get("persistence_sec", 10.0),
+            min_entry_price=strat_cfg.get("min_entry_price", 0.60),
+            max_entry_price=strat_cfg.get("max_entry_price", 0.70),
+            min_move_ratio=strat_cfg.get("min_move_ratio", 0.7),
+            open_price_max_wait_sec=strat_cfg.get("open_price_max_wait_sec", 30.0),
         )
 
+    available = ", ".join(sorted(STRATEGY_REGISTRY)) or "none"
+    if strat_type:
+        raise ValueError(
+            f"Unknown strategy type: {strat_type}. "
+            f"Available: {available}"
+        )
     raise ValueError(
-        f"Unknown strategy type: {strat_type}. "
-        f"Available: {', '.join(STRATEGY_REGISTRY.keys())}"
+        f"Strategy type is required. Available strategies: {available}"
     )
 
 
 def build_trade_config(cfg: dict) -> TradeConfig:
-    """Build TradeConfig from config dict. Contains all common trading parameters."""
+    """Build runtime execution config for the active strategy."""
     params = cfg.get("params", {})
 
     rounds_val = cfg.get("rounds")
@@ -101,13 +93,6 @@ def build_trade_config(cfg: dict) -> TradeConfig:
 
     return TradeConfig(
         amount=params.get("amount", 5.0),
-        tp_pct=params.get("tp_pct", 0.50),
-        sl_pct=params.get("sl_pct", 0.30),
-        tp_price=params.get("tp_price"),
-        sl_price=params.get("sl_price"),
-        max_sl_reentry=params.get("max_sl_reentry", 0),
-        max_tp_reentry=params.get("max_tp_reentry", 0),
-        max_edge_reentry=params.get("max_edge_reentry", 0),
         max_entries_per_window=params.get("max_entries_per_window"),
         rounds=int(rounds_val) if rounds_val is not None else None,
     )

@@ -66,7 +66,7 @@ def _fetch_market_by_slug(slug: str) -> Optional[dict]:
                     return market
         return None
     except Exception as e:
-        log.debug("Failed to fetch market %s: %s", slug, e)
+        log.warning("Failed to fetch market %s: %s", slug, e)
         return None
 
 

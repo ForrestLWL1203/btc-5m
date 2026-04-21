@@ -1,14 +1,4 @@
-"""Configuration constants — mirrors btc5m_trade.sh top-level parameters."""
-
-# Trading direction: "up" or "down"
-BUY_SIDE: str = "up"  # which side to buy ("up" or "down")
-
-# Trading parameters
-BUY_AMOUNT: float = 5.0  # dollars per trade
-BUY_THRESHOLD_LOW: float = 0.45  # minimum price to place buy order
-BUY_THRESHOLD_HIGH: float = 0.55  # maximum price to place buy order
-STOP_LOSS: float = 0.30  # sell if Up price drops below this (for UP side) / DOWN price drops below this (for DOWN side)
-TAKE_PROFIT: float = 0.80  # sell if price rises above this
+"""Configuration constants for market discovery and execution plumbing."""
 
 # Market slug discovery
 SLUG_STEP: int = 300  # slug numbers increment by 300 seconds (5 minutes)
@@ -28,15 +18,6 @@ FALLBACK_GTC: bool = True  # fallback to GTC limit order if FOK fails
 
 # Window timing
 WINDOW_END_BUFFER: int = 5  # treat window as ending this many seconds early to avoid boundary issues
-
-# Signal freshness
-TRADE_PRICE_TTL: float = 3.0  # seconds before last_trade_price is considered stale for SL/TP
-
-# Re-entry limits per window (0 = most conservative, only one buy)
-# STOP_LOSS: allow up to N re-buys after stop-loss exits
-# TAKE_PROFIT: allow up to N re-buys after take-profit exits
-MAX_STOP_LOSS_REENTRY: int = 0   # 0 = no re-entry after stop-loss
-MAX_TP_REENTRY: int = 0          # 0 = no re-entry after take-profit
 
 # Slug name
 SERIES_SLUG_PREFIX: str = "btc-updown-5m"

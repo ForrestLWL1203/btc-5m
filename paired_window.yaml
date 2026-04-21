@@ -1,0 +1,23 @@
+# Runtime candidate based on paired-data window analysis.
+# This version holds to resolution: no TP, no SL, no early exit hooks.
+
+market:
+  asset: btc
+  timeframe: 5m
+
+rounds: 1
+
+strategy:
+  type: paired_window
+  theta_pct: 0.02
+  entry_start_remaining_sec: 270
+  entry_end_remaining_sec: 120
+  persistence_sec: 10
+  min_entry_price: 0.60
+  max_entry_price: 0.70
+  min_move_ratio: 0.7
+  open_price_max_wait_sec: 30
+
+params:
+  amount: 1.0
+  max_entries_per_window: 1

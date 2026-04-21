@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -84,6 +85,7 @@ async def _post_fok_market(
     max_engine_retries = 3
     engine_backoff = 2.0
 
+    t_total = time.monotonic()
     for attempt in range(1, retry_count + 1):
         try:
             client = get_client()
@@ -93,8 +95,10 @@ async def _post_fok_market(
                 side=side_const,
             )
             options = get_order_options(token_id)
+            t_attempt = time.monotonic()
             signed = client.create_market_order(args, options=options)
             resp = client.post_order(signed, OrderType.FOK)
+            attempt_ms = round((time.monotonic() - t_attempt) * 1000)
 
             resp_id = resp.get("orderID") or resp.get("orderId") or resp.get("id", "")
             status = resp.get("status", "").upper()
@@ -117,6 +121,7 @@ async def _post_fok_market(
             filled_size = filled if filled > 0 else amount
             avg_price = price if price > 0 else 0.0
 
+            total_ms = round((time.monotonic() - t_total) * 1000)
             log_event(log, logging.INFO, TRADE, {
                 "action": "FOK_FILLED",
                 "side": side,
@@ -124,6 +129,8 @@ async def _post_fok_market(
                 "filled_size": filled_size,
                 "avg_price": avg_price,
                 "attempt": attempt,
+                "attempt_ms": attempt_ms,
+                "total_ms": total_ms,
             })
 
             return OrderResult(

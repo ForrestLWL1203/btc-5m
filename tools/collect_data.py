@@ -1,13 +1,10 @@
-"""Collect paired BTC tick + Polymarket price data via dual WebSocket.
-
-Records timestamp-aligned Binance trades and Polymarket UP/DOWN prices
-to JSONL for building a latency-arbitrage reaction function.
+"""Collect paired Binance BTC tick + Polymarket price data via WebSocket.
 
 Features:
   - Event-driven snapshots (triggered by BTC price/flow changes, not fixed interval)
   - Multi-scale order flow aggregation (100ms, 500ms, 2s)
-  - Orderbook structure: spread, mid_change, update_interval
-  - Time-to-expiry for binary option gamma modeling
+  - Orderbook structure: spread and mid_change
+  - Time-to-expiry snapshots inside each Polymarket window
   - Rolling volatility (BTC 2s std)
   - Data age tracking (btc_age, poly_age) per snapshot
   - Periodic flush (every 1s) to prevent data loss
@@ -21,6 +18,7 @@ import json
 import logging
 import os
 import time
+from bisect import bisect_right
 from collections import deque
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Optional
@@ -30,7 +28,8 @@ import websockets
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger(__name__)
 
-BINANCE_WS = "wss://stream.binance.com:9443/ws/btcusdt@trade"
+BINANCE_WS_TEMPLATE = "wss://stream.binance.com:9443/ws/{}@trade"
+BINANCE_KLINES_TEMPLATE = "https://api.binance.com/api/v3/klines"
 DATA_DIR = "data"
 MAX_STALENESS = 0.5
 # Flow aggregation windows (seconds)
@@ -46,7 +45,12 @@ HEARTBEAT_INTERVAL = 0.2  # 200ms fallback
 class BinanceTradeStream:
     """Minimal Binance trade WebSocket client."""
 
-    def __init__(self, on_trade: Callable[[float, float, float, float, bool], Awaitable[None]]):
+    def __init__(
+        self,
+        symbol: str,
+        on_trade: Callable[[float, float, float, float, bool], Awaitable[None]],
+    ):
+        self._ws_url = BINANCE_WS_TEMPLATE.format(symbol)
         self._on_trade = on_trade
         self._ws: Optional[websockets.WebSocketClientProtocol] = None
         self._running = False
@@ -54,7 +58,7 @@ class BinanceTradeStream:
 
     async def connect(self) -> None:
         self._running = True
-        self._ws = await websockets.connect(BINANCE_WS)
+        self._ws = await websockets.connect(self._ws_url)
         self._recv_task = asyncio.create_task(self._recv_loop())
         log.info("Binance WS connected")
 
@@ -71,7 +75,7 @@ class BinanceTradeStream:
         while self._running:
             try:
                 if self._ws is None:
-                    self._ws = await websockets.connect(BINANCE_WS)
+                    self._ws = await websockets.connect(self._ws_url)
                     log.info("Binance reconnected")
                 async for msg in self._ws:
                     data = json.loads(msg)
@@ -102,13 +106,13 @@ class WindowSummary:
     up_end: Optional[float] = None
     down_start: Optional[float] = None
     down_end: Optional[float] = None
-    binance_ticks: int = 0
+    btc_ticks: int = 0
     poly_updates: int = 0
     actual_direction: Optional[str] = None
 
 
 class DataCollector:
-    """Coordinates Binance + Polymarket streams, writes JSONL."""
+    """Coordinates Binance BTC plus Polymarket and writes JSONL."""
 
     def __init__(self, series_key: str, max_windows: int, slim: bool = False):
         from polybot.market.series import MarketSeries
@@ -120,16 +124,14 @@ class DataCollector:
         self._outfile = None
         self._summary = WindowSummary(window_label="")
 
-        # BTC state
-        self._btc_price: Optional[float] = None
-        self._btc_ts: float = 0
-        self._btc_exchange_ts: float = 0
-        self._btc_prev_price: Optional[float] = None
-        # Rolling BTC prices for volatility: (ts, price)
-        self._btc_history: deque[tuple[float, float]] = deque(maxlen=5000)
-
-        # Order flow: (ts, qty, side) — keep 3s worth
-        self._flow: deque[tuple[float, float, str]] = deque(maxlen=10000)
+        self._btc_state = {
+            "price": None,
+            "ts": 0.0,
+            "exchange_ts": 0.0,
+            "prev_price": None,
+            "history": deque(maxlen=5000),
+            "flow": deque(maxlen=10000),
+        }
 
         # Poly state: direction → {mid, bid, ask, ts, prev_mid, update_count}
         self._poly_state: dict[str, dict] = {}
@@ -139,7 +141,7 @@ class DataCollector:
         self._snap_trigger: str = ""  # what triggered last snap
         self._window_end: float = 0  # for time_to_expiry
 
-        self._binance: Optional[BinanceTradeStream] = None
+        self._btc_feed: Optional[BinanceTradeStream] = None
         self._poly: Optional[object] = None
         self._token_map: dict[str, str] = {}
         self._heartbeat_task: Optional[asyncio.Task] = None
@@ -156,8 +158,7 @@ class DataCollector:
         self._outfile = open(filename, "a")
         log.info("Output: %s", filename)
 
-        self._binance = BinanceTradeStream(self._on_binance_trade)
-        await self._binance.connect()
+        await self._connect_btc_feeds()
 
         self._poly = PriceStream(on_price=self._on_poly_price)
         self._running = True
@@ -184,9 +185,7 @@ class DataCollector:
 
             self._token_map = {window.up_token: "up", window.down_token: "down"}
             self._poly_state.clear()
-            self._flow.clear()
-            self._btc_history.clear()
-            self._btc_prev_price = None
+            self._reset_btc_state()
 
             if i == 0:
                 await self._poly.connect([window.up_token, window.down_token])
@@ -210,7 +209,7 @@ class DataCollector:
             log.info(
                 f"  Window done: BTC {self._summary.btc_start:.1f} → {self._summary.btc_end:.1f} "
                 f"({self._summary.actual_direction}), "
-                f"ticks={self._summary.binance_ticks} poly={self._summary.poly_updates}"
+                f"ticks={self._summary.btc_ticks} poly={self._summary.poly_updates}"
             )
             self._print_summary_line()
 
@@ -221,19 +220,45 @@ class DataCollector:
             self._heartbeat_task.cancel()
         if self._flush_task:
             self._flush_task.cancel()
-        await self._binance.close()
+        if self._btc_feed is not None:
+            await self._btc_feed.close()
         await self._poly.close()
         self._flush()
         self._outfile.close()
         log.info(f"\nData saved to {filename}")
 
-    async def _on_binance_trade(self, local_ts: float, exchange_ts: float,
-                                price: float, qty: float, is_seller: bool) -> None:
-        prev_price = self._btc_price
-        self._btc_price = price
-        self._btc_ts = local_ts
-        self._btc_exchange_ts = exchange_ts
-        self._btc_history.append((local_ts, price))
+    async def _connect_btc_feeds(self) -> None:
+        symbol = "btcusdt" if self.series.asset == "btc" else "ethusdt"
+        self._btc_feed = BinanceTradeStream(
+            symbol=symbol,
+            on_trade=lambda local_ts, exchange_ts, price, qty, is_seller: (
+                self._on_btc_trade(local_ts, exchange_ts, price, qty, is_seller)
+            ),
+        )
+        await self._btc_feed.connect()
+
+    def _reset_btc_state(self) -> None:
+        self._btc_state["price"] = None
+        self._btc_state["ts"] = 0.0
+        self._btc_state["exchange_ts"] = 0.0
+        self._btc_state["prev_price"] = None
+        self._btc_state["history"].clear()
+        self._btc_state["flow"].clear()
+
+    async def _on_btc_trade(
+        self,
+        local_ts: float,
+        exchange_ts: float,
+        price: float,
+        qty: float,
+        is_seller: bool,
+    ) -> None:
+        state = self._btc_state
+        prev_price = state["price"]
+        state["price"] = price
+        state["ts"] = local_ts
+        state["exchange_ts"] = exchange_ts
+        state["history"].append((local_ts, price))
 
         s = self._summary
         if s.btc_start is None:
@@ -241,10 +266,10 @@ class DataCollector:
         s.btc_end = price
         s.btc_min = min(s.btc_min, price)
         s.btc_max = max(s.btc_max, price)
-        s.binance_ticks += 1
+        s.btc_ticks += 1
 
         side = "sell" if is_seller else "buy"
-        self._flow.append((local_ts, qty, side))
+        state["flow"].append((local_ts, qty, side))
 
         line = json.dumps({
             "ts": round(local_ts, 3), "exchange_ts": round(exchange_ts, 3),
@@ -252,7 +277,6 @@ class DataCollector:
         })
         self._buffer.append(line)
 
-        # Event-driven: trigger snapshot on BTC price change
         if prev_price is not None and abs(price - prev_price) >= BTC_SNAP_THRESHOLD:
             self._emit_snapshot(local_ts, trigger="btc_move")
 
@@ -311,7 +335,14 @@ class DataCollector:
         if ts - self._last_snap_ts < MIN_SNAP_INTERVAL:
             return
 
-        if self._btc_price is None or ts - self._btc_ts > MAX_STALENESS:
+        btc = self._btc_state
+        btc_price = btc["price"]
+        btc_ts = btc["ts"]
+        btc_exchange_ts = btc["exchange_ts"]
+        btc_history = btc["history"]
+        btc_flow_queue = btc["flow"]
+
+        if btc_price is None or ts - btc_ts > MAX_STALENESS:
             return
 
         up = self._poly_state.get("up")
@@ -328,7 +359,7 @@ class DataCollector:
         for window in FLOW_WINDOWS:
             cutoff = ts - window
             buy_vol, sell_vol = 0.0, 0.0
-            for ft, fq, fs in self._flow:
+            for ft, fq, fs in btc_flow_queue:
                 if ft >= cutoff:
                     if fs == "buy":
                         buy_vol += fq
@@ -346,7 +377,7 @@ class DataCollector:
         # BTC volatility: rolling std of returns over 2s
         btc_vol = 0.0
         cutoff_vol = ts - 2.0
-        vol_prices = [p for t, p in self._btc_history if t >= cutoff_vol]
+        vol_prices = [p for t, p in btc_history if t >= cutoff_vol]
         if len(vol_prices) >= 3:
             returns = [(vol_prices[i] - vol_prices[i-1]) / vol_prices[i-1]
                        for i in range(1, len(vol_prices))]
@@ -363,7 +394,7 @@ class DataCollector:
         time_to_expiry = max(0, self._window_end - ts)
 
         # Data age
-        btc_age = round(ts - self._btc_ts, 4)
+        btc_age = round(ts - btc_ts, 4)
         up_age = round(ts - up["ts"], 4)
         down_age = round(ts - down["ts"], 4)
 
@@ -373,12 +404,13 @@ class DataCollector:
             "trigger": trigger,
             "time_to_expiry": round(time_to_expiry, 2),
             "btc": {
-                "price": self._btc_price,
-                "ts": round(self._btc_ts, 3),
-                "exchange_ts": round(self._btc_exchange_ts, 3),
+                "price": btc_price,
+                "ts": round(btc_ts, 3),
+                "exchange_ts": round(btc_exchange_ts, 3),
                 "age": btc_age,
                 "volatility_2s": round(btc_vol, 8),
                 "flow": flow_data,
+                "source": "binance",
             },
             "up": {
                 "mid": up["mid"], "bid": up["bid"], "ask": up["ask"],
@@ -401,7 +433,7 @@ class DataCollector:
         """Periodic heartbeat snapshots (fallback for quiet periods)."""
         while self._running:
             await asyncio.sleep(HEARTBEAT_INTERVAL)
-            if self._btc_price is not None:
+            if self._btc_state["price"] is not None:
                 self._emit_snapshot(time.time(), trigger="heartbeat")
 
     async def _periodic_flush(self) -> None:
@@ -422,19 +454,35 @@ class DataCollector:
             def fetch():
                 o, c = None, None
                 try:
-                    r = req.get("https://api.binance.com/api/v3/klines",
-                        params={"symbol": symbol, "interval": "1m",
-                                "startTime": int(window.start_epoch * 1000), "limit": 1}, timeout=10)
+                    r = req.get(
+                        BINANCE_KLINES_TEMPLATE,
+                        params={
+                            "symbol": symbol,
+                            "interval": "1m",
+                            "startTime": int(window.start_epoch) * 1000,
+                            "endTime": (int(window.start_epoch) + 60) * 1000,
+                            "limit": 1,
+                        },
+                        timeout=10,
+                    )
                     d = r.json()
                     o = float(d[0][1]) if d else None
                 except Exception:
                     pass
                 try:
-                    r = req.get("https://api.binance.com/api/v3/aggTrades",
-                        params={"symbol": symbol, "endTime": int(window.end_epoch * 1000),
-                                "limit": 1}, timeout=10)
+                    r = req.get(
+                        BINANCE_KLINES_TEMPLATE,
+                        params={
+                            "symbol": symbol,
+                            "interval": "1m",
+                            "startTime": (int(window.end_epoch) - 60) * 1000,
+                            "endTime": int(window.end_epoch) * 1000,
+                            "limit": 1,
+                        },
+                        timeout=10,
+                    )
                     d = r.json()
-                    c = float(d[-1]["p"]) if d else None
+                    c = float(d[0][4]) if d else None
                 except Exception:
                     pass
                 return o, c
@@ -453,7 +501,7 @@ class DataCollector:
             "open": open_price,
             "close": close_price,
             "direction": self._summary.actual_direction,
-            "source": "ticks" if self._summary.btc_start else "api",
+            "source": "binance_ticks" if self._summary.btc_start else "binance_api",
         }
         self._outfile.write(json.dumps(outcome) + "\n")
         self._outfile.flush()
@@ -472,14 +520,14 @@ class DataCollector:
               f"UP={s.up_start:.3f}→{s.up_end:.3f} ({up_chg:+.3f})  "
               f"DOWN={s.down_start:.3f}→{s.down_end:.3f}  "
               f"actual={s.actual_direction}  "
-              f"ticks={s.binance_ticks} poly={s.poly_updates}")
+              f"ticks={s.btc_ticks} poly={s.poly_updates}")
 
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--market", default="btc-updown-5m")
     p.add_argument("--windows", type=int, default=5)
-    p.add_argument("--slim", action="store_true", help="Only write snap+binance, skip raw poly stream")
+    p.add_argument("--slim", action="store_true", help="Only write snap+btc, skip raw poly stream")
     args = p.parse_args()
     collector = DataCollector(args.market, args.windows, slim=args.slim)
     asyncio.run(collector.run())

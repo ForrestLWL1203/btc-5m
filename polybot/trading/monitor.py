@@ -24,13 +24,37 @@ from polybot.market.series import MarketSeries
 from polybot.core.state import MonitorState
 from polybot.market.stream import PriceStream, PriceUpdate
 from polybot.strategies.base import Strategy
-from polybot.trade_config import ExitReason, TradeConfig
+from polybot.trade_config import TradeConfig
 from .trading import buy_token, cancel_all_open_orders, sell_token
 
 log = logging.getLogger(__name__)
 
 _PREOPEN_BUFFER = 10  # seconds before window start to wake up
 _STARTED_SKIP_THRESHOLD = 60  # allow attaching to a window within its first minute
+
+
+def _strategy_attach_skip_threshold(
+    strategy: Optional[Strategy],
+    window: MarketWindow,
+) -> tuple[float, str]:
+    """Return the latest elapsed-start threshold for a fresh attach.
+
+    Strategies with an explicit entry window should be attachable until the
+    end of that entry band. Generic strategies keep the legacy 60s fallback.
+    """
+    if strategy is None:
+        return float(_STARTED_SKIP_THRESHOLD), f"started >{_STARTED_SKIP_THRESHOLD}s ago"
+
+    entry_end_remaining = getattr(strategy, "entry_end_remaining_sec", None)
+    if isinstance(entry_end_remaining, (int, float)):
+        window_seconds = window.end_epoch - window.start_epoch
+        threshold = max(0.0, float(window_seconds) - float(entry_end_remaining))
+        return threshold, (
+            "outside strategy entry window "
+            f"(started >{threshold:.0f}s ago, remaining <{float(entry_end_remaining):.0f}s)"
+        )
+
+    return float(_STARTED_SKIP_THRESHOLD), f"started >{_STARTED_SKIP_THRESHOLD}s ago"
 
 
 def _sanitize_next_window(current_window: MarketWindow, next_window: Optional[MarketWindow]) -> Optional[MarketWindow]:
@@ -80,11 +104,6 @@ def _log_window_summary(state: MonitorState, window: MarketWindow, dry_run: bool
         "action": "SUMMARY",
         "window": window.short_label,
         "entries": state.entry_count,
-        "tp": state.tp_count,
-        "sl": state.stop_loss_count,
-        "edge_exit": state.edge_exit_count,
-        "blocked_sl": state.buy_blocked_sl,
-        "blocked_tp": state.buy_blocked_tp,
         "blocked_window_cap": state.buy_blocked_window_cap,
     }
     if dry_run:
@@ -135,11 +154,18 @@ async def _sell_with_retry(
                 "message": "balance is 0",
             })
             return True
+        t_sell = time.time()
         result = await sell_token(
             token_id, sell_size, reason,
             window_end_epoch=window_end_epoch,
         )
         if result.success:
+            sell_latency_ms = round((time.time() - t_sell) * 1000)
+            log_event(log, logging.INFO, TRADE, {
+                "action": "SELL_LATENCY",
+                "reason": reason,
+                "sell_latency_ms": sell_latency_ms,
+            })
             await _cleanup_residual(
                 token_id, reason, window_end_epoch,
                 original_size=sell_size,
@@ -434,19 +460,20 @@ async def monitor_window(
     now_epoch = int(time.time())
     elapsed_since_start = now_epoch - window.start_epoch
 
-    # Skip windows that started too long ago — pre-open next immediately
-    skip_threshold = _STARTED_SKIP_THRESHOLD
+    # Skip stale windows on fresh attach. For strategies with a delayed entry
+    # band, keep monitoring until that band has actually elapsed.
+    skip_threshold, skip_reason = _strategy_attach_skip_threshold(strategy, window)
     if not preopened and elapsed_since_start > skip_threshold:
         log_event(log, logging.INFO, WINDOW, {
             "action": "SKIP",
             "window": window.short_label,
             "elapsed": elapsed_since_start,
-            "reason": f"started >{skip_threshold}s ago",
+            "reason": skip_reason,
         })
         next_win = _find_and_preopen_next_window(window, series)
         return next_win, ws, False
 
-    # For latency arb: subscribe to both tokens, direction resolved per-tick
+    # Subscribe to both tokens; strategy resolves the effective side.
     token_ids = [window.up_token, window.down_token]
     # Initial side for logging; actual side may be overridden by state.target_side
     buy_token_id, price_token_id = _side_token(window, side)
@@ -468,7 +495,7 @@ async def monitor_window(
         ws = PriceStream(on_price=new_callback)
         await ws.connect(token_ids)
 
-    # Pre-fetch order params during wait time to reduce buy latency
+    # Pre-fetch order params during wait time to reduce order placement delay.
     from polybot.core.client import prefetch_order_params
     for tid in token_ids:
         await asyncio.to_thread(prefetch_order_params, tid)
@@ -482,7 +509,7 @@ async def monitor_window(
     # Window is now live — enable trading
     state.started = True
 
-    # Notify strategy of window start (for latency arb entry time gate)
+    # Notify strategy of window start so it can initialize window state.
     if hasattr(strategy, 'set_window_start'):
         strategy.set_window_start(window.start_epoch)
 
@@ -495,7 +522,7 @@ async def monitor_window(
     })
 
     # Price should already be cached from WS pre-connection
-    # Use UP token price as reference for edge computation
+    # Use UP token price as the reference entry signal input.
     opening_token = window.up_token
     opening_price = ws.get_latest_price(opening_token)
     if opening_price is None:
@@ -537,7 +564,7 @@ async def monitor_window(
         return next_win, ws, True
 
     # Fallback: window ended without pre-fetch
-    next_win = find_next_window()
+    next_win = _sanitize_next_window(window, find_next_window())
     if next_win is None:
         log_event(log, logging.WARNING, MARKET, {
             "action": "NOT_FOUND",
@@ -558,114 +585,6 @@ async def monitor_window(
     return next_win, ws, True
 
 
-async def _check_sl_tp(
-    update: PriceUpdate,
-    state: MonitorState,
-    window: MarketWindow,
-    buy_token_id: str,
-    dry_run: bool,
-    trade_config: TradeConfig,
-    side: str = "up",
-) -> bool:
-    """
-    Check SL/TP thresholds using optimistic/pessimistic price signals.
-    Returns True if an SL/TP exit was triggered.
-    Must be called while trade_lock is held.
-    """
-    if state.exit_triggered or not state.bought:
-        return False
-
-    fresh_trade = state.get_fresh_trade_price()
-    price = update.midpoint
-
-    # TP: use most optimistic signal — any single price above threshold triggers
-    tp_price = max(
-        price if price is not None else float('-inf'),
-        fresh_trade if fresh_trade is not None else float('-inf'),
-        update.best_ask if update.best_ask is not None else float('-inf'),
-    )
-    # SL: use most pessimistic signal — any single price below threshold triggers
-    sl_price = min(
-        price if price is not None else float('inf'),
-        fresh_trade if fresh_trade is not None else float('inf'),
-        update.best_bid if update.best_bid is not None else float('inf'),
-    )
-
-    signal = trade_config.check_exit(tp_price, sl_price, state)
-    if signal is None:
-        return False
-
-    if signal.reason == ExitReason.TAKE_PROFIT:
-        state.tp_count += 1
-        log_event(log, logging.WARNING, SIGNAL, {
-            "action": "TAKE_PROFIT",
-            "side": side.upper(),
-            "price": tp_price,
-            "threshold": signal.threshold,
-            "source": update.source,
-            "fresh_trade": fresh_trade,
-            "reentry": signal.can_reenter,
-            "count": f"{state.tp_count}/{trade_config.max_tp_reentry + 1}",
-            "window": window.short_label,
-        })
-        state.exit_triggered = not signal.can_reenter
-        state.bought = False
-        if not dry_run:
-            await cancel_all_open_orders()
-            success = await _sell_with_retry(
-                buy_token_id, state.holding_size, f"Take-profit @ {tp_price}",
-                window_end_epoch=window.end_epoch,
-            )
-            if not success:
-                state.bought = True
-        else:
-            _log_dry_run_sell(state, window, "Take-profit", tp_price)
-        return True
-
-    if signal.reason == ExitReason.STOP_LOSS:
-        # SL time gate: wait until enough of the window has elapsed
-        # 5m: after halfway (2m30s) | 15m: last 5m | 4h: last 1h
-        now = time.time()
-        remaining = window.end_epoch - now
-        total = window.end_epoch - window.start_epoch
-        if total <= 300:       # ≤5m window
-            sl_allowed_after = total / 2
-        elif total <= 900:     # ≤15m window
-            sl_allowed_after = total - 300
-        else:                  # >15m (4h etc.)
-            sl_allowed_after = total - 3600
-        if remaining > sl_allowed_after:
-            return False
-        state.stop_loss_count += 1
-        log_event(log, logging.WARNING, SIGNAL, {
-            "action": "STOP_LOSS",
-            "side": side.upper(),
-            "price": sl_price,
-            "threshold": signal.threshold,
-            "effective_sl_pct": round(signal.effective_sl_pct, 2),
-            "source": update.source,
-            "fresh_trade": fresh_trade,
-            "reentry": signal.can_reenter,
-            "count": f"{state.stop_loss_count}/{trade_config.max_sl_reentry + 1}",
-            "window": window.short_label,
-        })
-        state.exit_triggered = not signal.can_reenter
-        state.bought = False
-        if not dry_run:
-            await cancel_all_open_orders()
-            success = await _sell_with_retry(
-                buy_token_id, state.holding_size, f"Stop-loss @ {sl_price}",
-                window_end_epoch=window.end_epoch,
-            )
-            if not success:
-                state.bought = True
-        else:
-            _log_dry_run_sell(state, window, "Stop-loss", sl_price)
-        return True
-
-    return False
-
-
 async def _on_price_update(
     update: PriceUpdate,
     window: MarketWindow,
@@ -677,12 +596,12 @@ async def _on_price_update(
 ) -> None:
     """
     Called by PriceStream whenever a price update arrives.
-    Triggers buy / stop-loss / take-profit immediately on signal.
+    Triggers the strategy entry when the window and price state allow it.
     """
     if not state.started:
         return
 
-    # Resolve effective side: latency arb overrides via state.target_side
+    # Resolve effective side: the strategy may override side via target_side.
     effective_side = state.target_side if state.target_side is not None else side
     buy_token_id, _ = _side_token(window, effective_side)
 
@@ -700,22 +619,13 @@ async def _on_price_update(
         update.best_bid, update.best_ask,
     )
 
-    if state.buy_blocked_sl or state.buy_blocked_tp:
-        return
-
     if state.trade_lock.locked():
-        # Defer SL/TP signal instead of dropping it
-        if state.bought and not state.exit_triggered:
-            state._pending_signal = update
         return
 
-    replay_update: Optional[PriceUpdate] = None
-    should_return_after_lock = False
     async with state.trade_lock:
-        if state.buy_blocked_sl or state.buy_blocked_tp or state.buy_blocked_window_cap:
+        if state.buy_blocked_window_cap:
             return
 
-        # Not holding: check re-entry limits and buy decision
         if not state.bought:
             if (
                 trade_config.max_entries_per_window is not None
@@ -729,30 +639,10 @@ async def _on_price_update(
                 })
                 state.buy_blocked_window_cap = True
                 return
-            if state.tp_count > trade_config.max_tp_reentry:
-                log_event(log, logging.WARNING, SIGNAL, {
-                    "action": "BLOCKED_TP",
-                    "window": window.short_label,
-                    "tp_count": state.tp_count,
-                    "max_tp": trade_config.max_tp_reentry,
-                })
-                state.buy_blocked_tp = True
-                return
-            if state.stop_loss_count > trade_config.max_sl_reentry:
-                log_event(log, logging.WARNING, SIGNAL, {
-                    "action": "BLOCKED_SL",
-                    "window": window.short_label,
-                    "sl_count": state.stop_loss_count,
-                    "max_sl": trade_config.max_sl_reentry,
-                })
-                state.buy_blocked_sl = True
-                return
-            # Re-entry price gates skipped — direction can flip between trades
             if strategy.should_buy(price, state):
-                # Re-resolve token after should_buy may have set state.target_side
                 if state.target_side is not None:
                     effective_side = state.target_side
-                    buy_token_id, price_token_id = _side_token(window, effective_side)
+                    buy_token_id, _ = _side_token(window, effective_side)
                 log_event(log, logging.INFO, SIGNAL, {
                     "action": "BUY_SIGNAL",
                     "price": price,
@@ -764,65 +654,9 @@ async def _on_price_update(
                 )
             return
 
-        # When holding, TP/SL must use the currently held token's prices.
         is_held_token_update = update.token_id == buy_token_id
         if is_held_token_update:
             state.latest_midpoint = price
-            if update.is_trade:
-                state.update_trade_price(price)
-
-        # Already holding — check edge-based fast exit
-        if not state.exit_triggered and strategy is not None and hasattr(strategy, 'check_edge_exit'):
-            edge_reason = strategy.check_edge_exit(state)
-            if edge_reason is not None:
-                log_event(log, logging.WARNING, SIGNAL, {
-                    "action": "EDGE_EXIT",
-                    "reason": edge_reason,
-                    "side": effective_side.upper(),
-                    "window": window.short_label,
-                    "price": price,
-                    "dry_run": dry_run,
-                })
-                state.edge_exit_count += 1
-                can_reenter = state.edge_exit_count <= trade_config.max_edge_reentry
-                state.exit_triggered = not can_reenter
-                state.bought = False
-                if not dry_run:
-                    await cancel_all_open_orders()
-                    await _sell_with_retry(
-                        buy_token_id, state.holding_size,
-                        f"Edge exit: {edge_reason}",
-                        window_end_epoch=window.end_epoch,
-                    )
-                else:
-                    _log_dry_run_sell(state, window, f"Edge exit: {edge_reason}", price)
-                state.holding_size = 0.0
-                state.target_side = None
-                return
-
-        if not is_held_token_update:
-            should_return_after_lock = True
-        else:
-            # Already holding — check stop-loss / take-profit
-            await _check_sl_tp(update, state, window, buy_token_id, dry_run, trade_config, effective_side)
-
-        if state._pending_signal is not None:
-            replay_update = state._pending_signal
-            state._pending_signal = None
-
-    if replay_update is not None:
-        log_event(log, logging.DEBUG, SIGNAL, {
-            "action": "DEFERRED_SIGNAL_REPLAY",
-            "window": window.short_label,
-            "source": replay_update.source,
-            "midpoint": replay_update.midpoint,
-        })
-        await _on_price_update(
-            replay_update, window, state, dry_run, trade_config, strategy, side,
-        )
-        return
-
-    if should_return_after_lock:
         return
 
 
@@ -846,13 +680,16 @@ async def _handle_opening_price(
     # Re-resolve token if strategy overrode direction
     if state.target_side is not None:
         buy_token_id, _ = _side_token(window, state.target_side)
+    buy_price = state.target_entry_price if state.target_entry_price is not None else price
     if not dry_run:
         state.bought = True
+        t_signal = time.time()
         result = await buy_token(
             buy_token_id, trade_config.amount, window.short_label,
             window_end_epoch=window.end_epoch,
         )
         if result.success:
+            entry_latency_ms = round((time.time() - t_signal) * 1000)
             state.entry_count += 1
             state.entry_timestamps.append(time.time())
             if result.filled_size > 0 and result.avg_price > 0:
@@ -860,37 +697,26 @@ async def _handle_opening_price(
             elif result.avg_price > 0:
                 state.holding_size = trade_config.amount / result.avg_price
             else:
-                state.holding_size = trade_config.amount / price if price > 0 else trade_config.amount
-            state.entry_price = price
-            if state.original_entry_price == 0.0:
-                state.original_entry_price = price
+                state.holding_size = trade_config.amount / buy_price if buy_price > 0 else trade_config.amount
+            state.entry_price = buy_price
             log_event(log, logging.INFO, TRADE, {
                 "action": "BUY_FILLED",
                 "side": side.upper(),
-                "price": price,
+                "price": buy_price,
                 "amount": trade_config.amount,
                 "shares": state.holding_size,
                 "window": window.short_label,
+                "entry_latency_ms": entry_latency_ms,
             })
             if strategy is not None and hasattr(strategy, "on_buy_confirmed"):
                 strategy.on_buy_confirmed(time.time())
-            # Discard deferred signal — it's from before this buy,
-            # price context is stale for the new position
-            if state._pending_signal is not None:
-                log_event(log, logging.DEBUG, SIGNAL, {
-                    "action": "DEFERRED_SIGNAL_DISCARDED",
-                    "window": window.short_label,
-                    "deferred_source": state._pending_signal.source,
-                    "deferred_midpoint": state._pending_signal.midpoint,
-                })
-                state._pending_signal = None
         else:
             state.bought = False
             state.exit_triggered = True
             log_event(log, logging.WARNING, TRADE, {
                 "action": "BUY_FAILED",
                 "side": side.upper(),
-                "price": price,
+                "price": buy_price,
                 "message": result.message,
                 "window": window.short_label,
             })
@@ -898,14 +724,12 @@ async def _handle_opening_price(
         state.bought = True
         state.entry_count += 1
         state.entry_timestamps.append(time.time())
-        state.holding_size = trade_config.amount / price if price > 0 else trade_config.amount
-        state.entry_price = price
-        if state.original_entry_price == 0.0:
-            state.original_entry_price = price
+        state.holding_size = trade_config.amount / buy_price if buy_price > 0 else trade_config.amount
+        state.entry_price = buy_price
         log_event(log, logging.INFO, TRADE, {
             "action": "BUY",
             "side": side.upper(),
-            "price": price,
+            "price": buy_price,
             "amount": trade_config.amount,
             "shares": state.holding_size,
             "window": window.short_label,
@@ -913,12 +737,4 @@ async def _handle_opening_price(
         })
         if strategy is not None and hasattr(strategy, "on_buy_confirmed"):
             strategy.on_buy_confirmed(time.time())
-        # Discard deferred signal — stale price context for new position
-        if state._pending_signal is not None:
-            log_event(log, logging.DEBUG, SIGNAL, {
-                "action": "DEFERRED_SIGNAL_DISCARDED",
-                "window": window.short_label,
-                "deferred_source": state._pending_signal.source,
-                "deferred_midpoint": state._pending_signal.midpoint,
-            })
-            state._pending_signal = None
+    state.target_entry_price = None
