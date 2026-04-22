@@ -77,6 +77,10 @@ class PriceStream:
         """Get the latest cached midpoint for a token (sync read)."""
         return self._prices.get(token_id, PriceUpdate("", None, None, None, None, "")).midpoint
 
+    def get_latest_best_ask(self, token_id: str) -> Optional[float]:
+        """Get the latest cached best ask for a token (sync read)."""
+        return self._prices.get(token_id, PriceUpdate("", None, None, None, None, "")).best_ask
+
     def set_on_price(self, callback: Callable[[PriceUpdate], Awaitable[None]]) -> None:
         """Update the price callback (used when reusing WS for a new window)."""
         self._on_price = callback

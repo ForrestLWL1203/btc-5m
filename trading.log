@@ -1,0 +1,63 @@
+19:02:38.209 INFO __main__ — === BTC 5m Up/Down Trader Started ===
+19:02:38.209 INFO __main__ — Strategy: PairedWindowStrategy | Side: UP | Amount: $1.0 | Exit: hold-to-window-end
+19:02:38.209 INFO __main__ — Rounds: 2
+19:02:38.209 INFO polybot.strategies.paired_window — PairedWindowStrategy started | theta=0.020% | remaining=[60, 240]s | price=[0.57, 0.65]
+19:02:38.210 INFO polybot.market.market — Current time: 11:02:38 UTC (epoch 1776855758), window start: 1776855600
+19:02:38.949 INFO polybot.market.market — [MARKET] FOUND window=April 22, 7:00AM-7:05AM ET
+19:02:38.949 INFO __main__ — Next window: April 22, 7:00AM-7:05AM ET
+19:02:38.949 INFO __main__ —   Window: 2026-04-22 11:00:00+00:00 → 2026-04-22 11:05:00+00:00
+19:02:38.950 INFO polybot.trading.monitor — [SIGNAL] SIDE_RESOLVED side=UP window=April 22, 7:00AM-7:05AM ET
+19:02:38.950 INFO polybot.trading.monitor — [TRADE] DAILY_RESET
+19:02:39.839 INFO polybot.market.binance — BinancePriceFeed connected: wss://stream.binance.com:9443/ws/btcusdt@trade
+19:02:40.028 INFO polybot.market.stream — [WS] SUBSCRIBED
+19:02:41.017 INFO httpx — HTTP Request: POST https://clob.polymarket.com/auth/api-key "HTTP/2 400 Bad Request"
+19:02:41.419 INFO httpx — HTTP Request: GET https://clob.polymarket.com/auth/derive-api-key "HTTP/2 200 OK"
+19:02:41.421 INFO polybot.core.client — CLOB client initialized
+19:02:42.063 INFO httpx — HTTP Request: GET https://clob.polymarket.com/tick-size?token_id=8717334964248171230984004718297338620699153458478955982274949413061470839858 "HTTP/2 200 OK"
+19:02:42.222 INFO httpx — HTTP Request: GET https://clob.polymarket.com/neg-risk?token_id=8717334964248171230984004718297338620699153458478955982274949413061470839858 "HTTP/2 200 OK"
+19:02:42.381 INFO httpx — HTTP Request: GET https://clob.polymarket.com/fee-rate?token_id=8717334964248171230984004718297338620699153458478955982274949413061470839858 "HTTP/2 200 OK"
+19:02:42.774 INFO httpx — HTTP Request: GET https://clob.polymarket.com/tick-size?token_id=110396607094116514136017670122551457878175319732702363627768132566954438548304 "HTTP/2 200 OK"
+19:02:42.932 INFO httpx — HTTP Request: GET https://clob.polymarket.com/neg-risk?token_id=110396607094116514136017670122551457878175319732702363627768132566954438548304 "HTTP/2 200 OK"
+19:02:43.091 INFO httpx — HTTP Request: GET https://clob.polymarket.com/fee-rate?token_id=110396607094116514136017670122551457878175319732702363627768132566954438548304 "HTTP/2 200 OK"
+19:02:43.091 INFO polybot.trading.monitor — [WINDOW] STARTED side=UP window=April 22, 7:00AM-7:05AM ET
+19:02:43.092 INFO polybot.trading.monitor — [SIGNAL] OPENING_PRICE window=April 22, 7:00AM-7:05AM ET price=0.8950
+19:05:00.176 INFO polybot.trading.monitor — [WINDOW] EXPIRED window=April 22, 7:00AM-7:05AM ET
+19:05:00.176 INFO polybot.trading.monitor — [WINDOW] SUMMARY window=April 22, 7:00AM-7:05AM ET
+19:05:00.176 INFO polybot.market.market — Current time: 11:05:00 UTC (epoch 1776855900), window start: 1776855900
+19:05:00.908 INFO polybot.market.market — [MARKET] FOUND window=April 22, 7:05AM-7:10AM ET
+19:05:00.908 INFO __main__ — Round 1/2 complete
+19:05:00.909 INFO __main__ — === Pre-opened window ready, monitoring immediately ===
+19:05:00.909 INFO polybot.trading.monitor — [SIGNAL] SIDE_RESOLVED side=UP window=April 22, 7:05AM-7:10AM ET
+19:05:00.909 INFO polybot.market.stream — [WS] SUBSCRIBED
+19:05:00.909 INFO polybot.trading.monitor — [WINDOW] WS_SWITCHED window=April 22, 7:05AM-7:10AM ET
+19:05:01.738 INFO httpx — HTTP Request: GET https://clob.polymarket.com/tick-size?token_id=59789072935673343794463615120188445850005571267306398152372226346947985679035 "HTTP/2 200 OK"
+19:05:01.890 INFO httpx — HTTP Request: GET https://clob.polymarket.com/neg-risk?token_id=59789072935673343794463615120188445850005571267306398152372226346947985679035 "HTTP/2 200 OK"
+19:05:02.045 INFO httpx — HTTP Request: GET https://clob.polymarket.com/fee-rate?token_id=59789072935673343794463615120188445850005571267306398152372226346947985679035 "HTTP/2 200 OK"
+19:05:02.426 INFO httpx — HTTP Request: GET https://clob.polymarket.com/tick-size?token_id=18526233294914185720425033821207344262664111698879092142918758616304579197702 "HTTP/2 200 OK"
+19:05:02.576 INFO httpx — HTTP Request: GET https://clob.polymarket.com/neg-risk?token_id=18526233294914185720425033821207344262664111698879092142918758616304579197702 "HTTP/2 200 OK"
+19:05:02.725 INFO httpx — HTTP Request: GET https://clob.polymarket.com/fee-rate?token_id=18526233294914185720425033821207344262664111698879092142918758616304579197702 "HTTP/2 200 OK"
+19:05:02.726 INFO polybot.trading.monitor — [WINDOW] STARTED side=UP window=April 22, 7:05AM-7:10AM ET
+19:05:02.726 INFO polybot.trading.monitor — [SIGNAL] OPENING_PRICE window=April 22, 7:05AM-7:10AM ET price=0.5050
+19:06:08.556 INFO polybot.strategies.paired_window — PAIRED SIGNAL: dir=UP btc_open=78217.1 btc_now=78250.0 move=0.0421% past=0.0600% entry_price=0.645 remaining=231s
+19:06:08.557 INFO polybot.trading.monitor — [SIGNAL] BUY_SIGNAL side=UP window=April 22, 7:05AM-7:10AM ET price=0.6450
+19:06:08.557 INFO polybot.trading.trading — [TRADE] BUY amount=1.0000
+19:06:09.493 INFO httpx — HTTP Request: GET https://clob.polymarket.com/book?token_id=59789072935673343794463615120188445850005571267306398152372226346947985679035 "HTTP/2 200 OK"
+19:06:10.162 INFO httpx — HTTP Request: POST https://clob.polymarket.com/order "HTTP/2 400 Bad Request"
+19:06:10.163 WARNING polybot.trading.trading — [TRADE] FOK_ATTEMPT_FAILED side=BUY amount=1.0000 message=PolyApiException[status_code=400, error_message={'error': "order couldn't be fully filled. FOK orders are fully filled or killed.", 'orderID': '0x52f5161a5573c5a1cb37db87a5cf3432a5ec3a2657baddff89ca4b5990b5da00'}]
+19:06:10.673 INFO httpx — HTTP Request: GET https://clob.polymarket.com/book?token_id=59789072935673343794463615120188445850005571267306398152372226346947985679035 "HTTP/2 200 OK"
+19:06:11.393 INFO httpx — HTTP Request: POST https://clob.polymarket.com/order "HTTP/2 400 Bad Request"
+19:06:11.393 WARNING polybot.trading.trading — [TRADE] FOK_ATTEMPT_FAILED side=BUY amount=1.0000 message=PolyApiException[status_code=400, error_message={'error': "order couldn't be fully filled. FOK orders are fully filled or killed.", 'orderID': '0x388963c68ab1927802777862a263b14f7f97ff4cdc942c9ce64da9451e73b4a8'}]
+19:06:11.885 INFO httpx — HTTP Request: GET https://clob.polymarket.com/book?token_id=59789072935673343794463615120188445850005571267306398152372226346947985679035 "HTTP/2 200 OK"
+19:06:12.578 INFO httpx — HTTP Request: POST https://clob.polymarket.com/order "HTTP/2 200 OK"
+19:06:12.579 DEBUG polybot.trading.trading — [TRADE] FOK_RAW_RESP side=BUY price=0.0000
+19:06:12.579 INFO polybot.trading.trading — [TRADE] FOK_FILLED side=BUY
+19:06:12.580 INFO polybot.trading.monitor — [TRADE] BUY_FILLED side=UP window=April 22, 7:05AM-7:10AM ET price=0.6450 amount=1.0000 shares=1.5504
+19:10:00.743 INFO polybot.trading.monitor — [WINDOW] EXPIRED window=April 22, 7:05AM-7:10AM ET
+19:10:00.744 INFO polybot.trading.monitor — [TRADE] WINDOW_END_POSITION window=April 22, 7:05AM-7:10AM ET shares=1.5504
+19:10:00.744 INFO polybot.trading.monitor — [TRADE] TRADE_RESOLVED window=April 22, 7:05AM-7:10AM ET price=0.0050 shares=1.5504
+19:10:00.744 INFO polybot.trading.monitor — [WINDOW] SUMMARY window=April 22, 7:05AM-7:10AM ET
+19:10:00.744 INFO polybot.market.market — Current time: 11:10:00 UTC (epoch 1776856200), window start: 1776856200
+19:10:01.398 INFO polybot.market.market — [MARKET] FOUND window=April 22, 7:10AM-7:15AM ET
+19:10:01.398 INFO __main__ — Round 2/2 complete
+19:10:01.398 INFO __main__ — === All 2 rounds complete, exiting ===
+19:10:11.400 INFO __main__ — WebSocket closed on exit

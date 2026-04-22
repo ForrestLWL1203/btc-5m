@@ -71,8 +71,24 @@ def _is_425_error(exc: Exception) -> bool:
     return "425" in msg or "too early" in msg
 
 
+def _extract_error_details(exc: Exception) -> dict:
+    """Return structured details from SDK/API exceptions for logging."""
+    details = {
+        "error_type": type(exc).__name__,
+        "message": str(exc),
+    }
+    status_code = getattr(exc, "status_code", None)
+    error_msg = getattr(exc, "error_msg", None)
+    if status_code is not None:
+        details["status_code"] = status_code
+    if error_msg is not None:
+        details["error_msg"] = error_msg
+    return details
+
+
 async def _post_fok_market(
-    token_id: str, amount: float, side: str, retry_count: int, retry_interval: float
+    token_id: str, amount: float, side: str, retry_count: int, retry_interval: float,
+    price_hint: Optional[float] = None,
 ) -> OrderResult:
     """
     Attempt a FOK (Fill-Or-Kill) market order with retry.
@@ -93,6 +109,7 @@ async def _post_fok_market(
                 token_id=token_id,
                 amount=amount,
                 side=side_const,
+                price=price_hint or 0,  # non-zero skips SDK's internal GET /book
             )
             options = get_order_options(token_id)
             t_attempt = time.monotonic()
@@ -159,7 +176,15 @@ async def _post_fok_market(
                 engine_backoff = min(engine_backoff * 2, 30.0)
                 continue
 
-            log.debug("FOK attempt %d failed: %s", attempt, e)
+            log_event(log, logging.WARNING, TRADE, {
+                "action": "FOK_ATTEMPT_FAILED",
+                "side": side,
+                "token": token_id[:20],
+                "amount": amount,
+                "attempt": attempt,
+                "retry_count": retry_count,
+                **_extract_error_details(e),
+            })
 
         if attempt < retry_count:
             await asyncio.sleep(retry_interval)
@@ -242,15 +267,19 @@ async def buy_up(
     amount: float,
     label: str,
     window_end_epoch: Optional[int] = None,
+    price_hint: Optional[float] = None,
 ) -> OrderResult:
     """
     Buy the Up token using FOK market order with retry.
     Falls back to GTD limit at midpoint if FOK fails.
+
+    price_hint: best_ask from WS feed — skips SDK's internal GET /book when provided.
     """
     log_event(log, logging.INFO, TRADE, {
         "action": "BUY",
         "amount": amount,
         "label": label,
+        "price_hint": price_hint,
     })
 
     result = await _post_fok_market(
@@ -259,6 +288,7 @@ async def buy_up(
         side=BUY,
         retry_count=config.FOK_RETRY_COUNT,
         retry_interval=config.FOK_RETRY_INTERVAL,
+        price_hint=price_hint,
     )
 
     if result.success:

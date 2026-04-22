@@ -624,8 +624,10 @@ async def monitor_window(
                 "window": window.short_label,
             })
             if strategy.should_buy(opening_price, state):
+                opening_best_ask = ws.get_latest_best_ask(opening_token)
                 await _handle_opening_price(
                     window, state, buy_token_id, opening_price, dry_run, trade_config, strategy, side,
+                    best_ask=opening_best_ask,
                 )
                 # Re-resolve token if strategy set target_side during opening buy
                 if state.target_side is not None:
@@ -732,6 +734,7 @@ async def _on_price_update(
                 })
                 await _handle_opening_price(
                     window, state, buy_token_id, price, dry_run, trade_config, strategy, effective_side,
+                    best_ask=update.best_ask,
                 )
             return
 
@@ -750,6 +753,7 @@ async def _handle_opening_price(
     trade_config: TradeConfig,
     strategy: Optional[Strategy] = None,
     side: str = "up",
+    best_ask: Optional[float] = None,
 ) -> None:
     """Handle the opening price check and buy decision."""
     if state.bought:
@@ -770,6 +774,7 @@ async def _handle_opening_price(
         result = await buy_token(
             buy_token_id, trade_config.amount, window.short_label,
             window_end_epoch=window.end_epoch,
+            price_hint=best_ask,
         )
         if result.success:
             entry_latency_ms = round((time.time() - t_signal) * 1000)
