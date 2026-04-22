@@ -524,6 +524,14 @@ async def monitor_window(
         state = MonitorState()
     ws: Optional[PriceStream] = existing_ws
 
+    # Reset per-window state for new window
+    # (risk management state like daily_wins persists across windows)
+    state.bought = False
+    state.exit_triggered = False
+    state.buy_blocked_window_cap = False
+    state.entry_count = 0
+    state.entry_timestamps = []
+
     # Check daily reset and risk management before monitoring this window
     _check_and_reset_daily_state(state)
     if _should_skip_window(state):
@@ -747,8 +755,10 @@ async def _handle_opening_price(
     if state.bought:
         return
 
+    # Do NOT reset exit_triggered here — it prevents re-entry after buy failure
+    # exit_triggered should only be reset at the start of a new window
     if state.exit_triggered:
-        state.exit_triggered = False
+        return  # Previous buy attempt failed, skip further attempts this window
 
     # Re-resolve token if strategy overrode direction
     if state.target_side is not None:
