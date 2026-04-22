@@ -72,6 +72,7 @@ class PriceStream:
         # Background tasks
         self._ping_task: Optional[asyncio.Task] = None
         self._recv_task: Optional[asyncio.Task] = None
+        self._connection_lock = asyncio.Lock()
 
     def get_latest_price(self, token_id: str) -> Optional[float]:
         """Get the latest cached midpoint for a token (sync read)."""
@@ -92,8 +93,8 @@ class PriceStream:
         """
         self._connected_tokens = list(token_ids)
         self._running = True
-        self._ws = await websockets.connect(WS_URL)
-        await self._subscribe(token_ids)
+        async with self._connection_lock:
+            await self._reconnect_locked(log_reconnect=False)
         self._ping_task = asyncio.create_task(self._ping_loop())
         self._recv_task = asyncio.create_task(self._recv_loop())
 
@@ -102,24 +103,34 @@ class PriceStream:
         Unsubscribe from the old tokens and subscribe to new ones.
         Used when the trading window changes.
         """
-        if self._ws is None or not self._running:
+        if not self._running:
             return
-
-        # Unsubscribe from old tokens
-        if self._connected_tokens:
-            unsub = {
-                "assets_ids": self._connected_tokens,
-                "operation": "unsubscribe",
-            }
-            await self._ws.send(json.dumps(unsub))
-            log.debug("Unsubscribed from %s", self._connected_tokens)
 
         # Clear stale cached prices from previous window
         self._prices.clear()
 
+        old_token_ids = list(self._connected_tokens)
         # Subscribe to new tokens
         self._connected_tokens = list(new_token_ids)
-        await self._subscribe(new_token_ids)
+        async with self._connection_lock:
+            if self._ws is None:
+                await self._reconnect_locked()
+                return
+
+            try:
+                # Unsubscribe from old tokens
+                if old_token_ids:
+                    unsub = {
+                        "assets_ids": old_token_ids,
+                        "operation": "unsubscribe",
+                    }
+                    await self._ws.send(json.dumps(unsub))
+                    log.debug("Unsubscribed from %s", old_token_ids)
+
+                await self._subscribe(new_token_ids)
+            except websockets.ConnectionClosed as e:
+                log.warning("WS switch_tokens failed on closed connection: %s", e)
+                await self._reconnect_locked()
 
     async def close(self) -> None:
         """Gracefully close the WebSocket connection."""
@@ -151,6 +162,23 @@ class PriceStream:
             "tokens": [t[:20] + "..." for t in token_ids],
         })
 
+    async def _reconnect_locked(self, log_reconnect: bool = True) -> None:
+        """Recreate the WS connection and subscribe to the current token set.
+
+        Caller must hold ``_connection_lock``.
+        """
+        if self._ws is not None:
+            try:
+                await self._ws.close()
+            except Exception:
+                pass
+
+        self._ws = await websockets.connect(WS_URL)
+        await self._subscribe(self._connected_tokens)
+        self._prices.clear()
+        if log_reconnect:
+            log_event(log, logging.INFO, WS, {"action": "RECONNECTED"})
+
     async def _ping_loop(self) -> None:
         """Send ``{}`` every PING_INTERVAL seconds to keep the connection alive."""
         while self._running:
@@ -171,11 +199,9 @@ class PriceStream:
         while self._running:
             try:
                 if self._ws is None:
-                    self._ws = await websockets.connect(WS_URL)
-                    await self._subscribe(self._connected_tokens)
-                    # Clear stale cached prices after reconnect
-                    self._prices.clear()
-                    log_event(log, logging.INFO, WS, {"action": "RECONNECTED"})
+                    async with self._connection_lock:
+                        if self._ws is None and self._running:
+                            await self._reconnect_locked()
 
                 async for msg in self._ws:
                     self._dispatch(msg)

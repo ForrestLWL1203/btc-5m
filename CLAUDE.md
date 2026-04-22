@@ -14,12 +14,14 @@ This repository has an active, validated runtime strategy:
 
 **Key Runtime Features:**
 - **Direction & Entry Timing**: Strategy predicts UP/DOWN, detects BTC theta move with persistence check
+- **Execution Guardrails**: UP token remains the direction-reference leg; actual execution uses the target token's live `best_ask`, enforces the configured entry band on that target leg, and adds a 1-tick BUY hint buffer
 - **Delayed Exit Strategy**: Waits until window end for market resolution, monitors price until >0.95 or 10-min timeout
 - **Risk Management System**:
   - 5 consecutive losses → skip next 2 windows (0.21% probability, system anomaly signal)
   - After 30+ trades: if win rate < 50% → skip next 5 windows (strategy failure signal)
   - Daily stats reset at UTC+8 midnight
 - **No TP/SL/Re-entry**: Position held from entry to window end; no intermediate exits
+- **Single-Signal Windows**: A window's direction is decided at most once; if the first signal is skipped because target-leg price is outside the band, the bot does not flip direction later in that window
 - **Late Window Attachment**: Can attach to window mid-trade if entry band hasn't elapsed yet
 
 ## Active Runtime Configs
@@ -51,7 +53,11 @@ Entry Band Start (T=60s, remaining=240s)
   • Emit BUY_SIGNAL
   ↓
 Buy Execution (if signal + price in [min, max] band)
-  • FOK (Fill-Or-Kill) market order via Polymarket CLOB
+  • Determine final target leg (UP or DOWN)
+  • Read target leg live `best_ask` from Polymarket WS
+  • Only continue if target `best_ask` ∈ [min_entry_price, max_entry_price]
+  • Submit FAK (Fill-And-Kill) market order via Polymarket CLOB
+  • Add a 1-tick buffer to the BUY price hint to reduce stale-ask misses
   • Store shares in state.holding_size
   ↓
 Entry Band End (T=180s, remaining=60s)
@@ -85,6 +91,18 @@ UTC+8 Daily Reset (at midnight UTC+8):
   - Rationale: 77-window analysis shows 0.45-0.50 range has only 50% win rate (weak signals)
   - Setting floor to cap*0.88 filters weak signals while maintaining 75%+ overall win rate
   - Can be explicitly overridden in config if needed
+- Final entry gating now uses the **target token's live `best_ask`**, not only the theoretical paired price
+- For UP entries, target price is the UP token ask; for DOWN entries, target price is the DOWN token ask
+- Strategy still uses the UP leg as the reference leg for direction detection and theoretical paired pricing
+
+**Execution Semantics (Current Runtime):**
+- Direction detection uses the UP token's Polymarket WS midpoint as the reference leg
+- If direction resolves to `up`, strategy computes theoretical entry from the UP reference price
+- If direction resolves to `down`, strategy still derives theoretical paired price from `1 - up_reference_price`
+- Before placing any order, monitor.py switches to the **target leg's real `best_ask`** and re-checks the configured entry band
+- BUY orders use **FAK** (Fill-And-Kill), not FOK
+- A successful Polymarket `MATCHED` response is treated as filled even when the API omits `sizeFilled`
+- BUY price hints are set to `target_best_ask + 1 tick` (clamped to valid tick grid)
 
 **Exit Strategy:**
 - No TP/SL/intermediate exits during window
@@ -96,6 +114,7 @@ UTC+8 Daily Reset (at midnight UTC+8):
 - BTC move must exceed theta_pct (0.02% = 20 bps typically ~$15 BTC move on $77k)
 - Move must persist for persistence_sec (10s); eliminates spike noise
 - Entry only during configured band ([60s, 180s] for optimized config)
+- Direction is locked after the first valid signal in a window; skipped entries do not reopen the window for opposite-side re-evaluation
 
 **Risk Management:**
 - Consecutive loss detection: if 5 losses in a row → likely system/market anomaly

@@ -55,6 +55,8 @@ class Window:
     up_bid_ts: list[float] = field(default_factory=list)
     down_bid_ts: list[float] = field(default_factory=list)
     btc_series: list[tuple[float, float]] = field(default_factory=list)
+    up_tick_size: float = 0.01
+    down_tick_size: float = 0.01
 
     @property
     def up_wins(self) -> bool:
@@ -80,6 +82,8 @@ class Window:
         self.down_ask_lookup = SeriesLookup(down_ask)
         self.up_bid_lookup = SeriesLookup(self.up_bid_series)
         self.down_bid_lookup = SeriesLookup(self.down_bid_series)
+        self.up_tick_size = _estimate_tick_size([ask for _, ask in up_ask])
+        self.down_tick_size = _estimate_tick_size([ask for _, ask in down_ask])
 
 
 class SeriesLookup:
@@ -97,6 +101,19 @@ class SeriesLookup:
         if ts - self._ts[idx] > max_lookback:
             return None
         return self._vals[idx]
+
+
+def _estimate_tick_size(values: list[float]) -> float:
+    """Estimate book tick size from observed ask values."""
+    uniq = sorted({round(v, 6) for v in values if v is not None and 0 < v < 1})
+    min_diff = None
+    for i in range(1, len(uniq)):
+        diff = round(uniq[i] - uniq[i - 1], 6)
+        if diff <= 0:
+            continue
+        if min_diff is None or diff < min_diff:
+            min_diff = diff
+    return min_diff if min_diff is not None else 0.01
 
 
 def parse_file(path: str) -> list[Window]:
@@ -182,6 +199,7 @@ def simulate(
     max_entry_price: float = 0.95,
     entry_delay_sec: float = 0.0,
     min_entry_price: float = 0.0,
+    price_hint_buffer_ticks: float = 0.0,
 ) -> dict:
     """Simulate strategy with optional entry fill delay.
 
@@ -205,6 +223,7 @@ def simulate(
     down_wins = 0
     skipped_price_cap = 0
     skipped_no_quote = 0
+    skipped_band = 0
     direction_flipped = 0  # BTC reversed in delay window
 
     for w in windows:
@@ -218,11 +237,13 @@ def simulate(
             max_entry_price=max_entry_price,
             entry_delay_sec=entry_delay_sec,
             min_entry_price=min_entry_price,
+            price_hint_buffer_ticks=price_hint_buffer_ticks,
         )
         if entry is None:
             continue
         skipped_no_quote += entry["skipped_no_quote"]
         skipped_price_cap += entry["skipped_price_cap"]
+        skipped_band += entry["skipped_band"]
         if entry["fill_price"] is None:
             continue
 
@@ -273,6 +294,7 @@ def simulate(
         "skipped_price_cap": skipped_price_cap,
         "skipped_no_quote": skipped_no_quote,
         "direction_flipped": direction_flipped,
+        "skipped_band": skipped_band,
     }
 
 
@@ -286,6 +308,7 @@ def replay(
     min_entry_price: float = 0.0,
     entry_delay_sec: float = 10.0,
     amount: float = 1.0,
+    price_hint_buffer_ticks: float = 0.0,
 ) -> None:
     """Print a window-by-window replay like a dry-run log."""
     import datetime
@@ -296,6 +319,7 @@ def replay(
         max_entry_price=max_entry_price,
         min_entry_price=min_entry_price,
         entry_delay_sec=entry_delay_sec,
+        price_hint_buffer_ticks=price_hint_buffer_ticks,
     )
     trade_by_ts = {t["ts"]: t for t in trades}
 
@@ -372,6 +396,8 @@ def main():
                     help="Entry band hi_rem for replay mode")
     ap.add_argument("--amount", type=float, default=1.0,
                     help="Simulated trade amount in USD for replay mode")
+    ap.add_argument("--price-hint-buffer-ticks", type=float, default=1.0,
+                    help="Approximate live BUY hint buffer in ticks (default 1.0)")
     args = ap.parse_args()
 
     # Support multiple input files — concatenate windows in order
@@ -406,6 +432,7 @@ def main():
             min_entry_price=args.min_entry_price,
             entry_delay_sec=float(args.delays.split(",")[-1]),
             amount=args.amount,
+            price_hint_buffer_ticks=args.price_hint_buffer_ticks,
         )
         return
 
@@ -419,11 +446,11 @@ def main():
         (180, 270),   # last 3-4.5 min (earliest)
     ]
 
-    sim_cache: dict[tuple[float, int, int, int, float, float, float], dict] = {}
-    trade_cache: dict[tuple[float, int, int, int, float, float, float], list[dict]] = {}
+    sim_cache: dict[tuple[float, int, int, int, float, float, float, float], dict] = {}
+    trade_cache: dict[tuple[float, int, int, int, float, float, float, float], list[dict]] = {}
 
     def run_sim(theta: float, lo: int, hi: int, max_entry_price: float, delay: float) -> dict:
-        key = (theta, lo, hi, args.persistence, max_entry_price, delay, 0.0)
+        key = (theta, lo, hi, args.persistence, max_entry_price, delay, 0.0, args.price_hint_buffer_ticks)
         if key not in sim_cache:
             sim_cache[key] = simulate(
                 windows,
@@ -433,11 +460,12 @@ def main():
                 persistence_sec=args.persistence,
                 max_entry_price=max_entry_price,
                 entry_delay_sec=delay,
+                price_hint_buffer_ticks=args.price_hint_buffer_ticks,
             )
         return sim_cache[key]
 
     def run_trades(theta: float, lo: int, hi: int, max_entry_price: float, delay: float) -> list[dict]:
-        key = (theta, lo, hi, args.persistence, max_entry_price, delay, 0.0)
+        key = (theta, lo, hi, args.persistence, max_entry_price, delay, 0.0, args.price_hint_buffer_ticks)
         if key not in trade_cache:
             trade_cache[key] = collect_trades(
                 windows,
@@ -447,6 +475,7 @@ def main():
                 persistence_sec=args.persistence,
                 max_entry_price=max_entry_price,
                 entry_delay_sec=delay,
+                price_hint_buffer_ticks=args.price_hint_buffer_ticks,
             )
         return trade_cache[key]
 
@@ -455,7 +484,7 @@ def main():
               f"cap={args.max_entry_price}) ===")
         hdr = (f"{'theta%':>7} {'band':>10} {'N':>4} {'wins':>5} "
                f"{'winR':>6} {'CIlo':>6} {'avgP':>6} {'slip':>6} "
-               f"{'EV/trd':>7} {'flip':>4} {'capSk':>6}")
+               f"{'EV/trd':>7} {'flip':>4} {'bandSk':>6} {'capSk':>6} {'noQ':>5}")
         print(hdr)
         for theta in thetas:
             for lo, hi in bands:
@@ -465,7 +494,8 @@ def main():
                     f"{r['wins']:>5d} {r['win_rate']:>6.1%} "
                     f"{r['win_rate_ci_lo']:>6.1%} {r['avg_entry_price']:>6.3f} "
                     f"{r['avg_slippage']:>+6.3f} {r['ev_per_trade']:>+7.4f} "
-                    f"{r['direction_flipped']:>4d} {r['skipped_price_cap']:>6d}"
+                    f"{r['direction_flipped']:>4d} {r['skipped_band']:>6d} "
+                    f"{r['skipped_price_cap']:>6d} {r['skipped_no_quote']:>5d}"
                 )
 
     # Entry-price-bucket analysis: for each (theta, band, delay=10s), split trades
@@ -548,6 +578,7 @@ def collect_trades(
     persistence_sec=10, max_data_age=2.0, max_entry_price=0.999,
     entry_delay_sec=0.0,
     min_entry_price=0.0,
+    price_hint_buffer_ticks: float = 0.0,
 ) -> list[dict]:
     """Same logic as simulate() but returns per-trade records."""
     trades: list[dict] = []
@@ -562,6 +593,7 @@ def collect_trades(
             max_entry_price=max_entry_price,
             entry_delay_sec=entry_delay_sec,
             min_entry_price=min_entry_price,
+            price_hint_buffer_ticks=price_hint_buffer_ticks,
         )
         if entry is None or entry["fill_price"] is None:
             continue
@@ -576,6 +608,7 @@ def collect_trades(
             "window_end": w.end_epoch,
             "direction_up": direction_up,
             "entry_price": fill_price,
+            "signal_price": entry["sig_price"],
             "open_price": w.open_price,
             "win": win,
         })
@@ -592,6 +625,7 @@ def _find_window_entry(
     max_entry_price: float,
     entry_delay_sec: float,
     min_entry_price: float,
+    price_hint_buffer_ticks: float,
 ) -> dict | None:
     """Return the first valid entry candidate for one window.
 
@@ -606,6 +640,7 @@ def _find_window_entry(
     start_idx = bisect_right(w.btc_ts, entry_start - 1e-9)
     skipped_no_quote = 0
     skipped_price_cap = 0
+    skipped_band = 0
     for tick in w.btc[start_idx:]:
         if tick.ts > entry_end:
             break
@@ -624,7 +659,37 @@ def _find_window_entry(
 
         direction_up = move_pct > 0
         lookup = w.up_ask_lookup if direction_up else w.down_ask_lookup
+        tick_size = w.up_tick_size if direction_up else w.down_tick_size
         sig_price = lookup.at(tick.ts, max_data_age) if lookup else None
+        # Match live behavior: first valid direction locks the window. If the
+        # target leg ask is unavailable or outside band at signal time, skip
+        # the window instead of searching for a later opposite-side signal.
+        if sig_price is None or sig_price <= 0 or sig_price >= 1:
+            skipped_no_quote += 1
+            return {
+                "signal_ts": tick.ts,
+                "fill_ts": None,
+                "direction_up": direction_up,
+                "sig_price": None,
+                "fill_price": None,
+                "skipped_no_quote": skipped_no_quote,
+                "skipped_price_cap": skipped_price_cap,
+                "skipped_band": skipped_band,
+                "direction_flipped": False,
+            }
+        if sig_price > max_entry_price or sig_price < min_entry_price:
+            skipped_band += 1
+            return {
+                "signal_ts": tick.ts,
+                "fill_ts": None,
+                "direction_up": direction_up,
+                "sig_price": sig_price,
+                "fill_price": None,
+                "skipped_no_quote": skipped_no_quote,
+                "skipped_price_cap": skipped_price_cap,
+                "skipped_band": skipped_band,
+                "direction_flipped": False,
+            }
         fill_ts = tick.ts + entry_delay_sec
         if fill_ts >= w.end_epoch:
             continue
@@ -632,7 +697,12 @@ def _find_window_entry(
         if fill_price is None or fill_price <= 0 or fill_price >= 1:
             skipped_no_quote += 1
             continue
-        if fill_price > max_entry_price:
+        buffered_fill_price = fill_price + tick_size * price_hint_buffer_ticks
+        buffered_fill_price = min(
+            1.0,
+            math.ceil(buffered_fill_price / tick_size) * tick_size,
+        )
+        if buffered_fill_price > max_entry_price:
             skipped_price_cap += 1
             continue
         if fill_price < min_entry_price:
@@ -648,12 +718,13 @@ def _find_window_entry(
             "fill_ts": fill_ts,
             "direction_up": direction_up,
             "sig_price": sig_price,
-            "fill_price": fill_price,
+            "fill_price": buffered_fill_price,
             "skipped_no_quote": skipped_no_quote,
             "skipped_price_cap": skipped_price_cap,
+            "skipped_band": skipped_band,
             "direction_flipped": direction_flipped,
         }
-    if skipped_no_quote or skipped_price_cap:
+    if skipped_no_quote or skipped_price_cap or skipped_band:
         return {
             "signal_ts": None,
             "fill_ts": None,
@@ -662,6 +733,7 @@ def _find_window_entry(
             "fill_price": None,
             "skipped_no_quote": skipped_no_quote,
             "skipped_price_cap": skipped_price_cap,
+            "skipped_band": skipped_band,
             "direction_flipped": False,
         }
     return None

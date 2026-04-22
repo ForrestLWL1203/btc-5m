@@ -64,6 +64,16 @@ class PairedWindowStrategy(Strategy):
         """Earliest remaining time at which entries may still occur."""
         return self._entry_end_remaining_sec
 
+    @property
+    def min_entry_price(self) -> float:
+        """Minimum allowed target-token entry price."""
+        return self._min_entry_price
+
+    @property
+    def max_entry_price(self) -> float:
+        """Maximum allowed target-token entry price."""
+        return self._max_entry_price
+
     async def start(self) -> None:
         await self._feed.start()
         self._started = True
@@ -85,8 +95,30 @@ class PairedWindowStrategy(Strategy):
         self._window_open_btc = None
         self._signal_fired = False
 
+    async def preload_open_btc(self, epoch: float) -> None:
+        """Seed window open BTC price via REST if WS feed has no coverage.
+
+        Called by monitor after set_window_start when attaching mid-window.
+        No-op if the feed already has data at/after epoch (normal multi-window flow).
+        """
+        if self._window_open_btc is not None:
+            return
+        # Check if WS feed already covers window start before hitting REST
+        cached = self._feed.first_price_at_or_after(
+            epoch, max_forward_sec=self._open_price_max_wait_sec,
+        )
+        if cached is not None:
+            return
+        price = await self._feed.fetch_open_at(epoch)
+        if price is not None:
+            self._window_open_btc = price
+            log.info("OPEN_BTC_REST_SEEDED: epoch=%.0f price=%.2f", epoch, price)
+
+    dynamic_side = True  # signals run.py to display "DYNAMIC" instead of a fixed side
+
     def get_side(self, candles: Optional[list] = None) -> Optional[str]:
-        """Return a placeholder side; actual side resolves per signal."""
+        """Returns 'up' so monitor.py knows which token to watch by default.
+        Actual direction resolves per signal via state.target_side."""
         return "up"
 
     def should_buy(self, price: float, state: MonitorState) -> bool:
@@ -125,8 +157,6 @@ class PairedWindowStrategy(Strategy):
 
         direction = "up" if move_pct > 0 else "down"
         entry_price = price if direction == "up" else max(0.0, min(1.0, 1.0 - price))
-        if entry_price < self._min_entry_price or entry_price > self._max_entry_price:
-            return False
 
         state.target_side = direction
         state.target_entry_price = entry_price

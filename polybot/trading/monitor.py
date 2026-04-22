@@ -4,11 +4,12 @@ import asyncio
 import datetime
 import functools
 import logging
+import math
 import time
 from typing import Optional
 
 from polybot.core import config
-from polybot.core.client import get_midpoint_async
+from polybot.core.client import get_midpoint_async, get_tick_size
 from polybot.core.log_formatter import (
     MARKET,
     SIGNAL,
@@ -32,6 +33,31 @@ log = logging.getLogger(__name__)
 
 _PREOPEN_BUFFER = 10  # seconds before window start to wake up
 _STARTED_SKIP_THRESHOLD = 60  # allow attaching to a window within its first minute
+
+
+async def _noop_price_callback(update: PriceUpdate) -> None:
+    """Placeholder callback used before a PriceStream is fully wired."""
+    return None
+
+
+def _entry_price_band(strategy: Optional[Strategy]) -> tuple[Optional[float], Optional[float]]:
+    """Return configured min/max entry prices when exposed by the strategy."""
+    if strategy is None:
+        return None, None
+    min_price = getattr(strategy, "min_entry_price", getattr(strategy, "_min_entry_price", None))
+    max_price = getattr(strategy, "max_entry_price", getattr(strategy, "_max_entry_price", None))
+    return min_price, max_price
+
+
+def _buffer_price_hint(token_id: str, best_ask: Optional[float]) -> Optional[float]:
+    """Add a small upward tick buffer to the BUY hint."""
+    if best_ask is None:
+        return None
+    tick = get_tick_size(token_id)
+    if tick <= 0:
+        tick = 0.001
+    buffered = best_ask + tick * config.PRICE_HINT_BUFFER_TICKS
+    return max(0.0, min(1.0, math.ceil(buffered / tick) * tick))
 
 
 def _get_utc8_date() -> str:
@@ -147,181 +173,14 @@ def _sanitize_next_window(current_window: MarketWindow, next_window: Optional[Ma
     return next_window
 
 
-def _calc_dry_run_pnl(state: MonitorState, exit_price: float) -> tuple[float, float]:
-    """Estimate dry-run PnL from entry and exit prices, excluding fees."""
-    if state.entry_price <= 0 or state.holding_size <= 0:
-        return 0.0, 0.0
-    pnl = (exit_price - state.entry_price) * state.holding_size
-    pnl_pct = (exit_price / state.entry_price - 1.0) * 100 if state.entry_price > 0 else 0.0
-    return pnl, pnl_pct
-
-
-def _log_dry_run_sell(state: MonitorState, window: MarketWindow, reason: str, price: float) -> None:
-    """Log a dry-run exit with estimated per-trade and cumulative PnL."""
-    pnl, pnl_pct = _calc_dry_run_pnl(state, price)
-    state.realized_pnl += pnl
-    log_event(log, logging.INFO, TRADE, {
-        "action": "SELL",
-        "reason": reason,
-        "price": price,
-        "shares": state.holding_size,
-        "window": window.short_label,
-        "dry_run": True,
-        "pnl_usd": round(pnl, 4),
-        "pnl_pct": round(pnl_pct, 2),
-        "cum_pnl_usd": round(state.realized_pnl, 4),
-    })
-
-
 def _log_window_summary(state: MonitorState, window: MarketWindow, dry_run: bool) -> None:
     """Emit a compact end-of-window summary."""
-    payload = {
+    log_event(log, logging.INFO, WINDOW, {
         "action": "SUMMARY",
         "window": window.short_label,
         "entries": state.entry_count,
         "blocked_window_cap": state.buy_blocked_window_cap,
-    }
-    if dry_run:
-        payload["dry_run_realized_pnl_usd"] = round(state.realized_pnl, 4)
-    log_event(log, logging.INFO, WINDOW, payload)
-
-
-async def _get_exact_holding(token_id: str, estimated: float) -> float:
-    """Query exact token balance from API; fall back to estimated size."""
-    from polybot.core.client import get_token_balance
-    exact = await asyncio.to_thread(get_token_balance, token_id)
-    if exact is not None and exact > 0:
-        log_event(log, logging.INFO, TRADE, {
-            "action": "BALANCE_QUERY",
-            "token": token_id[:20],
-            "exact": exact,
-            "estimated": estimated,
-        })
-        return exact
-    # Fallback: truncate estimated balance to be safe
-    truncated = int(estimated * 10_000) / 10_000
-    if truncated > 0:
-        log_event(log, logging.WARNING, TRADE, {
-            "action": "BALANCE_FALLBACK",
-            "token": token_id[:20],
-            "estimated": estimated,
-            "truncated": truncated,
-        })
-        return truncated
-    return estimated
-
-
-async def _sell_with_retry(
-    token_id: str, estimated_size: float, reason: str,
-    window_end_epoch: Optional[int] = None, max_attempts: int = 3,
-) -> bool:
-    """Sell with balance-refreshing retry. Re-queries balance on each attempt.
-
-    After successful sell, cleans up residual balance if > dust threshold.
-    Returns True if sell succeeded, False if all attempts failed.
-    """
-    for attempt in range(max_attempts):
-        sell_size = await _get_exact_holding(token_id, estimated_size)
-        if sell_size <= 0:
-            log_event(log, logging.DEBUG, TRADE, {
-                "action": "SELL_SKIP",
-                "reason": reason,
-                "message": "balance is 0",
-            })
-            return True
-        t_sell = time.time()
-        result = await sell_token(
-            token_id, sell_size, reason,
-            window_end_epoch=window_end_epoch,
-        )
-        if result.success:
-            sell_latency_ms = round((time.time() - t_sell) * 1000)
-            log_event(log, logging.INFO, TRADE, {
-                "action": "SELL_LATENCY",
-                "reason": reason,
-                "sell_latency_ms": sell_latency_ms,
-            })
-            await _cleanup_residual(
-                token_id, reason, window_end_epoch,
-                original_size=sell_size,
-            )
-            return True
-        log_event(log, logging.ERROR, TRADE, {
-            "action": "SELL_RETRY",
-            "attempt": f"{attempt + 1}/{max_attempts}",
-            "reason": reason,
-            "sell_size": sell_size,
-            "message": result.message,
-        })
-        if attempt < max_attempts - 1:
-            await asyncio.sleep(0.3)
-    log_event(log, logging.CRITICAL, TRADE, {
-        "action": "SELL_FAILED_ALL",
-        "reason": reason,
-        "estimated_size": estimated_size,
     })
-    return False
-
-
-_DUST_THRESHOLD = 0.005  # shares — skip cleanup below this (~$0.002)
-
-
-async def _cleanup_residual(
-    token_id: str, reason: str,
-    window_end_epoch: Optional[int] = None,
-    original_size: float = 0.0,
-) -> None:
-    """Query balance after sell and clean up any residual dust.
-
-    Uses raw (non-truncated) balance and waits for chain settlement.
-    Skips cleanup if balance hasn't settled yet (still ≈ original_size).
-    """
-    from polybot.core.client import get_token_balance
-
-    # Wait longer for chain settlement (1s is often not enough)
-    for delay in (3.0, 5.0):
-        await asyncio.sleep(delay)
-        residual = await asyncio.to_thread(get_token_balance, token_id, False)
-        if residual is None or residual < _DUST_THRESHOLD:
-            if residual is not None and residual > 0:
-                log_event(log, logging.INFO, TRADE, {
-                    "action": "CLEANUP_DUST",
-                    "token": token_id[:20],
-                    "residual": residual,
-                    "note": "below dust threshold, skipping",
-                })
-            return
-        # Balance ≈ original holding → first sell hasn't settled yet, skip
-        if original_size > 0 and residual >= original_size * 0.8:
-            log_event(log, logging.INFO, TRADE, {
-                "action": "CLEANUP_SKIP",
-                "token": token_id[:20],
-                "residual": residual,
-                "original_size": original_size,
-                "note": "balance not settled yet, likely stale",
-            })
-            continue
-        # Genuine residual detected
-        break
-    else:
-        # All attempts showed balance ≈ original → nothing to clean
-        return
-
-    log_event(log, logging.INFO, TRADE, {
-        "action": "CLEANUP_RESIDUAL",
-        "token": token_id[:20],
-        "residual": residual,
-    })
-    result = await sell_token(
-        token_id, residual, f"Cleanup residual ({reason})",
-        window_end_epoch=window_end_epoch,
-    )
-    if not result.success:
-        log_event(log, logging.WARNING, TRADE, {
-            "action": "CLEANUP_FAILED",
-            "residual": residual,
-            "message": result.message,
-        })
 
 
 def _side_token(window: MarketWindow, side: str) -> tuple[str, str]:
@@ -558,14 +417,16 @@ async def monitor_window(
     token_ids = [window.up_token, window.down_token]
     # Initial side for logging; actual side may be overridden by state.target_side
     buy_token_id, price_token_id = _side_token(window, side)
+    if ws is None:
+        ws = PriceStream(on_price=_noop_price_callback)
     new_callback = functools.partial(
-        _on_price_update, window=window, state=state, dry_run=dry_run,
+        _on_price_update, window=window, state=state, ws=ws, dry_run=dry_run,
         trade_config=trade_config, strategy=strategy, side=side,
     )
+    ws.set_on_price(new_callback)
 
-    if ws is not None:
+    if existing_ws is not None:
         # Reuse existing WS — switch subscription to new window's tokens
-        ws.set_on_price(new_callback)
         await ws.switch_tokens(token_ids)
         log_event(log, logging.INFO, WINDOW, {
             "action": "WS_SWITCHED",
@@ -573,7 +434,6 @@ async def monitor_window(
         })
     else:
         # First window — create new WS connection
-        ws = PriceStream(on_price=new_callback)
         await ws.connect(token_ids)
 
     # Pre-fetch order params during wait time to reduce order placement delay.
@@ -593,6 +453,10 @@ async def monitor_window(
     # Notify strategy of window start so it can initialize window state.
     if hasattr(strategy, 'set_window_start'):
         strategy.set_window_start(window.start_epoch)
+
+    # Seed BTC open price via REST if WS feed has no mid-window coverage.
+    if hasattr(strategy, 'preload_open_btc'):
+        await strategy.preload_open_btc(window.start_epoch)
 
     log_event(log, logging.INFO, WINDOW, {
         "action": "STARTED",
@@ -624,14 +488,38 @@ async def monitor_window(
                 "window": window.short_label,
             })
             if strategy.should_buy(opening_price, state):
-                opening_best_ask = ws.get_latest_best_ask(opening_token)
-                await _handle_opening_price(
-                    window, state, buy_token_id, opening_price, dry_run, trade_config, strategy, side,
-                    best_ask=opening_best_ask,
-                )
-                # Re-resolve token if strategy set target_side during opening buy
                 if state.target_side is not None:
                     buy_token_id, price_token_id = _side_token(window, state.target_side)
+                opening_best_ask = ws.get_latest_best_ask(buy_token_id)
+                min_entry_price, max_entry_price = _entry_price_band(strategy)
+                if opening_best_ask is None:
+                    log_event(log, logging.INFO, SIGNAL, {
+                        "action": "BUY_SKIP",
+                        "side": (state.target_side or side).upper(),
+                        "window": window.short_label,
+                        "reason": "target best_ask unavailable",
+                    })
+                elif (
+                    (min_entry_price is not None and opening_best_ask < min_entry_price)
+                    or (max_entry_price is not None and opening_best_ask > max_entry_price)
+                ):
+                    log_event(log, logging.INFO, SIGNAL, {
+                        "action": "BUY_SKIP",
+                        "side": (state.target_side or side).upper(),
+                        "window": window.short_label,
+                        "price": opening_best_ask,
+                        "reason": "target best_ask outside entry band",
+                    })
+                else:
+                    buffered_hint = _buffer_price_hint(buy_token_id, opening_best_ask)
+                    state.target_entry_price = opening_best_ask
+                    await _handle_opening_price(
+                        window, state, buy_token_id, opening_price, dry_run, trade_config, strategy, state.target_side or side,
+                        best_ask=buffered_hint,
+                    )
+                    # Re-resolve token if strategy set target_side during opening buy
+                    if state.target_side is not None:
+                        buy_token_id, price_token_id = _side_token(window, state.target_side)
     else:
         log_event(log, logging.WARNING, SIGNAL, {
             "action": "OPENING_PRICE_MISSING",
@@ -672,6 +560,7 @@ async def _on_price_update(
     update: PriceUpdate,
     window: MarketWindow,
     state: MonitorState,
+    ws: PriceStream,
     dry_run: bool,
     trade_config: TradeConfig,
     strategy: Optional[Strategy] = None,
@@ -726,15 +615,45 @@ async def _on_price_update(
                 if state.target_side is not None:
                     effective_side = state.target_side
                     buy_token_id, _ = _side_token(window, effective_side)
+                best_ask = ws.get_latest_best_ask(buy_token_id)
+                min_entry_price, max_entry_price = _entry_price_band(strategy)
+                if best_ask is None and update.token_id == buy_token_id:
+                    best_ask = update.best_ask
+                if best_ask is None:
+                    log_event(log, logging.INFO, SIGNAL, {
+                        "action": "BUY_SKIP",
+                        "side": effective_side.upper(),
+                        "window": window.short_label,
+                        "reason": "target best_ask unavailable",
+                    })
+                    state.target_entry_price = None
+                    return
+                if (
+                    (min_entry_price is not None and best_ask < min_entry_price)
+                    or (max_entry_price is not None and best_ask > max_entry_price)
+                ):
+                    log_event(log, logging.INFO, SIGNAL, {
+                        "action": "BUY_SKIP",
+                        "side": effective_side.upper(),
+                        "window": window.short_label,
+                        "price": best_ask,
+                        "signal_price": price,
+                        "reason": "target best_ask outside entry band",
+                    })
+                    state.target_entry_price = None
+                    return
+                state.target_entry_price = best_ask
                 log_event(log, logging.INFO, SIGNAL, {
                     "action": "BUY_SIGNAL",
-                    "price": price,
+                    "price": best_ask,
+                    "signal_price": price,
                     "side": effective_side.upper(),
                     "window": window.short_label,
                 })
+                buffered_hint = _buffer_price_hint(buy_token_id, best_ask)
                 await _handle_opening_price(
                     window, state, buy_token_id, price, dry_run, trade_config, strategy, effective_side,
-                    best_ask=update.best_ask,
+                    best_ask=buffered_hint,
                 )
             return
 
@@ -771,6 +690,15 @@ async def _handle_opening_price(
     if not dry_run:
         state.bought = True
         t_signal = time.time()
+        log_event(log, logging.INFO, TRADE, {
+            "action": "BUY_PREP",
+            "side": side.upper(),
+            "window": window.short_label,
+            "token": buy_token_id[:20],
+            "signal_price": price,
+            "target_price": buy_price,
+            "price_hint": best_ask,
+        })
         result = await buy_token(
             buy_token_id, trade_config.amount, window.short_label,
             window_end_epoch=window.end_epoch,
@@ -816,6 +744,16 @@ async def _handle_opening_price(
         state.entry_timestamps.append(time.time())
         state.holding_size = trade_config.amount / buy_price if buy_price > 0 else trade_config.amount
         state.entry_price = buy_price
+        log_event(log, logging.INFO, TRADE, {
+            "action": "BUY_PREP",
+            "side": side.upper(),
+            "window": window.short_label,
+            "token": buy_token_id[:20],
+            "signal_price": price,
+            "target_price": buy_price,
+            "price_hint": best_ask,
+            "dry_run": True,
+        })
         log_event(log, logging.INFO, TRADE, {
             "action": "BUY",
             "side": side.upper(),

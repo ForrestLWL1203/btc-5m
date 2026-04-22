@@ -8,13 +8,12 @@ CHAIN_ID: int = 137  # Polygon mainnet
 SIGNATURE_TYPE: int = 1  # 1 = proxy/Magic wallet (matches polymarket CLI config)
 
 # Polling / retry
-API_HEARTBEAT_INTERVAL: float = 8.0  # seconds between API heartbeat calls (must be < 10s)
 WS_RECONNECT_DELAY: float = 1.0  # initial WS reconnect backoff (seconds)
 WS_RECONNECT_MAX_DELAY: float = 30.0  # max WS reconnect backoff (seconds)
 WS_RECONNECT_MAX_RETRIES: int = 10  # max consecutive WS reconnect attempts
-FOK_RETRY_COUNT: int = 10  # retry FOK orders this many times
+FOK_RETRY_COUNT: int = 10  # FAK retry attempts (reuses FOK constant name)
 FOK_RETRY_INTERVAL: float = 0.1  # seconds between retries (~10x per second)
-FALLBACK_GTC: bool = True  # fallback to GTC limit order if FOK fails
+PRICE_HINT_BUFFER_TICKS: float = 1.0  # add one tick above best ask for BUY hints
 
 # Window timing
 WINDOW_END_BUFFER: int = 5  # treat window as ending this many seconds early to avoid boundary issues

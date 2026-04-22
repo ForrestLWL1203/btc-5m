@@ -17,6 +17,7 @@ Single active strategy: **`paired_window`** — Detect BTC momentum within 5-min
 **Core Architecture:**
 - Direction prediction: BTC theta move + persistence check
 - Entry timing: Configurable band (default: 60-180s into window)
+- Execution gating: Final entry permission uses the target token's live Polymarket `best_ask`
 - Exit strategy: Delayed to window end for market resolution (price typically $0.99 for winner)
 - Risk management: 5-loss pause + win-rate failure detection + UTC+8 daily reset
 
@@ -81,13 +82,17 @@ pytest -q  # All 80 tests
   - Emit buy signal with suggested entry price
 
 **2. Entry Filter**
-- Only buy if token price ∈ [min_entry_price, max_entry_price]
+- Direction is still determined from the UP reference leg
+- Once direction is chosen, read the target token's live `best_ask`
+- Only buy if target `best_ask` ∈ [min_entry_price, max_entry_price]
 - `min_entry_price` auto-calculated as `max * 0.88` (filters weak 0.45-0.50 range)
 - For `cap=0.65`: min = 0.57, max = 0.65
 - Max 1 entry per window
+- Conservative behavior: a window gets only one direction decision; if the first signal is skipped because target-leg ask is outside the band, the bot does not flip direction later in that same window
 
 **3. Hold & Exit**
-- Buy via FOK (Fill-Or-Kill) market order
+- Buy via FAK (Fill-And-Kill) market order
+- BUY price hints are sent as `target_best_ask + 1 tick`
 - Hold position until window.end_epoch (exact 300s point, not 10s early)
 - **Key**: 300s hold = on-chain settlement complete = exact balance available (not truncated)
 - At window end, monitor market resolution price:
@@ -148,6 +153,21 @@ max_entries_per_window: 1
 
 ## Architecture Notes
 
+**Why keep UP as the reference leg?**
+- The strategy uses the UP token midpoint as a single reference leg for direction detection and research consistency
+- For DOWN setups, strategy can still derive a theoretical paired price from `1 - up_reference_price`
+- Execution no longer trusts that theoretical value by itself; monitor.py switches to the target leg's real `best_ask` before placing any order
+
+**Why target-leg `best_ask` gating matters**
+- Real Polymarket books are not perfectly symmetric: `down_best_ask` is not always exactly `1 - up_midpoint`
+- Using target-leg `best_ask` prevents entries when the executable price has drifted outside the configured band
+- This reduces unnecessary live order attempts and a large portion of `400 no orders found to match` noise
+
+**Why FAK + matched-response handling?**
+- Runtime execution now uses FAK because it better matches the Polymarket web UI behavior for small marketable entries
+- Some successful Polymarket FAK responses return `MATCHED` without `sizeFilled`; runtime treats those as filled and stops retrying
+- This avoids duplicate live buys caused by retrying after a successful match
+
 **Why delayed exit until window.end?**
 - Window end = 300s after start = 3-4 minutes post-entry
 - On-chain settlement complete by then (buy order definitely in account)
@@ -169,8 +189,8 @@ pytest -q
 
 **Status**: All 80 tests passing
 - 17 config loader tests (YAML parsing, dynamic parameter calculation)
-- 9 monitor tests (window lifecycle, risk management)
+- 11 monitor tests (window lifecycle, target-leg price gating, risk management)
 - 18 market tests
 - 13 series tests
 - 13 stream tests
-- 7 trading tests
+- 8 trading tests

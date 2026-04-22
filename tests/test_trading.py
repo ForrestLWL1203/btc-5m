@@ -1,15 +1,13 @@
 """Unit tests for polybot.trading.trading — order execution logic."""
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from polybot.trading.trading import (
     OrderResult,
-    _post_fok_market,
-    _post_gtd_limit,
-    cancel_all_open_orders,
+    _post_fak_market,
 )
 
 
@@ -19,25 +17,22 @@ def _mock_client(fills: list[dict] | Exception):
     """Build a mock ClobClient whose post_order returns fill responses or raises."""
     client = MagicMock()
     client.create_market_order.return_value = {}
-    if isinstance(fills, Exception):
-        client.post_order.side_effect = fills
-    else:
-        client.post_order.side_effect = fills
+    client.post_order.side_effect = fills
     return client
 
 
-# ─── FOK BUY ────────────────────────────────────────────────────────────────
+# ─── FAK BUY ────────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_fok_buy_success():
-    """FOK BUY fills entire order in one attempt."""
+async def test_fak_buy_full_fill():
+    """FAK BUY fills entire order in one attempt."""
     fills = [
         {"sizeFilled": "10.0", "avgPrice": "0.50", "orderID": "ord-1", "status": "MATCHED"},
     ]
     mock_client = _mock_client(fills)
 
     with patch("polybot.trading.trading.get_client", return_value=mock_client):
-        result = await _post_fok_market(
+        result = await _post_fak_market(
             token_id="token-1",
             amount=5.0,
             side="BUY",
@@ -51,16 +46,61 @@ async def test_fok_buy_success():
 
 
 @pytest.mark.asyncio
-async def test_fok_buy_retries_on_failure():
-    """FOK BUY retries and succeeds on second attempt."""
+async def test_fak_buy_partial_fill_above_threshold_is_success():
+    """FAK BUY with fill ≥ 60% of requested amount is accepted immediately."""
     fills = [
-        Exception("No liquidity"),
-        {"sizeFilled": "10.0", "avgPrice": "0.50", "orderID": "ord-2", "status": "MATCHED"},
+        {"sizeFilled": "14.0", "avgPrice": "0.50", "orderID": "ord-2", "status": "MATCHED"},
     ]
     mock_client = _mock_client(fills)
 
     with patch("polybot.trading.trading.get_client", return_value=mock_client):
-        result = await _post_fok_market(
+        result = await _post_fak_market(
+            token_id="token-1",
+            amount=10.0,
+            side="BUY",
+            retry_count=3,
+            retry_interval=0.01,
+        )
+
+    assert result.success
+    assert result.filled_size == 14.0
+    assert mock_client.post_order.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_fak_buy_partial_fill_below_threshold_retries():
+    """FAK BUY with fill < 60% retries and succeeds on second attempt."""
+    fills = [
+        {"sizeFilled": "10.0", "avgPrice": "0.50", "orderID": "ord-5", "status": "MATCHED"},  # $5 < $6 threshold
+        {"sizeFilled": "16.0", "avgPrice": "0.50", "orderID": "ord-6", "status": "MATCHED"},  # $8 ≥ $6 threshold
+    ]
+    mock_client = _mock_client(fills)
+
+    with patch("polybot.trading.trading.get_client", return_value=mock_client):
+        result = await _post_fak_market(
+            token_id="token-1",
+            amount=10.0,
+            side="BUY",
+            retry_count=3,
+            retry_interval=0.01,
+        )
+
+    assert result.success
+    assert result.filled_size == 16.0
+    assert mock_client.post_order.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_fak_buy_retries_on_zero_fill():
+    """FAK BUY retries when filled=0 (zero depth), succeeds on second attempt."""
+    fills = [
+        {"sizeFilled": "0", "avgPrice": "0", "orderID": "ord-3", "status": "UNMATCHED", "success": False},
+        {"sizeFilled": "10.0", "avgPrice": "0.50", "orderID": "ord-4", "status": "MATCHED"},
+    ]
+    mock_client = _mock_client(fills)
+
+    with patch("polybot.trading.trading.get_client", return_value=mock_client):
+        result = await _post_fak_market(
             token_id="token-1",
             amount=5.0,
             side="BUY",
@@ -73,13 +113,44 @@ async def test_fok_buy_retries_on_failure():
 
 
 @pytest.mark.asyncio
-async def test_fok_buy_all_retries_fail():
-    """FOK BUY returns failure after exhausting retries."""
+async def test_fak_buy_matched_without_sizefilled_is_treated_as_success():
+    """Real API can return MATCHED without sizeFilled/avgPrice; don't retry that."""
+    fills = [
+        {
+            "orderID": "ord-matched",
+            "status": "MATCHED",
+            "success": True,
+            "takingAmount": "1.0",
+            "makingAmount": "1.6667",
+            "transactionsHashes": ["0xabc"],
+        },
+    ]
+    mock_client = _mock_client(fills)
+
+    with patch("polybot.trading.trading.get_client", return_value=mock_client):
+        result = await _post_fak_market(
+            token_id="token-1",
+            amount=1.0,
+            side="BUY",
+            retry_count=3,
+            retry_interval=0.01,
+            price_hint=0.60,
+        )
+
+    assert result.success
+    assert result.avg_price == pytest.approx(0.60)
+    assert result.filled_size == pytest.approx(1.0 / 0.60)
+    assert mock_client.post_order.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_fak_buy_all_retries_fail():
+    """FAK BUY returns failure after exhausting retries with zero fills."""
     fills = [Exception("No liquidity")] * 5
     mock_client = _mock_client(fills)
 
     with patch("polybot.trading.trading.get_client", return_value=mock_client):
-        result = await _post_fok_market(
+        result = await _post_fak_market(
             token_id="token-1",
             amount=5.0,
             side="BUY",
@@ -88,19 +159,19 @@ async def test_fok_buy_all_retries_fail():
         )
 
     assert not result.success
-    assert "FOK failed" in result.message
+    assert "FAK failed" in result.message
 
 
 @pytest.mark.asyncio
-async def test_fok_sell_success():
-    """FOK SELL fills entire order."""
+async def test_fak_sell_success():
+    """FAK SELL fills entire order."""
     fills = [
         {"sizeFilled": "10.0", "avgPrice": "0.48", "orderID": "ord-1", "status": "MATCHED"},
     ]
     mock_client = _mock_client(fills)
 
     with patch("polybot.trading.trading.get_client", return_value=mock_client):
-        result = await _post_fok_market(
+        result = await _post_fak_market(
             token_id="token-1",
             amount=10.0,
             side="SELL",
@@ -110,66 +181,3 @@ async def test_fok_sell_success():
 
     assert result.success
     assert result.filled_size == 10.0
-
-
-# ─── GTD limit: BUY vs SELL size calculation ──────────────────────────────────
-
-@pytest.mark.asyncio
-async def test_gtd_buy_size_is_shares():
-    """GTD BUY: size = amount / price (dollars → shares)."""
-    mock_client = MagicMock()
-    mock_client.create_order.return_value = {}
-    mock_client.post_order.return_value = {"orderID": "gtd-1", "status": "LIVE"}
-
-    with patch("polybot.trading.trading.get_client", return_value=mock_client), \
-         patch("polybot.trading.trading.round_to_tick", return_value=0.50):
-        result = await _post_gtd_limit(
-            token_id="token-1",
-            amount=5.0,
-            side="BUY",
-            price=0.50,
-            expiration=1000,
-            is_sell=False,
-        )
-
-    assert result.success
-    call_args = mock_client.create_order.call_args[0][0]
-    assert call_args.size == pytest.approx(10.0)
-
-
-@pytest.mark.asyncio
-async def test_gtd_sell_size_is_shares_directly():
-    """GTD SELL: size = amount directly (already in shares)."""
-    mock_client = MagicMock()
-    mock_client.create_order.return_value = {}
-    mock_client.post_order.return_value = {"orderID": "gtd-2", "status": "LIVE"}
-
-    with patch("polybot.trading.trading.get_client", return_value=mock_client), \
-         patch("polybot.trading.trading.round_to_tick", return_value=0.50):
-        result = await _post_gtd_limit(
-            token_id="token-1",
-            amount=10.0,
-            side="SELL",
-            price=0.50,
-            expiration=1000,
-            is_sell=True,
-        )
-
-    assert result.success
-    call_args = mock_client.create_order.call_args[0][0]
-    assert call_args.size == pytest.approx(10.0)
-
-
-# ─── cancel_all_open_orders is async ─────────────────────────────────────────
-
-@pytest.mark.asyncio
-async def test_cancel_all_is_async():
-    """cancel_all_open_orders should not block the event loop."""
-    mock_client = MagicMock()
-    mock_client.cancel_all.return_value = None
-
-    with patch("polybot.trading.trading.get_client", return_value=mock_client), \
-         patch("polybot.trading.trading.stop_heartbeat"):
-        await cancel_all_open_orders()
-
-    mock_client.cancel_all.assert_called_once()

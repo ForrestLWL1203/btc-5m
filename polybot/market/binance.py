@@ -10,6 +10,7 @@ from bisect import bisect_left, bisect_right
 from collections import deque
 from typing import Optional
 
+import httpx
 import websockets
 
 log = logging.getLogger(__name__)
@@ -56,6 +57,44 @@ class BinancePriceFeed:
         if idx < 0:
             return None
         return self._history[idx][1]
+
+    async def fetch_open_at(self, epoch: float) -> Optional[float]:
+        """Fetch BTC open price at epoch via Binance 1m klines REST API.
+
+        Used as fallback when the WS feed has no data covering window start
+        (cold-start mid-window attach). Result is injected into history so
+        subsequent first_price_at_or_after calls find it without re-fetching.
+        """
+        url = "https://api.binance.com/api/v3/klines"
+        params = {
+            "symbol": self._symbol.upper(),
+            "interval": "1m",
+            "startTime": int(epoch * 1000),
+            "limit": 1,
+        }
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(url, params=params)
+                resp.raise_for_status()
+                data = resp.json()
+                if data:
+                    open_price = float(data[0][1])
+                    # Inject at exact epoch so first_price_at_or_after can find it
+                    self._inject(epoch, open_price)
+                    log.info(
+                        "BinancePriceFeed REST fallback: epoch=%.0f open=%.2f",
+                        epoch, open_price,
+                    )
+                    return open_price
+        except Exception as e:
+            log.warning("BinancePriceFeed REST klines failed: %s", e)
+        return None
+
+    def _inject(self, ts: float, price: float) -> None:
+        """Insert a (ts, price) point into the sorted history deque."""
+        ts_values = [t for t, _ in self._history]
+        idx = bisect_left(ts_values, ts)
+        self._history.insert(idx, (ts, price))
 
     def first_price_at_or_after(self, ts: float, max_forward_sec: float = 30.0) -> Optional[float]:
         if not self._history:

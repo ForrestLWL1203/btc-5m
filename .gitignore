@@ -5,3 +5,4 @@ __pycache__/
 .env
 .claude/
 log/
+/data/

@@ -16,16 +16,17 @@ Status: ✅ **VALIDATED & LIVE READY**
 **Strategy & Execution Layer:**
 - `polybot/strategies/paired_window.py` — Direction prediction (UP/DOWN based on BTC theta move + persistence)
 - `polybot/trading/monitor.py` — Window lifecycle management + delayed exit logic + risk triggers
-- `polybot/trading/trading.py` — Order execution (FOK market orders via Polymarket CLOB)
+- `polybot/trading/trading.py` — Order execution (FAK market orders via Polymarket CLOB)
 - `polybot/core/state.py` — MonitorState dataclass with daily risk tracking
 - `polybot/config_loader.py` — Configuration parsing + **dynamic min_entry_price calculation** (max * 0.88)
 
 **Current Runtime Behavior:**
-- Entry: Detect BTC momentum (theta move + persistence) → buy token if in [min, max] price band
+- Entry: Detect BTC momentum from the UP reference leg → switch to target token live `best_ask` → only buy if target ask is in [min, max] price band
 - Hold: Full 300s until window close (ensures settlement, enables exact balance queries)
 - Exit: Wait until market resolution (price $0.95+) → sell at high price (~$0.99)
 - Risk: Track daily stats, pause on 5 consecutive losses or <50% win rate after 30 trades
 - **NO** TP/SL/re-entry logic — intentionally narrow, high signal quality
+- Direction is conservative: one direction decision per window; skipped entries do not reopen the window for opposite-side trading
 
 ## What Exists (Maintained)
 
@@ -68,6 +69,7 @@ Status: ✅ **VALIDATED & LIVE READY**
 - `min_entry_price: auto (0.57)` ← Calculated as max * 0.88
 - `max_entry_price: 0.65` ← Best validation result
 - `max_entries_per_window: 1`
+- `price_hint_buffer: 1 tick` ← BUY hint uses `target_best_ask + 1 tick`
 
 ## Key Implementation Details (For Code Changes)
 
@@ -83,6 +85,18 @@ Status: ✅ **VALIDATED & LIVE READY**
 - Example: cap=0.65 → min=0.57 (auto-calculated in config_loader.py)
 - Generalizes: cap=0.70 → min=0.62, cap=0.75 → min=0.66
 - Effect: Maintains 75%+ overall win rate while removing weak signals
+
+**Target-Leg Execution Filter (Why final gating uses best_ask):**
+- UP remains the strategy's reference leg for direction detection and theoretical paired pricing
+- Execution now reads the target token's live Polymarket `best_ask` before entering
+- If target `best_ask` is outside `[min_entry_price, max_entry_price]`, skip the window instead of sending a market order
+- For BUY orders, `price_hint` is buffered to `target_best_ask + 1 tick`
+- Purpose: reduce avoidable `400 no orders found to match` attempts caused by drift between theoretical paired price and executable book price
+
+**FAK Runtime Notes:**
+- Runtime uses FAK (Fill-And-Kill), not FOK
+- A Polymarket response with `status=MATCHED` and `success=true` is treated as filled even if `sizeFilled` is omitted
+- This prevents duplicate retries after successful live matches
 
 **Risk Management Daily Reset:**
 - UTC+8 timezone (not UTC) — user's local timezone
@@ -127,6 +141,10 @@ python3.11 run.py --config paired_window_optimized.yaml
 - Reference CLAUDE.md + README.md for strategy details
 - Check config_loader.py for dynamic parameter logic
 - Validate changes against 77-window dataset before live trading
+- When reasoning about live entry behavior, distinguish between:
+- `signal_price`: reference-leg midpoint used to form the idea
+- `target_best_ask`: executable target-leg ask used for final entry permission
+- `price_hint`: buffered BUY hint sent to Polymarket (`target_best_ask + 1 tick`)
 
 **DON'T:**
 - Reintroduce TP/SL/re-entry logic (intentionally removed for high signal quality)

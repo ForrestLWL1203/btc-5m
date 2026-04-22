@@ -4,6 +4,7 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from websockets.exceptions import ConnectionClosedError
 
 from polybot.market.stream import PriceStream, PriceUpdate
 
@@ -231,3 +232,34 @@ async def test_switch_tokens_clears_price_cache():
 
     assert len(stream._prices) == 0  # cache cleared
     assert stream._connected_tokens == ["new-token-1", "new-token-2"]
+
+
+@pytest.mark.asyncio
+async def test_switch_tokens_reconnects_when_ws_is_closed():
+    """switch_tokens should reconnect instead of bubbling a closed-WS error."""
+    callback = AsyncMock()
+    stream = PriceStream(on_price=callback)
+    stream._running = True
+    stream._connected_tokens = ["old-token"]
+    stream._prices["old-token"] = PriceUpdate(
+        token_id="old-token", best_bid=0.4, best_ask=0.5,
+        midpoint=0.45, spread=0.1, source="best_bid_ask",
+    )
+
+    closed_ws = AsyncMock()
+    closed_ws.send = AsyncMock(side_effect=ConnectionClosedError(None, None))
+    closed_ws.close = AsyncMock()
+    stream._ws = closed_ws
+
+    reconnected_ws = AsyncMock()
+    reconnected_ws.send = AsyncMock()
+    reconnected_ws.close = AsyncMock()
+
+    with patch("polybot.market.stream.websockets.connect", new=AsyncMock(return_value=reconnected_ws)):
+        await stream.switch_tokens(["new-token-1", "new-token-2"])
+
+    closed_ws.close.assert_awaited_once()
+    reconnected_ws.send.assert_awaited_once()
+    assert len(stream._prices) == 0
+    assert stream._connected_tokens == ["new-token-1", "new-token-2"]
+    assert stream._ws is reconnected_ws

@@ -121,7 +121,7 @@ Examples:
     _setup_file_logging(series.slug_prefix)
 
     # Get display side from strategy for logging
-    display_side = strategy.get_side() or "up"
+    display_side = "DYNAMIC" if getattr(strategy, "dynamic_side", False) else (strategy.get_side() or "UP")
 
     log.info("=== %s %s Up/Down Trader Started ===", series.asset.upper(), series.timeframe)
     log.info(
@@ -136,6 +136,20 @@ Examples:
         log.info("Rounds: infinite")
     if dry_run:
         log.info("[DRY-RUN MODE — no orders will be placed]")
+
+    # Print key strategy parameters for verification
+    if hasattr(strategy, '_theta_pct'):
+        window_sec = series.slug_step
+        start_at = window_sec - strategy._entry_start_remaining_sec
+        end_at = window_sec - strategy._entry_end_remaining_sec
+        log.info(
+            "Params: theta=%.3f%% | entry_band=[%ds,%ds] into window | price=[%.2f,%.2f] | persistence=%ds | max_entries=%s",
+            strategy._theta_pct,
+            int(start_at), int(end_at),
+            strategy._min_entry_price, strategy._max_entry_price,
+            strategy._persistence_sec,
+            trade_config.max_entries_per_window,
+        )
 
     ws = None
     completed = 0
