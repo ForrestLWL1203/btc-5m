@@ -480,6 +480,7 @@ async def monitor_window(
     trade_config: Optional[TradeConfig] = None,
     strategy: Optional[Strategy] = None,
     series: Optional[MarketSeries] = None,
+    state: Optional[MonitorState] = None,
 ) -> tuple[Optional[MarketWindow], Optional[PriceStream], bool]:
     """
     Monitor a trading window using WebSocket real-time price updates.
@@ -492,9 +493,11 @@ async def monitor_window(
         trade_config: Common trading parameters (TP/SL, amount, etc).
         strategy: Strategy handling direction + buy decision.
         series: Market series definition (uses config defaults if None).
+        state: Shared MonitorState for risk management tracking across windows.
+               If None, creates a new one (risk management won't persist).
 
     Returns (next_window, ws, monitored) — monitored is False if window was skipped.
-    Pass ws to the next call's existing_ws param.
+    Pass ws to the next call's existing_ws param and state for next window.
     """
     if trade_config is None:
         trade_config = TradeConfig()
@@ -516,7 +519,9 @@ async def monitor_window(
         "window": window.short_label,
     })
 
-    state = MonitorState()
+    # Use shared state if provided, otherwise create new (which won't persist)
+    if state is None:
+        state = MonitorState()
     ws: Optional[PriceStream] = existing_ws
 
     # Check daily reset and risk management before monitoring this window

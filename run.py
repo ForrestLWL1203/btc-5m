@@ -21,7 +21,7 @@ load_dotenv()
 from polybot.config_loader import load_config, build_series, build_strategy, build_trade_config
 from polybot.market.market import find_next_window
 from polybot.core.log_formatter import ConsoleFormatter, JsonFormatter
-from polybot.trading.monitor import monitor_window
+from polybot.trading.monitor import monitor_window, MonitorState
 LOG_DIR = Path("log")
 LOG_DIR.mkdir(exist_ok=True)
 
@@ -139,6 +139,8 @@ Examples:
 
     ws = None
     completed = 0
+    # Shared MonitorState for risk management tracking across all windows
+    shared_state = MonitorState()
 
     # Start strategy lifecycle if the active strategy defines one.
     if hasattr(strategy, 'start'):
@@ -159,6 +161,7 @@ Examples:
             next_win, ws, monitored = await monitor_window(
                 window, dry_run=dry_run, existing_ws=ws,
                 trade_config=trade_config, strategy=strategy, series=series,
+                state=shared_state,
             )
             if monitored:
                 completed += 1
@@ -172,6 +175,7 @@ Examples:
                 next_win, ws, monitored = await monitor_window(
                     next_win, dry_run=dry_run, preopened=True, existing_ws=ws,
                     trade_config=trade_config, strategy=strategy, series=series,
+                    state=shared_state,
                 )
                 if monitored:
                     completed += 1
@@ -185,6 +189,7 @@ Examples:
                     next_win, ws, monitored = await monitor_window(
                         next_win, dry_run=dry_run, preopened=True, existing_ws=ws,
                         trade_config=trade_config, strategy=strategy, series=series,
+                        state=shared_state,
                     )
                     if monitored:
                         completed += 1
