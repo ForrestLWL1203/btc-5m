@@ -755,10 +755,10 @@ async def _handle_opening_price(
     if state.bought:
         return
 
-    # Allow retry after buy failure by resetting the flag
-    # FOK status check now properly validates order success, so retries are safe
+    # Defense in depth: if buy was already attempted in this window, don't retry.
+    # _on_price_update also gates on buy_blocked_window_cap before calling us.
     if state.exit_triggered:
-        state.exit_triggered = False
+        return
 
     # Re-resolve token if strategy overrode direction
     if state.target_side is not None:
@@ -796,12 +796,14 @@ async def _handle_opening_price(
         else:
             state.bought = False
             state.exit_triggered = True
+            state.buy_blocked_window_cap = True
             log_event(log, logging.WARNING, TRADE, {
                 "action": "BUY_FAILED",
                 "side": side.upper(),
                 "price": buy_price,
                 "message": result.message,
                 "window": window.short_label,
+                "note": "window locked to prevent duplicate entries",
             })
     else:
         state.bought = True
