@@ -755,10 +755,10 @@ async def _handle_opening_price(
     if state.bought:
         return
 
-    # Do NOT reset exit_triggered here — it prevents re-entry after buy failure
-    # exit_triggered should only be reset at the start of a new window
+    # Allow retry after buy failure by resetting the flag
+    # FOK status check now properly validates order success, so retries are safe
     if state.exit_triggered:
-        return  # Previous buy attempt failed, skip further attempts this window
+        state.exit_triggered = False
 
     # Re-resolve token if strategy overrode direction
     if state.target_side is not None:

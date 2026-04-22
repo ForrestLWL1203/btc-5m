@@ -102,6 +102,7 @@ async def _post_fok_market(
 
             resp_id = resp.get("orderID") or resp.get("orderId") or resp.get("id", "")
             status = resp.get("status", "").upper()
+            success = resp.get("success", False)
             filled = float(resp.get("sizeFilled", resp.get("filledSize", 0)))
             price = float(resp.get("avgPrice", resp.get("price", 0.0)))
 
@@ -110,13 +111,19 @@ async def _post_fok_market(
                 "side": side,
                 "order_id": resp_id,
                 "status": status,
+                "success": success,
                 "filled": filled,
                 "price": price,
                 "raw_keys": list(resp.keys()),
                 "attempt": attempt,
             })
 
-            # FOK response never includes filled/price — estimate from amount
+            # Check FOK order success via 'success' field (most reliable) or status
+            if not success and status not in ("MATCHED", "FILLED"):
+                log.debug("FOK order rejected: success=%s status=%s", success, status)
+                continue
+
+            # FOK response omits sizeFilled/avgPrice — estimate from amount
             # Actual balance will be queried separately after buy/sell
             filled_size = filled if filled > 0 else amount
             avg_price = price if price > 0 else 0.0
