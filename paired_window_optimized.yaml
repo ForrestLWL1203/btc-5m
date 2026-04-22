@@ -1,0 +1,30 @@
+# Optimized paired-window strategy based on 77-window validation
+# Best configuration: cap=0.65, entry_band=[60,180]
+#
+# min_entry_price is NOT specified here, so it will be auto-calculated as:
+#   min = max_entry_price * 0.88  (cap - 12%)
+#
+# For cap=0.65: min will be 0.65 * 0.88 = 0.572 ≈ 0.57
+# This filters out weak signals (0.45-0.50 range had only 50% win rate)
+# while maintaining 75%+ overall win rate
+
+market:
+  asset: btc
+  timeframe: 5m
+
+rounds: 2
+
+strategy:
+  type: paired_window
+  theta_pct: 0.02
+  entry_start_remaining_sec: 240       # Start checking when ~240s remain (60s after window open)
+  entry_end_remaining_sec: 60          # Stop checking when ~60s remain (180s after window open)
+  persistence_sec: 10
+  # min_entry_price: auto-calculated as max * 0.88
+  max_entry_price: 0.65                # Cap at 0.65 for best EV
+  min_move_ratio: 0.7
+  open_price_max_wait_sec: 30
+
+params:
+  amount: 1.0
+  max_entries_per_window: 1

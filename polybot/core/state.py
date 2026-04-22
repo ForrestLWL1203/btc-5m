@@ -25,5 +25,13 @@ class MonitorState:
     trade_lock: asyncio.Lock = None  # prevents concurrent buy/sell from WS callbacks
     started: bool = False  # set True when window officially starts — prevents pre-start trades
 
+    # Risk management (UTC+8 daily reset)
+    daily_wins: int = 0
+    daily_losses: int = 0
+    consecutive_losses: int = 0
+    windows_to_skip: int = 0
+    last_reset_date: Optional[str] = None  # "YYYY-MM-DD" in UTC+8, for detecting date change
+    min_trades_for_eval: int = 30  # minimum trades before evaluating win rate
+
     def __post_init__(self):
         self.trade_lock = asyncio.Lock()

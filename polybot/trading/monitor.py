@@ -1,6 +1,7 @@
 """Monitoring loop — real-time monitoring via WebSocket, with fallback to REST polling."""
 
 import asyncio
+import datetime
 import functools
 import logging
 import time
@@ -31,6 +32,80 @@ log = logging.getLogger(__name__)
 
 _PREOPEN_BUFFER = 10  # seconds before window start to wake up
 _STARTED_SKIP_THRESHOLD = 60  # allow attaching to a window within its first minute
+
+
+def _get_utc8_date() -> str:
+    """Get current date in UTC+8 as YYYY-MM-DD."""
+    tz = datetime.timezone(datetime.timedelta(hours=8))
+    return datetime.datetime.now(tz).strftime("%Y-%m-%d")
+
+
+def _check_and_reset_daily_state(state: MonitorState) -> None:
+    """Reset daily risk management stats at UTC+8 midnight."""
+    current_date = _get_utc8_date()
+    if state.last_reset_date != current_date:
+        log_event(log, logging.INFO, TRADE, {
+            "action": "DAILY_RESET",
+            "date": current_date,
+            "previous_date": state.last_reset_date,
+        })
+        state.last_reset_date = current_date
+        state.daily_wins = 0
+        state.daily_losses = 0
+        state.consecutive_losses = 0
+        state.windows_to_skip = 0
+
+
+def _should_skip_window(state: MonitorState) -> bool:
+    """Check if this window should be skipped due to risk management."""
+    if state.windows_to_skip > 0:
+        log_event(log, logging.WARNING, WINDOW, {
+            "action": "SKIP_WINDOW",
+            "reason": "risk_management_pause",
+            "windows_remaining": state.windows_to_skip,
+        })
+        state.windows_to_skip -= 1
+        return True
+    return False
+
+
+def _process_trade_result(state: MonitorState, direction_correct: bool) -> None:
+    """Update daily statistics and check risk management triggers."""
+    if direction_correct:
+        state.daily_wins += 1
+        state.consecutive_losses = 0
+    else:
+        state.daily_losses += 1
+        state.consecutive_losses += 1
+
+        # Trigger 1: 5 consecutive losses
+        if state.consecutive_losses >= 5:
+            state.windows_to_skip = 2
+            log_event(log, logging.WARNING, TRADE, {
+                "action": "RISK_ALERT_5_LOSSES",
+                "consecutive_losses": state.consecutive_losses,
+                "window_pause": 2,
+                "reason": "System anomaly detected",
+            })
+            state.consecutive_losses = 0  # Reset after triggering pause
+
+    # Trigger 2: Check win rate after minimum trades
+    total_trades = state.daily_wins + state.daily_losses
+    if total_trades >= state.min_trades_for_eval:
+        current_wr = state.daily_wins / total_trades
+        if current_wr < 0.50:
+            # Only trigger once to avoid repeated alerts
+            if state.windows_to_skip == 0:  # Not already paused
+                state.windows_to_skip = 5
+                log_event(log, logging.CRITICAL, TRADE, {
+                    "action": "RISK_ALERT_WIN_RATE",
+                    "win_rate": round(current_wr, 3),
+                    "trades": total_trades,
+                    "wins": state.daily_wins,
+                    "losses": state.daily_losses,
+                    "window_pause": 5,
+                    "reason": "Strategy failure - win rate < 50%",
+                })
 
 
 def _strategy_attach_skip_threshold(
@@ -269,80 +344,103 @@ async def _monitor_single_window(
     """
     Monitor a single window until expiry or exit_triggered, then clean up.
     """
+    # Check daily reset at start of each window
+    _check_and_reset_daily_state(state)
+
     buy_token_id, _ = _side_token(window, side)
-    buffer = series.window_end_buffer if series else config.WINDOW_END_BUFFER
-    effective_end = window.end_epoch - buffer
     fetch_task = None
+    window_end_epoch = None
 
     while True:
         now = int(time.time())
-        if now >= effective_end:
+        if now >= window.end_epoch:
+            if window_end_epoch is None:
+                window_end_epoch = now
             log_event(log, logging.INFO, WINDOW, {
                 "action": "EXPIRED",
                 "window": window.short_label,
                 "holding": state.bought,
             })
             if state.bought and not state.exit_triggered:
-                log_event(log, logging.WARNING, TRADE, {
-                    "action": "SELL",
-                    "reason": "Window expired with open position",
+                # Post-window-end phase: wait for favorable exit conditions:
+                # 1. Price > 0.95 (approaching $1.00 on resolution)
+                # 2. Or timeout after 10 minutes
+                token_price = state.latest_midpoint
+                direction_correct = token_price is not None and token_price > 0.5
+
+                # Log position at window end
+                log_event(log, logging.INFO, TRADE, {
+                    "action": "WINDOW_END_POSITION",
                     "window": window.short_label,
+                    "token_price": token_price,
+                    "direction_correct": direction_correct,
                     "shares": state.holding_size,
+                    "seconds_since_window_end": now - window.end_epoch,
+                    "daily_record": f"{state.daily_wins}W {state.daily_losses}L",
                     "dry_run": dry_run,
                 })
-                if not dry_run:
-                    await cancel_all_open_orders()
-                    await _sell_with_retry(
-                        buy_token_id, state.holding_size, "Window expired",
-                        window_end_epoch=window.end_epoch,
-                    )
+
+                # Process trade result for risk management
+                _process_trade_result(state, direction_correct)
+
+                # Check if we should exit now
+                time_since_end = now - window.end_epoch
+                should_exit = False
+                exit_reason = ""
+
+                if not direction_correct:
+                    # Direction was wrong, no point waiting
+                    should_exit = True
+                    exit_reason = "Direction incorrect, token worthless"
+                elif token_price is not None and token_price > 0.95:
+                    # Price high enough, likely resolved or approaching resolution
+                    should_exit = True
+                    exit_reason = f"Price ${token_price:.4f} > 0.95 (market resolved/resolving)"
+                elif time_since_end > 600:  # 10 minute timeout
+                    # Too much time has passed, exit anyway
+                    should_exit = True
+                    exit_reason = "Timeout after 10 minutes"
+
+                if should_exit:
+                    log_event(log, logging.INFO, TRADE, {
+                        "action": "SELL",
+                        "reason": exit_reason,
+                        "window": window.short_label,
+                        "shares": state.holding_size,
+                        "price": token_price,
+                        "seconds_since_window_end": time_since_end,
+                        "dry_run": dry_run,
+                    })
+                    if not dry_run:
+                        await cancel_all_open_orders()
+                        await _sell_with_retry(
+                            buy_token_id, state.holding_size, exit_reason,
+                            window_end_epoch=window.end_epoch,
+                        )
+                    else:
+                        _log_dry_run_sell(state, window, exit_reason, token_price or 0.0)
+                    state.exit_triggered = True
                 else:
-                    _log_dry_run_sell(state, window, "Window expired", state.latest_midpoint or state.entry_price)
-            # Always pre-fetch next window on expiry to avoid stale fallback
-            fetch_task = asyncio.create_task(
-                asyncio.to_thread(_find_next_window_after, window.end_epoch, series)
-            )
+                    # Not ready to exit yet, continue monitoring
+                    log_event(log, logging.DEBUG, TRADE, {
+                        "action": "WAITING_FOR_RESOLUTION",
+                        "window": window.short_label,
+                        "price": token_price,
+                        "seconds_since_window_end": time_since_end,
+                        "reason": f"Price ${token_price:.4f if token_price else 0:.4f} - waiting for > 0.95 or timeout",
+                    })
+                    await asyncio.sleep(1)
+                    continue
+
+            # All positions resolved, pre-fetch next window
+            if fetch_task is None:
+                fetch_task = asyncio.create_task(
+                    asyncio.to_thread(_find_next_window_after, window.end_epoch, series)
+                )
             break
 
-        remaining = effective_end - now
-        # Window ending soon (<=10s) with position open and no exit triggered — sell now
-        if remaining <= 10 and state.bought and not state.exit_triggered:
-            log_event(log, logging.WARNING, TRADE, {
-                "action": "SELL",
-                "reason": f"Window ending in {remaining}s",
-                "window": window.short_label,
-                "shares": state.holding_size,
-                "dry_run": dry_run,
-            })
-            # Pre-fetch next window while we sleep
-            fetch_task = asyncio.create_task(
-                asyncio.to_thread(_find_next_window_after, window.end_epoch, series)
-            )
-            async with state.trade_lock:
-                if not dry_run:
-                    await cancel_all_open_orders()
-                    await _sell_with_retry(
-                        buy_token_id, state.holding_size, f"Window ending in {remaining}s",
-                        window_end_epoch=window.end_epoch,
-                    )
-                else:
-                    _log_dry_run_sell(
-                        state, window, f"Window ending in {remaining}s", state.latest_midpoint or state.entry_price,
-                    )
-                state.bought = False
-                state.exit_triggered = True
-            await asyncio.sleep(remaining)
-            try:
-                next_win = _sanitize_next_window(window, fetch_task.result())
-            except Exception as e:
-                log.debug("Pre-fetch next window failed: %s", e)
-                next_win = _sanitize_next_window(window, find_next_window())
-            # Do NOT close ws — reuse across windows
-            _log_window_summary(state, window, dry_run)
-            return next_win
-
         if state.exit_triggered:
-            remaining = effective_end - now
+            remaining = window.end_epoch - now
             log_event(log, logging.INFO, WINDOW, {
                 "action": "EXIT_WAIT",
                 "window": window.short_label,
@@ -456,6 +554,12 @@ async def monitor_window(
 
     state = MonitorState()
     ws: Optional[PriceStream] = existing_ws
+
+    # Check daily reset and risk management before monitoring this window
+    _check_and_reset_daily_state(state)
+    if _should_skip_window(state):
+        next_win = _find_and_preopen_next_window(window, series)
+        return next_win, existing_ws, False
 
     now_epoch = int(time.time())
     elapsed_since_start = now_epoch - window.start_epoch

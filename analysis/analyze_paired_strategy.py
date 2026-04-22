@@ -276,17 +276,114 @@ def simulate(
     }
 
 
+def replay(
+    windows: list[Window],
+    theta_pct: float,
+    lo_rem: int,
+    hi_rem: int,
+    persistence_sec: int = 10,
+    max_entry_price: float = 0.99,
+    min_entry_price: float = 0.0,
+    entry_delay_sec: float = 10.0,
+    amount: float = 1.0,
+) -> None:
+    """Print a window-by-window replay like a dry-run log."""
+    import datetime
+
+    trades = collect_trades(
+        windows, theta_pct, lo_rem, hi_rem,
+        persistence_sec=persistence_sec,
+        max_entry_price=max_entry_price,
+        min_entry_price=min_entry_price,
+        entry_delay_sec=entry_delay_sec,
+    )
+    trade_by_ts = {t["ts"]: t for t in trades}
+
+    total_pnl = 0.0
+    wins = losses = skipped = 0
+
+    print(f"\n{'='*70}")
+    print(f"REPLAY  theta={theta_pct:.3f}%  band=[{lo_rem},{hi_rem}]  "
+          f"cap=[{min_entry_price:.2f},{max_entry_price:.2f}]  "
+          f"delay={entry_delay_sec:.0f}s  amount=${amount:.2f}")
+    print(f"{'='*70}")
+
+    for w in windows:
+        start_dt = datetime.datetime.utcfromtimestamp(w.start_epoch).strftime("%H:%M")
+        end_dt   = datetime.datetime.utcfromtimestamp(w.end_epoch).strftime("%H:%M")
+        label = f"{start_dt}-{end_dt} UTC"
+
+        # Find matching trade for this window (by fill_ts inside window)
+        matched = next(
+            (t for t in trades
+             if w.start_epoch <= t["ts"] < w.end_epoch),
+            None
+        )
+
+        if matched is None:
+            skipped += 1
+            print(f"  [{label}]  {w.direction.upper():4s}  — no signal")
+            continue
+
+        entry  = matched["entry_price"]
+        side   = "UP  " if matched["direction_up"] else "DOWN"
+        win    = matched["win"]
+        pnl    = (1.0 - entry) * amount / entry if win else -amount
+        total_pnl += pnl
+        shares = amount / entry
+
+        if win:
+            wins += 1
+            result = f"✓ WIN   exit≈1.00  PnL={pnl:+.3f}"
+        else:
+            losses += 1
+            result = f"✗ LOSS  exit≈0.00  PnL={pnl:+.3f}"
+
+        print(f"  [{label}]  {w.direction.upper():4s}  "
+              f"ENTER {side} @ {entry:.3f}  {shares:.2f}sh  {result}  "
+              f"cumPnL={total_pnl:+.3f}")
+
+    total = wins + losses + skipped
+    print(f"{'='*70}")
+    print(f"  Windows: {total}  |  Entered: {wins+losses}  |  Skipped: {skipped}")
+    if wins + losses:
+        wr = wins / (wins + losses)
+        print(f"  Win rate: {wins}/{wins+losses} = {wr:.1%}  |  "
+              f"Total PnL: ${total_pnl:+.3f}  |  "
+              f"EV/trade: ${total_pnl/(wins+losses):+.4f}")
+    print()
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("path")
+    ap.add_argument("path", nargs="+")
     ap.add_argument("--max-entry-price", type=float, default=0.99)
+    ap.add_argument("--min-entry-price", type=float, default=0.0)
     ap.add_argument("--persistence", type=int, default=10)
     ap.add_argument("--delays", default="0,2,5,10",
                     help="Comma-separated entry delays (seconds) to compare")
+    ap.add_argument("--replay", action="store_true",
+                    help="Print window-by-window replay instead of grid analysis")
+    ap.add_argument("--theta", type=float, default=0.02,
+                    help="BTC move threshold %% for replay mode")
+    ap.add_argument("--lo", type=int, default=180,
+                    help="Entry band lo_rem for replay mode")
+    ap.add_argument("--hi", type=int, default=270,
+                    help="Entry band hi_rem for replay mode")
+    ap.add_argument("--amount", type=float, default=1.0,
+                    help="Simulated trade amount in USD for replay mode")
     args = ap.parse_args()
 
-    windows = parse_file(args.path)
-    print(f"Loaded {len(windows)} windows from {args.path}")
+    # Support multiple input files — concatenate windows in order
+    all_windows: list[Window] = []
+    for p in args.path:
+        ws = parse_file(p)
+        all_windows.extend(ws)
+    # Sort by window start epoch so multi-file runs are chronological
+    all_windows.sort(key=lambda w: w.start_epoch)
+    windows = all_windows
+
+    print(f"Loaded {len(windows)} windows from {len(args.path)} file(s)")
     if not windows:
         sys.exit(1)
 
@@ -297,6 +394,20 @@ def main():
     btc_counts = [len(w.btc) for w in windows]
     print(f"Per-window: BTC ticks median={sorted(btc_counts)[len(btc_counts)//2]}, "
           f"Poly updates median={sorted(poly_counts)[len(poly_counts)//2]}")
+
+    if args.replay:
+        replay(
+            windows,
+            theta_pct=args.theta,
+            lo_rem=args.lo,
+            hi_rem=args.hi,
+            persistence_sec=args.persistence,
+            max_entry_price=args.max_entry_price,
+            min_entry_price=args.min_entry_price,
+            entry_delay_sec=float(args.delays.split(",")[-1]),
+            amount=args.amount,
+        )
+        return
 
     delays = [float(d) for d in args.delays.split(",")]
     thetas = [0.02, 0.03, 0.05, 0.08, 0.10]

@@ -40,6 +40,8 @@ BTC_SNAP_THRESHOLD = 0.5  # $0.5 price change
 MIN_SNAP_INTERVAL = 0.05  # 50ms
 # Periodic heartbeat snapshot interval
 HEARTBEAT_INTERVAL = 0.2  # 200ms fallback
+# BTC tick throttle: minimum price move (USD) to write a tick record
+BTC_TICK_MIN_MOVE = 1.0  # $1 default; 0 = write every trade
 
 
 class BinanceTradeStream:
@@ -114,11 +116,15 @@ class WindowSummary:
 class DataCollector:
     """Coordinates Binance BTC plus Polymarket and writes JSONL."""
 
-    def __init__(self, series_key: str, max_windows: int, slim: bool = False):
+    def __init__(self, series_key: str, max_windows: int, slim: bool = False,
+                 no_snap: bool = False, btc_min_move: float = BTC_TICK_MIN_MOVE):
         from polybot.market.series import MarketSeries
         self.series = MarketSeries.from_known(series_key)
         self.max_windows = max_windows
         self._slim = slim
+        self._no_snap = no_snap
+        self._btc_min_move = btc_min_move
+        self._last_written_btc_price: Optional[float] = None
 
         self._buffer: list[str] = []
         self._outfile = None
@@ -244,6 +250,7 @@ class DataCollector:
         self._btc_state["prev_price"] = None
         self._btc_state["history"].clear()
         self._btc_state["flow"].clear()
+        self._last_written_btc_price = None
 
     async def _on_btc_trade(
         self,
@@ -271,13 +278,21 @@ class DataCollector:
         side = "sell" if is_seller else "buy"
         state["flow"].append((local_ts, qty, side))
 
-        line = json.dumps({
-            "ts": round(local_ts, 3), "exchange_ts": round(exchange_ts, 3),
-            "src": "binance", "price": price, "qty": qty, "side": side,
-        })
-        self._buffer.append(line)
+        # Throttle: only write tick when price moves enough from last written price
+        write_tick = (
+            self._btc_min_move <= 0
+            or self._last_written_btc_price is None
+            or abs(price - self._last_written_btc_price) >= self._btc_min_move
+        )
+        if write_tick:
+            line = json.dumps({
+                "ts": round(local_ts, 3), "exchange_ts": round(exchange_ts, 3),
+                "src": "binance", "price": price, "qty": qty, "side": side,
+            })
+            self._buffer.append(line)
+            self._last_written_btc_price = price
 
-        if prev_price is not None and abs(price - prev_price) >= BTC_SNAP_THRESHOLD:
+        if not self._no_snap and prev_price is not None and abs(price - prev_price) >= BTC_SNAP_THRESHOLD:
             self._emit_snapshot(local_ts, trigger="btc_move")
 
         if len(self._buffer) >= 500:
@@ -323,7 +338,7 @@ class DataCollector:
             self._buffer.append(line)
 
         # Event-driven: trigger snapshot on significant poly price change
-        if prev_mid is not None and abs(mid - prev_mid) >= 0.01:
+        if not self._no_snap and prev_mid is not None and abs(mid - prev_mid) >= 0.01:
             self._emit_snapshot(ts, trigger="poly_move")
 
         if len(self._buffer) >= 500:
@@ -433,7 +448,7 @@ class DataCollector:
         """Periodic heartbeat snapshots (fallback for quiet periods)."""
         while self._running:
             await asyncio.sleep(HEARTBEAT_INTERVAL)
-            if self._btc_state["price"] is not None:
+            if not self._no_snap and self._btc_state["price"] is not None:
                 self._emit_snapshot(time.time(), trigger="heartbeat")
 
     async def _periodic_flush(self) -> None:
@@ -527,7 +542,15 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--market", default="btc-updown-5m")
     p.add_argument("--windows", type=int, default=5)
-    p.add_argument("--slim", action="store_true", help="Only write snap+btc, skip raw poly stream")
+    p.add_argument("--slim", action="store_true", help="Deduplicate poly writes (only on mid change)")
+    p.add_argument("--no-snap", action="store_true", help="Skip all snap records (heartbeat + event-driven)")
+    p.add_argument("--btc-min-move", type=float, default=BTC_TICK_MIN_MOVE,
+                   help=f"Min BTC price move (USD) to write a tick (default {BTC_TICK_MIN_MOVE}, 0=all)")
     args = p.parse_args()
-    collector = DataCollector(args.market, args.windows, slim=args.slim)
+    collector = DataCollector(
+        args.market, args.windows,
+        slim=args.slim,
+        no_snap=args.no_snap,
+        btc_min_move=args.btc_min_move,
+    )
     asyncio.run(collector.run())
