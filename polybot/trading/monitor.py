@@ -26,7 +26,7 @@ from polybot.core.state import MonitorState
 from polybot.market.stream import PriceStream, PriceUpdate
 from polybot.strategies.base import Strategy
 from polybot.trade_config import TradeConfig
-from .trading import buy_token, cancel_all_open_orders, sell_token
+from .trading import buy_token
 
 log = logging.getLogger(__name__)
 
@@ -362,9 +362,9 @@ async def _monitor_single_window(
                 "holding": state.bought,
             })
             if state.bought and not state.exit_triggered:
-                # Post-window-end phase: wait for favorable exit conditions:
-                # 1. Price > 0.95 (approaching $1.00 on resolution)
-                # 2. Or timeout after 10 minutes
+                # Post-window-end phase: record trade result and await auto-redeem
+                # Polymarket has auto-redeem enabled, so position will be automatically
+                # redeemed and funds returned to account. No manual sell needed.
                 token_price = state.latest_midpoint
                 direction_correct = token_price is not None and token_price > 0.5
 
@@ -378,59 +378,23 @@ async def _monitor_single_window(
                     "seconds_since_window_end": now - window.end_epoch,
                     "daily_record": f"{state.daily_wins}W {state.daily_losses}L",
                     "dry_run": dry_run,
+                    "note": "awaiting auto-redeem (no manual sell)",
                 })
 
                 # Process trade result for risk management
                 _process_trade_result(state, direction_correct)
 
-                # Check if we should exit now
-                time_since_end = now - window.end_epoch
-                should_exit = False
-                exit_reason = ""
+                # Record trade resolution
+                log_event(log, logging.INFO, TRADE, {
+                    "action": "TRADE_RESOLVED",
+                    "window": window.short_label,
+                    "result": "WIN" if direction_correct else "LOSS",
+                    "shares": state.holding_size,
+                    "price": token_price,
+                    "note": "Position held to window end, auto-redeem in progress",
+                })
 
-                if not direction_correct:
-                    # Direction was wrong, no point waiting
-                    should_exit = True
-                    exit_reason = "Direction incorrect, token worthless"
-                elif token_price is not None and token_price > 0.95:
-                    # Price high enough, likely resolved or approaching resolution
-                    should_exit = True
-                    exit_reason = f"Price ${token_price:.4f} > 0.95 (market resolved/resolving)"
-                elif time_since_end > 600:  # 10 minute timeout
-                    # Too much time has passed, exit anyway
-                    should_exit = True
-                    exit_reason = "Timeout after 10 minutes"
-
-                if should_exit:
-                    log_event(log, logging.INFO, TRADE, {
-                        "action": "SELL",
-                        "reason": exit_reason,
-                        "window": window.short_label,
-                        "shares": state.holding_size,
-                        "price": token_price,
-                        "seconds_since_window_end": time_since_end,
-                        "dry_run": dry_run,
-                    })
-                    if not dry_run:
-                        await cancel_all_open_orders()
-                        await _sell_with_retry(
-                            buy_token_id, state.holding_size, exit_reason,
-                            window_end_epoch=window.end_epoch,
-                        )
-                    else:
-                        _log_dry_run_sell(state, window, exit_reason, token_price or 0.0)
-                    state.exit_triggered = True
-                else:
-                    # Not ready to exit yet, continue monitoring
-                    log_event(log, logging.DEBUG, TRADE, {
-                        "action": "WAITING_FOR_RESOLUTION",
-                        "window": window.short_label,
-                        "price": token_price,
-                        "seconds_since_window_end": time_since_end,
-                        "reason": f"Price ${token_price:.4f if token_price else 0:.4f} - waiting for > 0.95 or timeout",
-                    })
-                    await asyncio.sleep(1)
-                    continue
+                state.exit_triggered = True
 
             # All positions resolved, pre-fetch next window
             if fetch_task is None:
