@@ -1,164 +1,199 @@
-# AGENTS.md - Implementation Guidance for Future Development
+# AGENTS.md - Implementation Guidance
 
-## Project Status (2026-04-22)
+## Project Status (2026-04-24)
 
 **Polymarket BTC 5-Minute Binary Options Trading Bot**
 
-Status: ✅ **VALIDATED & LIVE READY**
-- Single active strategy: `paired_window` (BTC momentum + Polymarket binary entry)
-- 77-window validation: 70.8% win rate, +$0.89 EV per $1
-- Live 2-round test: 67.99% ROI ($2 → $3.36)
-- All 80 tests passing
-- Risk management system integrated (5-loss pause + win-rate monitor)
+Status: ✅ **LIVE CAPABLE**
+
+- Single active runtime strategy: `paired_window`
+- Reference dataset: 96-window / 8-hour capture
+- Current local tests: `96 passed`
+- Risk management integrated
+- Optional strong-signal cap support exists in code, but is not enabled in the
+  active YAML
 
 ## Core Runtime Components
 
-**Strategy & Execution Layer:**
-- `polybot/strategies/paired_window.py` — Direction prediction (UP/DOWN based on BTC theta move + persistence)
-- `polybot/trading/monitor.py` — Window lifecycle management + delayed exit logic + risk triggers
-- `polybot/trading/trading.py` — Order execution (FAK market orders via Polymarket CLOB)
-- `polybot/core/state.py` — MonitorState dataclass with daily risk tracking
-- `polybot/config_loader.py` — Configuration parsing + **dynamic min_entry_price calculation** (max * 0.88)
+**Strategy & Execution**
 
-**Current Runtime Behavior:**
-- Entry: Detect BTC momentum from the UP reference leg → switch to target token live `best_ask` → only buy if target ask is in [min, max] price band
-- Hold: Full 300s until window close (ensures settlement, enables exact balance queries)
-- Exit: Wait until market resolution (price $0.95+) → sell at high price (~$0.99)
-- Risk: Track daily stats, pause on 5 consecutive losses or <50% win rate after 30 trades
-- **NO** TP/SL/re-entry logic — intentionally narrow, high signal quality
-- Direction is conservative: one direction decision per window; skipped entries do not reopen the window for opposite-side trading
+- `polybot/strategies/paired_window.py` — BTC window-open signal, persistence
+  check, direction lock, optional strong-signal cap
+- `polybot/trading/monitor.py` — window lifecycle, target-leg best-ask gating,
+  buy path, retry path, risk pauses, shutdown handling
+- `polybot/trading/trading.py` — FAK order execution via Polymarket CLOB
+- `polybot/core/state.py` — `MonitorState` with per-window and daily risk state
+- `polybot/config_loader.py` — YAML loading + auto `min_entry_price`
+- `polybot/market/binance.py` — BTC WS feed + REST kline fallback
 
-## What Exists (Maintained)
+**Analysis & Tooling**
 
-**Data & Analysis Tools:**
-- `tools/collect_data.py` — Capture live BTC + Polymarket CLOB state → JSONL
-- `analysis/analyze_paired_strategy.py` — **PRIMARY ANALYSIS TOOL** — Backtesting framework for parameter exploration
-- `analysis/analyze_data.py` — Basic tick analysis
-- `data/collect_btc-updown-5m_*.jsonl` — 77 windows (1.5GB), used for validation
+- `analysis/analyze_paired_strategy.py` — primary backtest tool
+- `tools/collect_data.py` — BTC + Polymarket data collection
+- `tools/probe_post_order_latency.py` — probe `/order` latency with intentionally
+  unfillable orders
 
-**Infrastructure:**
-- `polybot/market/` — Market discovery, window detection, websocket stream handling
-- `polybot/trading/` — Order execution, fill handling, balance management
-- `polybot/core/client.py` — Polymarket CLOB API client
+## Current Active Config
 
-**Testing & Validation:**
-- `tests/` — 80 passing tests (config, monitor, trading, market, stream, series)
+Active YAML:
+`paired_window_cap61_5r_live.yaml`
 
-## What Was Removed (Not Maintained)
+```yaml
+strategy:
+  type: paired_window
+  theta_pct: 0.03
+  persistence_sec: 10
+  entry_start_remaining_sec: 240
+  entry_end_remaining_sec: 120
+  max_entry_price: 0.65
+  min_move_ratio: 0.7
 
-- Retired strategies (momentum, latency arbitrage, etc.)
-- TP/SL/re-entry logic (old execution path)
-- Legacy analysis scripts
-- Stale test files
-- Old config files (cap61/cap65 versions)
-- Split-output data utilities
-
-## Recommended Configs (Current)
-
-| Config | Purpose | Parameters | Status |
-|--------|---------|-----------|--------|
-| `paired_window_optimized.yaml` | **LIVE READY** | cap=0.65, band=[60,180], min auto-calc | ✅ Validated |
-| `paired_window.yaml` | Legacy main | cap=0.70, band=[240,60] | Working |
-| `paired_window_2r.yaml` | Quick tests | 2-round template | Dev only |
-
-**Optimized Config Details:**
-- `theta_pct: 0.02` (0.02% BTC move)
-- `persistence_sec: 10` (move persists 10s)
-- `entry_start_remaining_sec: 240` (start 60s after window open)
-- `entry_end_remaining_sec: 60` (stop 180s after window open)
-- `min_entry_price: auto (0.57)` ← Calculated as max * 0.88
-- `max_entry_price: 0.65` ← Best validation result
-- `max_entries_per_window: 1`
-- `price_hint_buffer: 1 tick` ← BUY hint uses `target_best_ask + 1 tick`
-
-## Key Implementation Details (For Code Changes)
-
-**Exit Strategy (Why Wait Until Window End):**
-- Window end = 300s after start = 3+ minutes post-entry
-- Justification: On-chain settlement complete, exact balance available
-- Old approach: 10s early exit → settlement incomplete → balance truncation → 400 API errors ❌
-- New approach: Exact window end → settlement done → clean balance query → market price $0.95+ ✅
-
-**Dynamic min_entry_price (Why cap * 0.88):**
-- 77-window analysis: 0.45-0.50 price range has only 50% win rate (weak signal)
-- Solution: Filter with `min = max * 0.88`
-- Example: cap=0.65 → min=0.57 (auto-calculated in config_loader.py)
-- Generalizes: cap=0.70 → min=0.62, cap=0.75 → min=0.66
-- Effect: Maintains 75%+ overall win rate while removing weak signals
-
-**Target-Leg Execution Filter (Why final gating uses best_ask):**
-- UP remains the strategy's reference leg for direction detection and theoretical paired pricing
-- Execution now reads the target token's live Polymarket `best_ask` before entering
-- If target `best_ask` is outside `[min_entry_price, max_entry_price]`, skip the window instead of sending a market order
-- For BUY orders, `price_hint` is buffered to `target_best_ask + 1 tick`
-- Purpose: reduce avoidable `400 no orders found to match` attempts caused by drift between theoretical paired price and executable book price
-
-**FAK Runtime Notes:**
-- Runtime uses FAK (Fill-And-Kill), not FOK
-- A Polymarket response with `status=MATCHED` and `success=true` is treated as filled even if `sizeFilled` is omitted
-- This prevents duplicate retries after successful live matches
-
-**Risk Management Daily Reset:**
-- UTC+8 timezone (not UTC) — user's local timezone
-- Reset at midnight UTC+8: daily_wins, daily_losses, consecutive_losses counters
-- Both triggers (5-loss pause, <50% WR pause) are temporary, not day-end shutdown
-
-## Typical Development Workflow
-
-**Data Collection:**
-```bash
-python3.11 tools/collect_data.py --market btc-updown-5m --windows 30
+params:
+  amount: 1.0
+  max_entries_per_window: 1
 ```
 
-**Parameter Exploration:**
+`min_entry_price` defaults to:
+
+```text
+round(max_entry_price * 0.88, 2)
+```
+
+So current live band is `[0.57, 0.65]`.
+
+## Current Runtime Behavior
+
+1. Anchor BTC at the current window open
+2. In the entry band `[60s, 180s]` into the window:
+   - require BTC move from open >= `theta_pct`
+   - require same direction to have existed `persistence_sec` ago
+   - require current move >= `min_move_ratio * past_move`
+3. Lock the first valid direction for that window
+4. Keep checking the chosen target leg until its fresh `best_ask` is inside the
+   entry band
+5. Send a FAK BUY with `target_best_ask + 1 tick`
+6. Hold to `window.end_epoch`
+7. Let resolution / auto-redeem settle the outcome
+
+## Optional Strong-Signal Cap
+
+Code supports:
+
+```yaml
+strategy:
+  strong_signal_threshold: 1.5
+  strong_signal_max_entry_price: 0.67
+```
+
+Behavior:
+
+- compute `signal_strength = abs(move_pct) / theta_pct`
+- if strength crosses the threshold
+- temporarily raise `state.target_max_entry_price`
+
+If the fields are absent, the strategy stays on the fixed-cap path.
+
+## Risk Management
+
+- UTC+8 daily reset
+- 5 consecutive losses -> pause 2 windows
+- after 30+ trades, if win rate < 50% -> pause 5 windows
+
+## Important Implementation Details
+
+### Execution gating
+
+- Signal reference uses the UP-leg stream
+- Final execution gating always uses the target leg's fresh `best_ask`
+- Do not use theoretical `1 - up_price` for execution permission
+
+### FAK orders
+
+- Runtime uses FAK
+- Retry refreshes target-leg best ask from WS
+- Retry aborts if refreshed ask is stale or outside band
+- `MATCHED` + `success=true` is treated as filled even if some fill fields are
+  omitted
+
+### Logging
+
+Current runtime logs include:
+
+- `BUY_SIGNAL.best_ask_age_ms`
+- `BUY_PREP.best_ask_age_ms`
+- `FAK_FILLED.create_market_order_ms`
+- `FAK_FILLED.post_order_ms`
+- `FAK_FILLED.attempt_ms`
+- `FAK_FILLED.total_ms`
+
+### Window chaining
+
+Final planned round no longer prefetches the next window. This avoids shutdown
+hangs caused by an unnecessary extra market-discovery call.
+
+## What Not To Restore Without Backtest
+
+- TP / SL / re-entry logic
+- theoretical `1 - up_price` execution gating
+- rolling momentum baseline in place of window-open baseline
+- any strong-signal cap defaults in docs unless they are actually enabled in
+  the active YAML
+
+## Typical Workflow
+
+**Collect data**
+
 ```bash
-# Analyze specific parameter set on collected data
+PYTHONPATH=/Users/forrestliao/workspace python3.11 tools/collect_data.py \
+  --market btc-updown-5m --windows 96 --no-snap --slim --poly-min-interval-ms 100
+```
+
+**Backtest**
+
+```bash
 python3.11 analysis/analyze_paired_strategy.py data/collect_btc-updown-5m_<TS>.jsonl \
-  --theta 0.02 --lo_rem 60 --hi_rem 180 --cap 0.65
+  --theta 0.03 --persistence 10 --lo 120 --hi 240 \
+  --max-entry-price 0.65 --min-entry-price 0.57 --delays 0,1,2
 ```
 
-**Testing Changes:**
-```bash
-# Clear logs, run 2-round dry-run
-rm -f log/*
-python3.11 run.py --config paired_window_optimized.yaml --dry
+**Dry-run**
 
-# Full test suite
+```bash
+python3.11 run.py --config paired_window_cap61_5r_live.yaml --dry --rounds 12
+```
+
+**Live**
+
+```bash
+python3.11 run.py --config paired_window_cap61_5r_live.yaml
+```
+
+**Probe `/order` latency**
+
+```bash
+PYTHONPATH=/Users/forrestliao/workspace python3.11 tools/probe_post_order_latency.py \
+  --token-id <TOKEN_ID> --side buy --price 0.01 --size 1 --repeats 3
+```
+
+**Run tests**
+
+```bash
 pytest -q
 ```
 
-**Live Trading (⚠️ Real Money):**
-```bash
-python3.11 run.py --config paired_window_optimized.yaml
-```
+## Guidance For Future Agent Sessions
 
-## Guidance For New Agent Sessions
+**DO**
 
-**DO:**
-- Treat `paired_window` as the only active strategy
-- Use `analyze_paired_strategy.py` for parameter work (matches live behavior)
-- Clear `/log/` before dry-runs to isolate outputs
-- Reference CLAUDE.md + README.md for strategy details
-- Check config_loader.py for dynamic parameter logic
-- Validate changes against 77-window dataset before live trading
-- When reasoning about live entry behavior, distinguish between:
-- `signal_price`: reference-leg midpoint used to form the idea
-- `target_best_ask`: executable target-leg ask used for final entry permission
-- `price_hint`: buffered BUY hint sent to Polymarket (`target_best_ask + 1 tick`)
+- Treat `paired_window` as the only active runtime strategy
+- Use `analysis/analyze_paired_strategy.py` for parameter work
+- Keep docs aligned with the actual active YAML and code
+- Validate parameter changes on the 96-window dataset before live testing
+- Distinguish `signal_price`, `target_best_ask`, and `price_hint`
 
-**DON'T:**
-- Reintroduce TP/SL/re-entry logic (intentionally removed for high signal quality)
-- Change exit timing away from window.end_epoch (breaks settlement guarantee)
-- Use legacy analysis scripts (deleted; use analyze_paired_strategy.py)
-- Assume run.py is disabled (it's live)
-- Modify market discovery logic without understanding websocket/REST fallback
+**DON'T**
 
-## Recent Milestones (2026-04-22)
-
-✅ Implemented delayed exit strategy (wait for $0.95+ market resolution)
-✅ Added risk management system (5-loss pause + win-rate monitor + UTC+8 reset)
-✅ Validated on 77 windows: 70.8% win rate, +$0.89 EV
-✅ Live trading proof: $1 → $3.36 (67.99% ROI) in 2 rounds
-✅ Implemented dynamic min_entry_price formula (cap * 0.88)
-✅ Cleaned workspace: 80/80 tests passing, no legacy files
-✅ Updated documentation: CLAUDE.md, README.md, AGENTS.md
+- Assume removed doc text is still true without checking code
+- Reintroduce TP/SL/re-entry without fresh backtest evidence
+- Describe strong-signal cap as active unless it is really enabled in YAML
+- Change exit timing away from `window.end_epoch`

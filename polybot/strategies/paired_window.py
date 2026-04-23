@@ -15,13 +15,13 @@ log = logging.getLogger(__name__)
 
 
 class PairedWindowStrategy(Strategy):
-    """Trade once per window after BTC establishes a persistent move.
+    """Trade once per window after BTC establishes a persistent move from window open.
 
-    This is the runtime counterpart to the paired-data research script:
     - wait for BTC to move away from the window open by `theta_pct`
     - require the move to persist for `persistence_sec`
     - only enter during a remaining-time band inside the 5m window
     - only buy when the target token is still in the configured price band
+    - direction is locked on first valid signal; cannot flip within a window
     - hold to resolution; no strategy-level early exit hooks
     """
 
@@ -34,6 +34,8 @@ class PairedWindowStrategy(Strategy):
         persistence_sec: float = 10.0,
         min_entry_price: float = 0.60,
         max_entry_price: float = 0.70,
+        strong_signal_threshold: Optional[float] = None,
+        strong_signal_max_entry_price: Optional[float] = None,
         min_move_ratio: float = 0.7,
         open_price_max_wait_sec: float = 30.0,
     ):
@@ -44,6 +46,8 @@ class PairedWindowStrategy(Strategy):
         self._persistence_sec = persistence_sec
         self._min_entry_price = min_entry_price
         self._max_entry_price = max_entry_price
+        self._strong_signal_threshold = strong_signal_threshold
+        self._strong_signal_max_entry_price = strong_signal_max_entry_price
         self._min_move_ratio = min_move_ratio
         self._open_price_max_wait_sec = open_price_max_wait_sec
 
@@ -51,39 +55,40 @@ class PairedWindowStrategy(Strategy):
         self._feed = BinancePriceFeed(symbol=symbol)
         self._window_start_epoch: float = 0.0
         self._window_open_btc: Optional[float] = None
-        self._signal_fired = False
+        self._committed_direction: Optional[str] = None
+        self._signal_logged = False
         self._started = False
 
     @property
     def entry_start_remaining_sec(self) -> float:
-        """Latest remaining time at which entries may begin."""
         return self._entry_start_remaining_sec
 
     @property
     def entry_end_remaining_sec(self) -> float:
-        """Earliest remaining time at which entries may still occur."""
         return self._entry_end_remaining_sec
 
     @property
     def min_entry_price(self) -> float:
-        """Minimum allowed target-token entry price."""
         return self._min_entry_price
 
     @property
     def max_entry_price(self) -> float:
-        """Maximum allowed target-token entry price."""
         return self._max_entry_price
 
     async def start(self) -> None:
         await self._feed.start()
         self._started = True
         log.info(
-            "PairedWindowStrategy started | theta=%.3f%% | remaining=[%.0f, %.0f]s | price=[%.2f, %.2f]",
+            "PairedWindowStrategy started | theta=%.3f%% | persistence=%ds | "
+            "remaining=[%.0f, %.0f]s | price=[%.2f, %.2f] | strong_cap=%s@%s",
             self._theta_pct,
+            self._persistence_sec,
             self._entry_end_remaining_sec,
             self._entry_start_remaining_sec,
             self._min_entry_price,
             self._max_entry_price,
+            f"{self._strong_signal_max_entry_price:.2f}" if self._strong_signal_max_entry_price is not None else "off",
+            f"{self._strong_signal_threshold:.2f}x" if self._strong_signal_threshold is not None else "off",
         )
 
     async def stop(self) -> None:
@@ -93,17 +98,13 @@ class PairedWindowStrategy(Strategy):
     def set_window_start(self, epoch: float) -> None:
         self._window_start_epoch = epoch
         self._window_open_btc = None
-        self._signal_fired = False
+        self._committed_direction = None
+        self._signal_logged = False
 
     async def preload_open_btc(self, epoch: float) -> None:
-        """Seed window open BTC price via REST if WS feed has no coverage.
-
-        Called by monitor after set_window_start when attaching mid-window.
-        No-op if the feed already has data at/after epoch (normal multi-window flow).
-        """
+        """Seed window open BTC price via REST if WS feed has no coverage."""
         if self._window_open_btc is not None:
             return
-        # Check if WS feed already covers window start before hitting REST
         cached = self._feed.first_price_at_or_after(
             epoch, max_forward_sec=self._open_price_max_wait_sec,
         )
@@ -114,15 +115,13 @@ class PairedWindowStrategy(Strategy):
             self._window_open_btc = price
             log.info("OPEN_BTC_REST_SEEDED: epoch=%.0f price=%.2f", epoch, price)
 
-    dynamic_side = True  # signals run.py to display "DYNAMIC" instead of a fixed side
+    dynamic_side = True
 
     def get_side(self, candles: Optional[list] = None) -> Optional[str]:
-        """Returns 'up' so monitor.py knows which token to watch by default.
-        Actual direction resolves per signal via state.target_side."""
         return "up"
 
     def should_buy(self, price: float, state: MonitorState) -> bool:
-        if not self._started or self._signal_fired or state.bought:
+        if not self._started or state.bought:
             return False
         if self._window_start_epoch <= 0:
             return False
@@ -156,21 +155,40 @@ class PairedWindowStrategy(Strategy):
             return False
 
         direction = "up" if move_pct > 0 else "down"
-        entry_price = price if direction == "up" else max(0.0, min(1.0, 1.0 - price))
+        if self._committed_direction is not None and direction != self._committed_direction:
+            return False
+        self._committed_direction = direction
+        signal_strength = abs(move_pct) / self._theta_pct if self._theta_pct > 0 else 0.0
+        dynamic_cap = self._max_entry_price
+        confidence = "normal"
+        if (
+            self._strong_signal_threshold is not None
+            and self._strong_signal_max_entry_price is not None
+            and signal_strength >= self._strong_signal_threshold
+        ):
+            dynamic_cap = max(dynamic_cap, self._strong_signal_max_entry_price)
+            confidence = "strong"
 
         state.target_side = direction
-        state.target_entry_price = entry_price
-        self._signal_fired = True
-        log.info(
-            "PAIRED SIGNAL: dir=%s btc_open=%.1f btc_now=%.1f move=%.4f%% past=%.4f%% entry_price=%.3f remaining=%.0fs",
-            direction.upper(),
-            open_price,
-            current_btc,
-            move_pct,
-            past_move_pct,
-            entry_price,
-            remaining,
-        )
+        state.target_entry_price = price if direction == "up" else max(0.0, min(1.0, 1.0 - price))
+        state.target_max_entry_price = dynamic_cap
+        state.target_signal_confidence = confidence
+
+        if not self._signal_logged:
+            log.info(
+                "SIGNAL: dir=%s btc_open=%.1f btc_now=%.1f move=%.4f%% past=%.4f%% "
+                "strength=%.2fx entry_price=%.3f max_entry=%.3f remaining=%.0fs",
+                direction.upper(),
+                open_price,
+                current_btc,
+                move_pct,
+                past_move_pct,
+                signal_strength,
+                state.target_entry_price,
+                state.target_max_entry_price,
+                remaining,
+            )
+            self._signal_logged = True
         return True
 
     def _ensure_window_open_btc(self) -> Optional[float]:

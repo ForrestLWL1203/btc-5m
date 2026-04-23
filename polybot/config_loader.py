@@ -36,7 +36,6 @@ def build_series(cfg: dict) -> MarketSeries:
     if key in KNOWN_SERIES:
         return MarketSeries.from_known(key)
 
-    # Custom series — user must provide slug details
     slug_prefix = market.get("slug_prefix", key)
     slug_step = market.get("slug_step", TIMEFRAME_SECONDS.get(timeframe, 300))
     window_end_buffer = market.get("window_end_buffer", _default_buffer(slug_step))
@@ -58,8 +57,6 @@ def build_strategy(cfg: dict, series: Optional[MarketSeries] = None):
 
     For paired_window strategy:
     - If min_entry_price is not specified, automatically set it to max_entry_price * 0.88
-      (i.e., cap - 12%, based on 77-window analysis showing optimal floor)
-    - If explicitly specified in config, use that value instead
     """
     strat_cfg = cfg.get("strategy", {})
     strat_type = strat_cfg.get("type")
@@ -67,15 +64,10 @@ def build_strategy(cfg: dict, series: Optional[MarketSeries] = None):
         if series is None:
             raise ValueError("PairedWindowStrategy requires a market series")
 
-        # Determine min_entry_price: explicit config > dynamic formula (cap - 12%)
         max_entry_price = strat_cfg.get("max_entry_price", 0.70)
         if "min_entry_price" in strat_cfg:
-            # Explicitly specified in config
             min_entry_price = strat_cfg["min_entry_price"]
         else:
-            # Dynamic: min = max * 0.88 (cap - 12%)
-            # Rationale: Analysis of 77 windows shows 0.45-0.50 range has poor signal (50% WR)
-            # Setting floor to cap*0.88 filters out weak signals while preserving 75%+ win rate
             min_entry_price = round(max_entry_price * 0.88, 2)
 
         return PairedWindowStrategy(
@@ -86,6 +78,8 @@ def build_strategy(cfg: dict, series: Optional[MarketSeries] = None):
             persistence_sec=strat_cfg.get("persistence_sec", 10.0),
             min_entry_price=min_entry_price,
             max_entry_price=max_entry_price,
+            strong_signal_threshold=strat_cfg.get("strong_signal_threshold"),
+            strong_signal_max_entry_price=strat_cfg.get("strong_signal_max_entry_price"),
             min_move_ratio=strat_cfg.get("min_move_ratio", 0.7),
             open_price_max_wait_sec=strat_cfg.get("open_price_max_wait_sec", 30.0),
         )

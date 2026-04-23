@@ -72,6 +72,7 @@ async def test_dispatch_last_trade_price():
     # Should preserve bid/ask from previous cache
     assert stream._prices["token-abc"].best_bid == pytest.approx(0.48)
     assert stream._prices["token-abc"].source == "last_trade_price"
+    assert stream._prices["token-abc"].best_ask_received_at == pytest.approx(0.0)
     callback.assert_called_once()
     assert callback.call_args[0][0].is_trade is True
 
@@ -145,6 +146,49 @@ async def test_get_latest_price_cached():
         midpoint=0.50, spread=0.02, source="best_bid_ask",
     )
     assert stream.get_latest_price("t1") == pytest.approx(0.50)
+
+
+def test_get_latest_best_ask_rejects_stale_cache():
+    callback = AsyncMock()
+    stream = PriceStream(on_price=callback)
+    stream._prices["t1"] = PriceUpdate(
+        token_id="t1", best_bid=0.49, best_ask=0.51,
+        midpoint=0.50, spread=0.02, source="best_bid_ask",
+        received_at=100.0, best_ask_received_at=100.0,
+    )
+    with patch("polybot.market.stream.time.monotonic", return_value=101.5):
+        assert stream.get_latest_best_ask("t1", max_age_sec=1.0) is None
+        assert stream.get_latest_best_ask_age("t1") == pytest.approx(1.5)
+
+
+def test_get_latest_best_ask_accepts_fresh_cache():
+    callback = AsyncMock()
+    stream = PriceStream(on_price=callback)
+    stream._prices["t1"] = PriceUpdate(
+        token_id="t1", best_bid=0.49, best_ask=0.51,
+        midpoint=0.50, spread=0.02, source="best_bid_ask",
+        received_at=100.0, best_ask_received_at=100.0,
+    )
+    with patch("polybot.market.stream.time.monotonic", return_value=100.5):
+        assert stream.get_latest_best_ask("t1", max_age_sec=1.0) == pytest.approx(0.51)
+
+
+def test_last_trade_does_not_refresh_best_ask_age():
+    callback = AsyncMock()
+    stream = PriceStream(on_price=callback)
+    stream._prices["t1"] = PriceUpdate(
+        token_id="t1", best_bid=0.49, best_ask=0.51,
+        midpoint=0.50, spread=0.02, source="best_bid_ask",
+        received_at=100.0, best_ask_received_at=100.0,
+    )
+
+    with patch("polybot.market.stream.time.monotonic", return_value=105.0):
+        stream._dispatch('{"event_type": "last_trade_price", "asset_id": "t1", "price": "0.55"}')
+
+    with patch("polybot.market.stream.time.monotonic", return_value=105.1):
+        assert stream.get_latest_price("t1") == pytest.approx(0.55)
+        assert stream.get_latest_best_ask("t1", max_age_sec=1.0) is None
+        assert stream.get_latest_best_ask_age("t1") == pytest.approx(5.1)
 
 
 # ─── Reconnect clears cache ──────────────────────────────────────────────────

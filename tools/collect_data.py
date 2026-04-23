@@ -42,6 +42,7 @@ MIN_SNAP_INTERVAL = 0.05  # 50ms
 HEARTBEAT_INTERVAL = 0.2  # 200ms fallback
 # BTC tick throttle: minimum price move (USD) to write a tick record
 BTC_TICK_MIN_MOVE = 1.0  # $1 default; 0 = write every trade
+POLY_MIN_INTERVAL_MS = 0  # 0 = write every qualifying update
 
 
 class BinanceTradeStream:
@@ -117,13 +118,15 @@ class DataCollector:
     """Coordinates Binance BTC plus Polymarket and writes JSONL."""
 
     def __init__(self, series_key: str, max_windows: int, slim: bool = False,
-                 no_snap: bool = False, btc_min_move: float = BTC_TICK_MIN_MOVE):
+                 no_snap: bool = False, btc_min_move: float = BTC_TICK_MIN_MOVE,
+                 poly_min_interval_ms: int = POLY_MIN_INTERVAL_MS):
         from polybot.market.series import MarketSeries
         self.series = MarketSeries.from_known(series_key)
         self.max_windows = max_windows
         self._slim = slim
         self._no_snap = no_snap
         self._btc_min_move = btc_min_move
+        self._poly_min_interval = max(0.0, poly_min_interval_ms / 1000.0)
         self._last_written_btc_price: Optional[float] = None
 
         self._buffer: list[str] = []
@@ -141,6 +144,10 @@ class DataCollector:
 
         # Poly state: direction → {mid, bid, ask, ts, prev_mid, update_count}
         self._poly_state: dict[str, dict] = {}
+        self._last_written_poly_quote: dict[str, tuple[float, float, float]] = {}
+        self._last_written_poly_ts: dict[str, float] = {}
+        self._pending_poly_line: dict[str, str] = {}
+        self._pending_poly_ts: dict[str, float] = {}
 
         # Snapshot state
         self._last_snap_ts: float = 0
@@ -191,6 +198,10 @@ class DataCollector:
 
             self._token_map = {window.up_token: "up", window.down_token: "down"}
             self._poly_state.clear()
+            self._last_written_poly_quote.clear()
+            self._last_written_poly_ts.clear()
+            self._pending_poly_line.clear()
+            self._pending_poly_ts.clear()
             self._reset_btc_state()
 
             if i == 0:
@@ -251,6 +262,46 @@ class DataCollector:
         self._btc_state["history"].clear()
         self._btc_state["flow"].clear()
         self._last_written_btc_price = None
+
+    def _maybe_write_poly(
+        self, direction: str, ts: float, mid: float, bid: float, ask: float
+    ) -> None:
+        quote = (mid, bid, ask)
+        last_quote = self._last_written_poly_quote.get(direction)
+        last_ts = self._last_written_poly_ts.get(direction, 0.0)
+        line = json.dumps({
+            "ts": round(ts, 3), "src": "poly", "token": direction,
+            "mid": mid, "bid": bid, "ask": ask,
+        })
+
+        if not self._slim:
+            self._buffer.append(line)
+            self._last_written_poly_quote[direction] = quote
+            self._last_written_poly_ts[direction] = ts
+            return
+
+        # Lossless dedup for replay-critical quote data: only emit when the
+        # observed best quote actually changes.
+        if last_quote == quote:
+            return
+
+        # Optional micro-batching: keep only the latest quote inside a very
+        # small interval and flush it once the interval elapses. This cuts
+        # message bursts while preserving the final best quote in each bucket.
+        if self._poly_min_interval > 0 and ts - last_ts < self._poly_min_interval:
+            self._pending_poly_line[direction] = line
+            self._pending_poly_ts[direction] = ts
+            return
+
+        pending_line = self._pending_poly_line.pop(direction, None)
+        pending_ts = self._pending_poly_ts.pop(direction, None)
+        if pending_line is not None:
+            if pending_line != line:
+                self._buffer.append(pending_line)
+            self._last_written_poly_ts[direction] = pending_ts or ts
+        self._buffer.append(line)
+        self._last_written_poly_quote[direction] = quote
+        self._last_written_poly_ts[direction] = ts
 
     async def _on_btc_trade(
         self,
@@ -329,13 +380,7 @@ class DataCollector:
                 s.down_start = mid
             s.down_end = mid
 
-        # In slim mode, only write poly when mid actually changes (dedup)
-        if not self._slim or prev_mid is None or mid != prev_mid:
-            line = json.dumps({
-                "ts": round(ts, 3), "src": "poly", "token": direction,
-                "mid": mid, "bid": bid, "ask": ask,
-            })
-            self._buffer.append(line)
+        self._maybe_write_poly(direction, ts, mid, bid, ask)
 
         # Event-driven: trigger snapshot on significant poly price change
         if not self._no_snap and prev_mid is not None and abs(mid - prev_mid) >= 0.01:
@@ -522,6 +567,22 @@ class DataCollector:
         self._outfile.flush()
 
     def _flush(self) -> None:
+        if self._pending_poly_line:
+            for direction in ("up", "down"):
+                pending_line = self._pending_poly_line.pop(direction, None)
+                pending_ts = self._pending_poly_ts.pop(direction, None)
+                if pending_line is None:
+                    continue
+                state = self._poly_state.get(direction)
+                if state:
+                    self._last_written_poly_quote[direction] = (
+                        state["mid"],
+                        state["bid"],
+                        state["ask"],
+                    )
+                if pending_ts is not None:
+                    self._last_written_poly_ts[direction] = pending_ts
+                self._buffer.append(pending_line)
         if self._buffer and self._outfile:
             self._outfile.write("\n".join(self._buffer) + "\n")
             self._outfile.flush()
@@ -542,15 +603,19 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--market", default="btc-updown-5m")
     p.add_argument("--windows", type=int, default=5)
-    p.add_argument("--slim", action="store_true", help="Deduplicate poly writes (only on mid change)")
+    p.add_argument("--slim", action="store_true",
+                   help="Deduplicate poly writes (only when best quote changes)")
     p.add_argument("--no-snap", action="store_true", help="Skip all snap records (heartbeat + event-driven)")
     p.add_argument("--btc-min-move", type=float, default=BTC_TICK_MIN_MOVE,
                    help=f"Min BTC price move (USD) to write a tick (default {BTC_TICK_MIN_MOVE}, 0=all)")
+    p.add_argument("--poly-min-interval-ms", type=int, default=POLY_MIN_INTERVAL_MS,
+                   help="When --slim is enabled, coalesce poly quote writes within this interval; 0 disables time coalescing")
     args = p.parse_args()
     collector = DataCollector(
         args.market, args.windows,
         slim=args.slim,
         no_snap=args.no_snap,
         btc_min_move=args.btc_min_move,
+        poly_min_interval_ms=args.poly_min_interval_ms,
     )
     asyncio.run(collector.run())

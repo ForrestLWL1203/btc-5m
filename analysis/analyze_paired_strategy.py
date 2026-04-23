@@ -298,6 +298,484 @@ def simulate(
     }
 
 
+def simulate_stop_loss(
+    windows: list[Window],
+    theta_pct: float,
+    lo_rem: int,
+    hi_rem: int,
+    persistence_sec: int = 10,
+    max_data_age: float = 2.0,
+    max_entry_price: float = 0.95,
+    entry_delay_sec: float = 0.0,
+    min_entry_price: float = 0.0,
+    price_hint_buffer_ticks: float = 0.0,    stop_loss_pct: float = 0.10,
+    stop_confirm_sec: float = 5.0,
+    min_hold_sec: float = 30.0,
+    sell_buffer_ticks: float = 1.0,
+    btc_invalidation_mode: str = "reverse_theta",
+    amount: float = 1.0,
+) -> dict:
+    """Compare hold-to-resolution with a token+BTC confluence stop-loss.
+
+    PnL is modeled for a fixed USD stake per trade.  Entry uses the same target
+    leg ask logic as live BUY; stop exit uses target leg best_bid minus a sell
+    buffer to mirror BUY's best_ask plus buffer.
+    """
+    entries = 0
+    resolution_wins = 0
+    stopped = 0
+    stopped_would_win = 0
+    stopped_would_loss = 0
+    stop_pnls: list[float] = []
+    no_stop_pnl = 0.0
+    stop_pnl = 0.0
+    entry_prices: list[float] = []
+    exit_prices: list[float] = []
+
+    for w in windows:
+        entry = _find_window_entry(
+            w,
+            theta_pct=theta_pct,
+            lo_rem=lo_rem,
+            hi_rem=hi_rem,
+            persistence_sec=persistence_sec,
+            max_data_age=max_data_age,
+            max_entry_price=max_entry_price,
+            entry_delay_sec=entry_delay_sec,
+            min_entry_price=min_entry_price,
+            price_hint_buffer_ticks=price_hint_buffer_ticks,        )
+        if entry is None or entry["fill_price"] is None:
+            continue
+
+        entries += 1
+        direction_up = entry["direction_up"]
+        fill_ts = entry["fill_ts"]
+        entry_price = entry["fill_price"]
+        entry_prices.append(entry_price)
+        resolution_win = (direction_up and w.up_wins) or (
+            not direction_up and not w.up_wins
+        )
+        if resolution_win:
+            resolution_wins += 1
+
+        no_stop_trade_pnl = (
+            (amount / entry_price) - amount if resolution_win else -amount
+        )
+        no_stop_pnl += no_stop_trade_pnl
+
+        stop_exit = _find_stop_exit(
+            w=w,
+            direction_up=direction_up,
+            fill_ts=fill_ts,
+            entry_price=entry_price,
+            reference_move_pct=_move_pct_at(w, fill_ts),
+            theta_pct=theta_pct,
+            max_data_age=max_data_age,
+            stop_loss_pct=stop_loss_pct,
+            stop_confirm_sec=stop_confirm_sec,
+            min_hold_sec=min_hold_sec,
+            sell_buffer_ticks=sell_buffer_ticks,
+            btc_invalidation_mode=btc_invalidation_mode,
+        )
+        if stop_exit is None:
+            stop_pnl += no_stop_trade_pnl
+            continue
+
+        stopped += 1
+        if resolution_win:
+            stopped_would_win += 1
+        else:
+            stopped_would_loss += 1
+        exit_price = stop_exit["exit_price"]
+        exit_prices.append(exit_price)
+        trade_pnl = (amount / entry_price) * exit_price - amount
+        stop_pnls.append(trade_pnl)
+        stop_pnl += trade_pnl
+
+    return {
+        "entries": entries,
+        "resolution_wins": resolution_wins,
+        "resolution_win_rate": resolution_wins / entries if entries else 0.0,
+        "avg_entry_price": sum(entry_prices) / len(entry_prices) if entry_prices else 0.0,
+        "no_stop_pnl": no_stop_pnl,
+        "no_stop_ev": no_stop_pnl / entries if entries else 0.0,
+        "stop_pnl": stop_pnl,
+        "stop_ev": stop_pnl / entries if entries else 0.0,
+        "delta_pnl": stop_pnl - no_stop_pnl,
+        "stopped": stopped,
+        "stopped_rate": stopped / entries if entries else 0.0,
+        "stopped_would_win": stopped_would_win,
+        "stopped_would_loss": stopped_would_loss,
+        "avg_stop_exit": sum(exit_prices) / len(exit_prices) if exit_prices else 0.0,
+        "avg_stop_pnl": sum(stop_pnls) / len(stop_pnls) if stop_pnls else 0.0,
+    }
+
+
+def _find_stop_exit(
+    w: Window,
+    direction_up: bool,
+    fill_ts: float,
+    entry_price: float,
+    reference_move_pct: float | None,
+    theta_pct: float,
+    max_data_age: float,
+    stop_loss_pct: float,
+    stop_confirm_sec: float,
+    min_hold_sec: float,
+    sell_buffer_ticks: float,
+    btc_invalidation_mode: str,
+) -> dict | None:
+    """Find first confluence stop exit after entry, if any."""
+    if btc_invalidation_mode not in {"reverse_theta", "signal_half", "near_open"}:
+        raise ValueError(f"unsupported btc_invalidation_mode={btc_invalidation_mode}")
+
+    bid_lookup = w.up_bid_lookup if direction_up else w.down_bid_lookup
+    tick_size = w.up_tick_size if direction_up else w.down_tick_size
+    if bid_lookup is None:
+        return None
+
+    start_ts = fill_ts + min_hold_sec
+    stop_bid = entry_price * (1.0 - stop_loss_pct)
+    confirm_start: float | None = None
+    start_idx = bisect_right(w.btc_ts, start_ts - 1e-9)
+
+    for tick in w.btc[start_idx:]:
+        if tick.ts >= w.end_epoch:
+            break
+        bid = bid_lookup.at(tick.ts, max_data_age)
+        if bid is None or bid <= 0:
+            confirm_start = None
+            continue
+
+        move_pct = (tick.price - w.open_price) / w.open_price * 100.0
+        btc_invalid = _btc_stop_invalidated(
+            direction_up=direction_up,
+            move_pct=move_pct,
+            reference_move_pct=reference_move_pct,
+            theta_pct=theta_pct,
+            mode=btc_invalidation_mode,
+        )
+        token_invalid = bid <= stop_bid
+
+        if not (btc_invalid and token_invalid):
+            confirm_start = None
+            continue
+        if confirm_start is None:
+            confirm_start = tick.ts
+            continue
+        if tick.ts - confirm_start < stop_confirm_sec:
+            continue
+
+        buffered_exit = bid - tick_size * sell_buffer_ticks
+        exit_price = max(0.0, math.floor(buffered_exit / tick_size) * tick_size)
+        return {
+            "exit_ts": tick.ts,
+            "exit_bid": bid,
+            "exit_price": exit_price,
+            "btc_move_pct": move_pct,
+        }
+    return None
+
+
+def _move_pct_at(w: Window, ts: float) -> float | None:
+    idx = bisect_right(w.btc_ts, ts) - 1
+    if idx < 0:
+        return None
+    return (w.btc_px[idx] - w.open_price) / w.open_price * 100.0
+
+
+def _btc_stop_invalidated(
+    direction_up: bool,
+    move_pct: float,
+    reference_move_pct: float | None,
+    theta_pct: float,
+    mode: str,
+) -> bool:
+    if mode == "reverse_theta":
+        return move_pct <= -theta_pct if direction_up else move_pct >= theta_pct
+    if mode == "signal_half":
+        if reference_move_pct is None:
+            return False
+        threshold = reference_move_pct * 0.5
+        return move_pct <= threshold if direction_up else move_pct >= threshold
+    if mode == "near_open":
+        return abs(move_pct) <= theta_pct
+    raise ValueError(f"unsupported btc_invalidation_mode={mode}")
+
+
+def _find_token_floor_exit(
+    w: Window,
+    direction_up: bool,
+    fill_ts: float,
+    entry_price: float,
+    token_floor: float,
+    min_hold_sec: float,
+    sell_buffer_ticks: float,
+    max_data_age: float = 2.0,
+) -> dict | None:
+    """Find first exit where target token bid falls below an absolute floor price.
+
+    No BTC confirmation required — fires as soon as the bid is below token_floor
+    after the minimum hold period.  The floor is an absolute price (e.g. 0.25),
+    not a percentage drawdown from entry.
+    """
+    bid_lookup = w.up_bid_lookup if direction_up else w.down_bid_lookup
+    tick_size = w.up_tick_size if direction_up else w.down_tick_size
+    if bid_lookup is None:
+        return None
+
+    bid_ts = w.up_bid_ts if direction_up else w.down_bid_ts
+    bid_series = w.up_bid_series if direction_up else w.down_bid_series
+    start_ts = fill_ts + min_hold_sec
+
+    start_idx = bisect_right(bid_ts, start_ts - 1e-9)
+    for ts, bid in bid_series[start_idx:]:
+        if ts >= w.end_epoch:
+            break
+        if bid <= 0:
+            continue
+        if bid <= token_floor:
+            buffered_exit = bid - tick_size * sell_buffer_ticks
+            exit_price = max(0.0, math.floor(buffered_exit / tick_size) * tick_size)
+            return {"exit_ts": ts, "exit_bid": bid, "exit_price": exit_price}
+    return None
+
+
+def simulate_token_floor(
+    windows: list[Window],
+    theta_pct: float,
+    lo_rem: int,
+    hi_rem: int,
+    persistence_sec: int = 5,
+    max_data_age: float = 2.0,
+    max_entry_price: float = 0.61,
+    entry_delay_sec: float = 1.0,
+    min_entry_price: float = 0.0,
+    price_hint_buffer_ticks: float = 1.0,    token_floor: float = 0.25,
+    min_hold_sec: float = 30.0,
+    sell_buffer_ticks: float = 1.0,
+    amount: float = 1.0,
+) -> dict:
+    """Compare hold-to-resolution with a pure token bid floor stop-loss."""
+    entries = 0
+    resolution_wins = 0
+    stopped = 0
+    stopped_would_win = 0
+    stopped_would_loss = 0
+    stop_pnls: list[float] = []
+    no_stop_pnl = 0.0
+    stop_pnl = 0.0
+    entry_prices: list[float] = []
+    exit_prices: list[float] = []
+
+    for w in windows:
+        entry = _find_window_entry(
+            w,
+            theta_pct=theta_pct,
+            lo_rem=lo_rem,
+            hi_rem=hi_rem,
+            persistence_sec=persistence_sec,
+            max_data_age=max_data_age,
+            max_entry_price=max_entry_price,
+            entry_delay_sec=entry_delay_sec,
+            min_entry_price=min_entry_price,
+            price_hint_buffer_ticks=price_hint_buffer_ticks,        )
+        if entry is None or entry["fill_price"] is None:
+            continue
+
+        entries += 1
+        direction_up = entry["direction_up"]
+        fill_ts = entry["fill_ts"]
+        entry_price = entry["fill_price"]
+        entry_prices.append(entry_price)
+        resolution_win = (direction_up and w.up_wins) or (
+            not direction_up and not w.up_wins
+        )
+        if resolution_win:
+            resolution_wins += 1
+
+        no_stop_trade_pnl = (
+            (amount / entry_price) - amount if resolution_win else -amount
+        )
+        no_stop_pnl += no_stop_trade_pnl
+
+        stop_exit = _find_token_floor_exit(
+            w=w,
+            direction_up=direction_up,
+            fill_ts=fill_ts,
+            entry_price=entry_price,
+            token_floor=token_floor,
+            min_hold_sec=min_hold_sec,
+            sell_buffer_ticks=sell_buffer_ticks,
+            max_data_age=max_data_age,
+        )
+        if stop_exit is None:
+            stop_pnl += no_stop_trade_pnl
+            continue
+
+        stopped += 1
+        if resolution_win:
+            stopped_would_win += 1
+        else:
+            stopped_would_loss += 1
+        exit_price = stop_exit["exit_price"]
+        exit_prices.append(exit_price)
+        trade_pnl = (amount / entry_price) * exit_price - amount
+        stop_pnls.append(trade_pnl)
+        stop_pnl += trade_pnl
+
+    return {
+        "entries": entries,
+        "resolution_wins": resolution_wins,
+        "resolution_win_rate": resolution_wins / entries if entries else 0.0,
+        "avg_entry_price": sum(entry_prices) / len(entry_prices) if entry_prices else 0.0,
+        "no_stop_pnl": no_stop_pnl,
+        "no_stop_ev": no_stop_pnl / entries if entries else 0.0,
+        "stop_pnl": stop_pnl,
+        "stop_ev": stop_pnl / entries if entries else 0.0,
+        "delta_pnl": stop_pnl - no_stop_pnl,
+        "stopped": stopped,
+        "stopped_would_win": stopped_would_win,
+        "stopped_would_loss": stopped_would_loss,
+        "avg_stop_exit": sum(exit_prices) / len(exit_prices) if exit_prices else 0.0,
+        "avg_stop_pnl": sum(stop_pnls) / len(stop_pnls) if stop_pnls else 0.0,
+    }
+
+
+def token_floor_grid(
+    windows: list[Window],
+    theta_pct: float,
+    lo_rem: int,
+    hi_rem: int,
+    persistence_sec: int,
+    max_entry_price: float,
+    min_entry_price: float,
+    entry_delay_sec: float,
+    price_hint_buffer_ticks: float,
+    token_floors: list[float],
+    min_hold_secs: list[float],
+    sell_buffer_ticks: float,    amount: float = 1.0,
+) -> None:
+    """Print pure token bid floor stop-loss grid."""
+    baseline = simulate_token_floor(
+        windows,
+        theta_pct=theta_pct,
+        lo_rem=lo_rem,
+        hi_rem=hi_rem,
+        persistence_sec=persistence_sec,
+        max_entry_price=max_entry_price,
+        min_entry_price=min_entry_price,
+        entry_delay_sec=entry_delay_sec,
+        price_hint_buffer_ticks=price_hint_buffer_ticks,        token_floor=0.0,
+        min_hold_sec=9999.0,
+        sell_buffer_ticks=sell_buffer_ticks,
+        amount=amount,
+    )
+    print("\n=== Token bid floor stop-loss (no BTC confirmation) ===")
+    print(f"Entry config: theta={theta_pct:.3f}% persistence={persistence_sec}s "
+          f"band=[{lo_rem},{hi_rem}] cap=[{min_entry_price:.3f},{max_entry_price:.3f}] "
+          f"delay={entry_delay_sec:.1f}s amount=${amount:.2f}")
+    print(f"No stop: N={baseline['entries']} wins={baseline['resolution_wins']} "
+          f"winR={baseline['resolution_win_rate']:.1%} "
+          f"avgEntry={baseline['avg_entry_price']:.3f} "
+          f"PnL=${baseline['no_stop_pnl']:+.3f} "
+          f"EV/trade=${baseline['no_stop_ev']:+.4f}")
+    print(f"{'floor':>6} {'hold':>5} {'stops':>6} {'stopW':>6} {'stopL':>6} "
+          f"{'avgExit':>8} {'PnL':>9} {'EV/trd':>8} {'delta':>9}")
+    for floor in token_floors:
+        for hold in min_hold_secs:
+            r = simulate_token_floor(
+                windows,
+                theta_pct=theta_pct,
+                lo_rem=lo_rem,
+                hi_rem=hi_rem,
+                persistence_sec=persistence_sec,
+                max_entry_price=max_entry_price,
+                min_entry_price=min_entry_price,
+                entry_delay_sec=entry_delay_sec,
+                price_hint_buffer_ticks=price_hint_buffer_ticks,                token_floor=floor,
+                min_hold_sec=hold,
+                sell_buffer_ticks=sell_buffer_ticks,
+                amount=amount,
+            )
+            print(f"{floor:>6.2f} {hold:>5.0f} {r['stopped']:>6d} "
+                  f"{r['stopped_would_win']:>6d} {r['stopped_would_loss']:>6d} "
+                  f"{r['avg_stop_exit']:>8.3f} "
+                  f"${r['stop_pnl']:>+8.3f} ${r['stop_ev']:>+7.4f} "
+                  f"${r['delta_pnl']:>+8.3f}")
+
+
+def stop_loss_grid(
+    windows: list[Window],
+    theta_pct: float,
+    lo_rem: int,
+    hi_rem: int,
+    persistence_sec: int,
+    max_entry_price: float,
+    min_entry_price: float,
+    entry_delay_sec: float,
+    price_hint_buffer_ticks: float,
+    stop_loss_pcts: list[float],
+    stop_confirm_secs: list[float],
+    min_hold_secs: list[float],
+    sell_buffer_ticks: float,
+    btc_invalidation_mode: str,    amount: float = 1.0,
+) -> None:
+    """Print focused stop-loss comparison for one entry config."""
+    baseline = simulate_stop_loss(
+        windows,
+        theta_pct=theta_pct,
+        lo_rem=lo_rem,
+        hi_rem=hi_rem,
+        persistence_sec=persistence_sec,
+        max_entry_price=max_entry_price,
+        min_entry_price=min_entry_price,
+        entry_delay_sec=entry_delay_sec,
+        price_hint_buffer_ticks=price_hint_buffer_ticks,        stop_loss_pct=999.0,
+        stop_confirm_sec=999.0,
+        min_hold_sec=999.0,
+        sell_buffer_ticks=sell_buffer_ticks,
+        btc_invalidation_mode=btc_invalidation_mode,
+        amount=amount,
+    )
+    print("\n=== Token+BTC stop-loss comparison ===")
+    print(f"Entry config: theta={theta_pct:.3f}% persistence={persistence_sec}s "
+          f"band=[{lo_rem},{hi_rem}] cap=[{min_entry_price:.3f},{max_entry_price:.3f}] "
+          f"delay={entry_delay_sec:.1f}s amount=${amount:.2f} "
+          f"btcStop={btc_invalidation_mode}")
+    print(f"No stop: N={baseline['entries']} wins={baseline['resolution_wins']} "
+          f"winR={baseline['resolution_win_rate']:.1%} "
+          f"avgEntry={baseline['avg_entry_price']:.3f} "
+          f"PnL=${baseline['no_stop_pnl']:+.3f} "
+          f"EV/trade=${baseline['no_stop_ev']:+.4f}")
+    print(f"{'SL%':>5} {'hold':>5} {'conf':>5} {'stops':>6} {'stopW':>5} "
+          f"{'stopL':>5} {'avgExit':>7} {'PnL':>9} {'EV/trd':>8} {'delta':>9}")
+    for sl in stop_loss_pcts:
+        for hold in min_hold_secs:
+            for conf in stop_confirm_secs:
+                r = simulate_stop_loss(
+                    windows,
+                    theta_pct=theta_pct,
+                    lo_rem=lo_rem,
+                    hi_rem=hi_rem,
+                    persistence_sec=persistence_sec,
+                    max_entry_price=max_entry_price,
+                    min_entry_price=min_entry_price,
+                    entry_delay_sec=entry_delay_sec,
+                    price_hint_buffer_ticks=price_hint_buffer_ticks,                    stop_loss_pct=sl,
+                    stop_confirm_sec=conf,
+                    min_hold_sec=hold,
+                    sell_buffer_ticks=sell_buffer_ticks,
+                    btc_invalidation_mode=btc_invalidation_mode,
+                    amount=amount,
+                )
+                print(f"{sl:>5.0%} {hold:>5.0f} {conf:>5.0f} "
+                      f"{r['stopped']:>6d} {r['stopped_would_win']:>5d} "
+                      f"{r['stopped_would_loss']:>5d} {r['avg_stop_exit']:>7.3f} "
+                      f"${r['stop_pnl']:>+8.3f} ${r['stop_ev']:>+7.4f} "
+                      f"${r['delta_pnl']:>+8.3f}")
+
+
 def replay(
     windows: list[Window],
     theta_pct: float,
@@ -308,8 +786,7 @@ def replay(
     min_entry_price: float = 0.0,
     entry_delay_sec: float = 10.0,
     amount: float = 1.0,
-    price_hint_buffer_ticks: float = 0.0,
-) -> None:
+    price_hint_buffer_ticks: float = 0.0,) -> None:
     """Print a window-by-window replay like a dry-run log."""
     import datetime
 
@@ -319,8 +796,7 @@ def replay(
         max_entry_price=max_entry_price,
         min_entry_price=min_entry_price,
         entry_delay_sec=entry_delay_sec,
-        price_hint_buffer_ticks=price_hint_buffer_ticks,
-    )
+        price_hint_buffer_ticks=price_hint_buffer_ticks,    )
     trade_by_ts = {t["ts"]: t for t in trades}
 
     total_pnl = 0.0
@@ -363,8 +839,9 @@ def replay(
             losses += 1
             result = f"✗ LOSS  exit≈0.00  PnL={pnl:+.3f}"
 
+        conf = matched.get("confidence", "normal").upper()
         print(f"  [{label}]  {w.direction.upper():4s}  "
-              f"ENTER {side} @ {entry:.3f}  {shares:.2f}sh  {result}  "
+              f"ENTER {side} @ {entry:.3f} {conf:6s} {shares:.2f}sh  {result}  "
               f"cumPnL={total_pnl:+.3f}")
 
     total = wins + losses + skipped
@@ -398,6 +875,23 @@ def main():
                     help="Simulated trade amount in USD for replay mode")
     ap.add_argument("--price-hint-buffer-ticks", type=float, default=1.0,
                     help="Approximate live BUY hint buffer in ticks (default 1.0)")
+    ap.add_argument("--stop-loss-grid", action="store_true",
+                    help="Compare hold-to-resolution with token+BTC confluence stop-loss")
+    ap.add_argument("--token-floor-grid", action="store_true",
+                    help="Compare hold-to-resolution with pure token bid floor stop-loss")
+    ap.add_argument("--token-floors", default="0.20,0.25,0.30",
+                    help="Comma-separated absolute token bid floor prices for --token-floor-grid")
+    ap.add_argument("--stop-loss-pcts", default="0.05,0.10,0.15,0.20",
+                    help="Comma-separated token bid drawdown thresholds for stop-loss")
+    ap.add_argument("--stop-confirm-secs", default="3,5",
+                    help="Comma-separated confluence confirmation seconds")
+    ap.add_argument("--min-hold-secs", default="20,30",
+                    help="Comma-separated minimum hold seconds before stop-loss can fire")
+    ap.add_argument("--sell-buffer-ticks", type=float, default=1.0,
+                    help="Approximate live SELL hint buffer in ticks (best_bid - buffer)")
+    ap.add_argument("--btc-invalidation-mode", default="reverse_theta",
+                    choices=["reverse_theta", "signal_half", "near_open"],
+                    help="BTC side of stop-loss confluence")
     args = ap.parse_args()
 
     # Support multiple input files — concatenate windows in order
@@ -432,12 +926,47 @@ def main():
             min_entry_price=args.min_entry_price,
             entry_delay_sec=float(args.delays.split(",")[-1]),
             amount=args.amount,
+            price_hint_buffer_ticks=args.price_hint_buffer_ticks,        )
+        return
+
+    if args.token_floor_grid:
+        token_floor_grid(
+            windows,
+            theta_pct=args.theta,
+            lo_rem=args.lo,
+            hi_rem=args.hi,
+            persistence_sec=args.persistence,
+            max_entry_price=args.max_entry_price,
+            min_entry_price=args.min_entry_price,
+            entry_delay_sec=float(args.delays.split(",")[-1]),
             price_hint_buffer_ticks=args.price_hint_buffer_ticks,
+            token_floors=[float(v) for v in args.token_floors.split(",")],
+            min_hold_secs=[float(v) for v in args.min_hold_secs.split(",")],
+            sell_buffer_ticks=args.sell_buffer_ticks,            amount=args.amount,
+        )
+        return
+
+    if args.stop_loss_grid:
+        stop_loss_grid(
+            windows,
+            theta_pct=args.theta,
+            lo_rem=args.lo,
+            hi_rem=args.hi,
+            persistence_sec=args.persistence,
+            max_entry_price=args.max_entry_price,
+            min_entry_price=args.min_entry_price,
+            entry_delay_sec=float(args.delays.split(",")[-1]),
+            price_hint_buffer_ticks=args.price_hint_buffer_ticks,
+            stop_loss_pcts=[float(v) for v in args.stop_loss_pcts.split(",")],
+            stop_confirm_secs=[float(v) for v in args.stop_confirm_secs.split(",")],
+            min_hold_secs=[float(v) for v in args.min_hold_secs.split(",")],
+            sell_buffer_ticks=args.sell_buffer_ticks,
+            btc_invalidation_mode=args.btc_invalidation_mode,            amount=args.amount,
         )
         return
 
     delays = [float(d) for d in args.delays.split(",")]
-    thetas = [0.02, 0.03, 0.05, 0.08, 0.10]
+    thetas = [0.02, 0.025, 0.03, 0.05, 0.08, 0.10]
     bands = [
         (60, 180),    # last 1-3 min (prior best)
         (60, 240),    # last 1-4 min
@@ -446,34 +975,32 @@ def main():
         (180, 270),   # last 3-4.5 min (earliest)
     ]
 
-    sim_cache: dict[tuple[float, int, int, int, float, float, float, float], dict] = {}
-    trade_cache: dict[tuple[float, int, int, int, float, float, float, float], list[dict]] = {}
+    sim_cache: dict[tuple, dict] = {}
+    trade_cache: dict[tuple, list[dict]] = {}
 
     def run_sim(theta: float, lo: int, hi: int, max_entry_price: float, delay: float) -> dict:
-        key = (theta, lo, hi, args.persistence, max_entry_price, delay, 0.0, args.price_hint_buffer_ticks)
+        key = (theta, lo, hi, args.persistence, max_entry_price, delay,
+               args.min_entry_price, args.price_hint_buffer_ticks)
         if key not in sim_cache:
             sim_cache[key] = simulate(
-                windows,
-                theta,
-                lo,
-                hi,
+                windows, theta, lo, hi,
                 persistence_sec=args.persistence,
                 max_entry_price=max_entry_price,
+                min_entry_price=args.min_entry_price,
                 entry_delay_sec=delay,
                 price_hint_buffer_ticks=args.price_hint_buffer_ticks,
             )
         return sim_cache[key]
 
     def run_trades(theta: float, lo: int, hi: int, max_entry_price: float, delay: float) -> list[dict]:
-        key = (theta, lo, hi, args.persistence, max_entry_price, delay, 0.0, args.price_hint_buffer_ticks)
+        key = (theta, lo, hi, args.persistence, max_entry_price, delay,
+               args.min_entry_price, args.price_hint_buffer_ticks)
         if key not in trade_cache:
             trade_cache[key] = collect_trades(
-                windows,
-                theta,
-                lo,
-                hi,
+                windows, theta, lo, hi,
                 persistence_sec=args.persistence,
                 max_entry_price=max_entry_price,
+                min_entry_price=args.min_entry_price,
                 entry_delay_sec=delay,
                 price_hint_buffer_ticks=args.price_hint_buffer_ticks,
             )
@@ -482,7 +1009,7 @@ def main():
     for delay in delays:
         print(f"\n=== Delay={delay:.0f}s  (persistence={args.persistence}s, "
               f"cap={args.max_entry_price}) ===")
-        hdr = (f"{'theta%':>7} {'band':>10} {'N':>4} {'wins':>5} "
+        hdr = (f"{'theta%':>8} {'band':>10} {'N':>4} {'wins':>5} "
                f"{'winR':>6} {'CIlo':>6} {'avgP':>6} {'slip':>6} "
                f"{'EV/trd':>7} {'flip':>4} {'bandSk':>6} {'capSk':>6} {'noQ':>5}")
         print(hdr)
@@ -490,7 +1017,7 @@ def main():
             for lo, hi in bands:
                 r = run_sim(theta, lo, hi, args.max_entry_price, delay)
                 print(
-                    f"{theta:>7.2f} {f'[{lo},{hi}]':>10} {r['entries']:>4d} "
+                    f"{theta:>8.3f} {f'[{lo},{hi}]':>10} {r['entries']:>4d} "
                     f"{r['wins']:>5d} {r['win_rate']:>6.1%} "
                     f"{r['win_rate_ci_lo']:>6.1%} {r['avg_entry_price']:>6.3f} "
                     f"{r['avg_slippage']:>+6.3f} {r['ev_per_trade']:>+7.4f} "
@@ -611,6 +1138,8 @@ def collect_trades(
             "signal_price": entry["sig_price"],
             "open_price": w.open_price,
             "win": win,
+            "confidence": entry.get("confidence", "normal"),
+            "max_entry_price": entry.get("effective_max_entry_price", max_entry_price),
         })
     return trades
 
@@ -627,11 +1156,7 @@ def _find_window_entry(
     min_entry_price: float,
     price_hint_buffer_ticks: float,
 ) -> dict | None:
-    """Return the first valid entry candidate for one window.
-
-    This centralizes the original signal/entry rules so simulate() and
-    collect_trades() do not each rebuild the same per-window state.
-    """
+    """Return the first valid entry candidate for one window."""
     if not w.btc:
         return None
 
@@ -641,6 +1166,8 @@ def _find_window_entry(
     skipped_no_quote = 0
     skipped_price_cap = 0
     skipped_band = 0
+    committed_direction_up: bool | None = None
+    first_signal_ts: float | None = None
     for tick in w.btc[start_idx:]:
         if tick.ts > entry_end:
             break
@@ -658,38 +1185,21 @@ def _find_window_entry(
             continue
 
         direction_up = move_pct > 0
+        if committed_direction_up is not None and direction_up != committed_direction_up:
+            continue
+        if committed_direction_up is None:
+            committed_direction_up = direction_up
+            first_signal_ts = tick.ts
+
         lookup = w.up_ask_lookup if direction_up else w.down_ask_lookup
         tick_size = w.up_tick_size if direction_up else w.down_tick_size
         sig_price = lookup.at(tick.ts, max_data_age) if lookup else None
-        # Match live behavior: first valid direction locks the window. If the
-        # target leg ask is unavailable or outside band at signal time, skip
-        # the window instead of searching for a later opposite-side signal.
         if sig_price is None or sig_price <= 0 or sig_price >= 1:
             skipped_no_quote += 1
-            return {
-                "signal_ts": tick.ts,
-                "fill_ts": None,
-                "direction_up": direction_up,
-                "sig_price": None,
-                "fill_price": None,
-                "skipped_no_quote": skipped_no_quote,
-                "skipped_price_cap": skipped_price_cap,
-                "skipped_band": skipped_band,
-                "direction_flipped": False,
-            }
+            continue
         if sig_price > max_entry_price or sig_price < min_entry_price:
             skipped_band += 1
-            return {
-                "signal_ts": tick.ts,
-                "fill_ts": None,
-                "direction_up": direction_up,
-                "sig_price": sig_price,
-                "fill_price": None,
-                "skipped_no_quote": skipped_no_quote,
-                "skipped_price_cap": skipped_price_cap,
-                "skipped_band": skipped_band,
-                "direction_flipped": False,
-            }
+            continue
         fill_ts = tick.ts + entry_delay_sec
         if fill_ts >= w.end_epoch:
             continue
@@ -714,11 +1224,12 @@ def _find_window_entry(
             fill_move_pct = (w.btc_px[k] - w.open_price) / w.open_price * 100.0
             direction_flipped = (fill_move_pct > 0) != direction_up
         return {
-            "signal_ts": tick.ts,
+            "signal_ts": first_signal_ts if first_signal_ts is not None else tick.ts,
             "fill_ts": fill_ts,
             "direction_up": direction_up,
             "sig_price": sig_price,
             "fill_price": buffered_fill_price,
+            "effective_max_entry_price": max_entry_price,
             "skipped_no_quote": skipped_no_quote,
             "skipped_price_cap": skipped_price_cap,
             "skipped_band": skipped_band,

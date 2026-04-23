@@ -13,6 +13,7 @@ from polybot.market.stream import PriceUpdate
 from polybot.trade_config import TradeConfig
 from polybot.trading.monitor import (
     _handle_opening_price,
+    _monitor_single_window,
     _on_price_update,
     _sanitize_next_window,
     monitor_window,
@@ -179,6 +180,60 @@ async def test_on_price_skips_when_target_best_ask_outside_band():
 
 
 @pytest.mark.asyncio
+async def test_on_price_allows_high_conf_dynamic_cap():
+    window = _make_window()
+    state = _make_state()
+    strategy = _mock_strategy()
+    strategy.min_entry_price = 0.54
+    strategy.max_entry_price = 0.61
+    ws = MagicMock()
+    ws.get_latest_best_ask.return_value = 0.74
+
+    def _high_conf_signal(price, state_obj):
+        state_obj.target_side = "up"
+        state_obj.target_max_entry_price = 0.75
+        state_obj.target_signal_confidence = "high"
+        return True
+
+    strategy.should_buy.side_effect = _high_conf_signal
+    update = _make_update("up-token-123", midpoint=0.74)
+
+    with patch("polybot.trading.monitor.get_tick_size", return_value=0.01), \
+         patch("polybot.trading.monitor._handle_opening_price", new_callable=AsyncMock) as mock_buy:
+        await _on_price_update(update, window, state, ws=ws, dry_run=True, trade_config=_tc(amount=1.0), strategy=strategy, side="up")
+
+    mock_buy.assert_awaited_once()
+    assert mock_buy.await_args.kwargs["best_ask"] == pytest.approx(0.75)
+
+
+@pytest.mark.asyncio
+async def test_rechecks_entry_band_only_when_target_best_ask_changes(caplog):
+    window = _make_window()
+    state = _make_state()
+    strategy = _mock_strategy()
+    strategy.min_entry_price = 0.57
+    strategy.max_entry_price = 0.65
+    strategy.should_buy.side_effect = lambda price, state_obj: setattr(state_obj, "target_side", "up") or True
+    ws = MagicMock()
+    ws.get_latest_best_ask.side_effect = [0.66, 0.66, 0.65]
+    update = _make_update("up-token-123", midpoint=0.58)
+
+    with patch("polybot.trading.monitor.get_tick_size", return_value=0.01), \
+         patch("polybot.trading.monitor._handle_opening_price", new_callable=AsyncMock) as mock_buy:
+        with caplog.at_level(logging.INFO, logger="polybot.trading.monitor"):
+            await _on_price_update(update, window, state, ws=ws, dry_run=True, trade_config=_tc(amount=1.0), strategy=strategy, side="up")
+            await _on_price_update(update, window, state, ws=ws, dry_run=True, trade_config=_tc(amount=1.0), strategy=strategy, side="up")
+            await _on_price_update(update, window, state, ws=ws, dry_run=True, trade_config=_tc(amount=1.0), strategy=strategy, side="up")
+
+    assert mock_buy.await_count == 1
+    assert mock_buy.await_args.kwargs["best_ask"] == pytest.approx(0.66)
+    assert all(
+        getattr(record, "event_data", {}).get("action") != "BUY_SKIP"
+        for record in caplog.records
+    )
+
+
+@pytest.mark.asyncio
 async def test_handle_opening_price_dry_run_uses_strategy_target_side():
     window = _make_window()
     state = MonitorState()
@@ -334,4 +389,65 @@ async def test_monitor_window_skips_after_strategy_entry_band_ends():
 
     assert monitored is False
     assert returned_ws is None
+    assert next_win is None
+
+
+@pytest.mark.asyncio
+async def test_monitor_window_final_round_skips_fallback_lookup():
+    import datetime
+
+    now = int(time.time())
+    utc = datetime.timezone.utc
+    window = MarketWindow(
+        question="Test Window",
+        up_token="up-tok",
+        down_token="down-tok",
+        start_time=datetime.datetime.fromtimestamp(now - 1, tz=utc),
+        end_time=datetime.datetime.fromtimestamp(now + 299, tz=utc),
+        slug="test",
+    )
+
+    mock_ws = MagicMock()
+    mock_ws.set_on_price = MagicMock()
+    mock_ws.switch_tokens = AsyncMock()
+    mock_ws.get_latest_price = MagicMock(return_value=0.50)
+    mock_ws.get_latest_best_ask = MagicMock(return_value=0.59)
+
+    strategy = _mock_strategy()
+    strategy.should_buy.return_value = False
+
+    with patch("polybot.trading.monitor.prefetch_order_params", create=True, new=MagicMock()), \
+         patch("polybot.trading.monitor._monitor_single_window", new_callable=AsyncMock, return_value=None), \
+         patch("polybot.trading.monitor.find_next_window", side_effect=AssertionError("should not fetch next window")):
+        next_win, returned_ws, monitored = await monitor_window(
+            window, dry_run=True, preopened=True, existing_ws=mock_ws,
+            trade_config=_tc(rounds=1), strategy=strategy,
+            prefetch_next_window=False,
+        )
+
+    assert next_win is None
+    assert returned_ws is mock_ws
+    assert monitored is True
+
+
+@pytest.mark.asyncio
+async def test_monitor_single_window_final_round_does_not_prefetch_next():
+    now = int(time.time())
+    window = _make_window(start_epoch=now - 10, end_epoch=now - 1)
+    state = MonitorState()
+    state.started = True
+
+    with patch("polybot.trading.monitor._find_next_window_after", side_effect=AssertionError("should not prefetch next window")):
+        next_win = await _monitor_single_window(
+            window,
+            state,
+            ws=None,
+            dry_run=True,
+            trade_config=_tc(rounds=1),
+            strategy=_mock_strategy(),
+            series=None,
+            side="up",
+            prefetch_next_window=False,
+        )
+
     assert next_win is None

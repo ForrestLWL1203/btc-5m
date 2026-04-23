@@ -7,6 +7,7 @@ Subscribes to a set of token IDs and emits price updates via async callback.
 import asyncio
 import json
 import logging
+import time
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Optional
 
@@ -31,6 +32,8 @@ class PriceUpdate:
     midpoint: Optional[float]
     spread: Optional[float]
     source: str  # 'best_bid_ask' | 'price_change' | 'last_trade_price'
+    received_at: float = 0.0  # local monotonic timestamp when this update was processed
+    best_ask_received_at: float = 0.0  # local monotonic timestamp when best_ask was last updated
 
     @property
     def is_trade(self) -> bool:
@@ -78,9 +81,26 @@ class PriceStream:
         """Get the latest cached midpoint for a token (sync read)."""
         return self._prices.get(token_id, PriceUpdate("", None, None, None, None, "")).midpoint
 
-    def get_latest_best_ask(self, token_id: str) -> Optional[float]:
+    def get_latest_best_ask(self, token_id: str, max_age_sec: Optional[float] = None) -> Optional[float]:
         """Get the latest cached best ask for a token (sync read)."""
-        return self._prices.get(token_id, PriceUpdate("", None, None, None, None, "")).best_ask
+        update = self._prices.get(token_id)
+        if update is None:
+            return None
+        ask_received_at = update.best_ask_received_at or update.received_at
+        if max_age_sec is not None and ask_received_at > 0:
+            if time.monotonic() - ask_received_at > max_age_sec:
+                return None
+        return update.best_ask
+
+    def get_latest_best_ask_age(self, token_id: str) -> Optional[float]:
+        """Return age in seconds for the cached best ask, if known."""
+        update = self._prices.get(token_id)
+        if update is None:
+            return None
+        ask_received_at = update.best_ask_received_at or update.received_at
+        if ask_received_at <= 0:
+            return None
+        return time.monotonic() - ask_received_at
 
     def set_on_price(self, callback: Callable[[PriceUpdate], Awaitable[None]]) -> None:
         """Update the price callback (used when reusing WS for a new window)."""
@@ -293,6 +313,7 @@ class PriceStream:
         except (ValueError, TypeError):
             return
 
+        received_at = time.monotonic()
         update = PriceUpdate(
             token_id=asset_id,
             best_bid=bid,
@@ -300,6 +321,8 @@ class PriceStream:
             midpoint=midpoint,
             spread=spread,
             source="best_bid_ask",
+            received_at=received_at,
+            best_ask_received_at=received_at if ask is not None else 0.0,
         )
         self._prices[asset_id] = update
         self._schedule_callback(update)
@@ -348,15 +371,20 @@ class PriceStream:
 
             # Merge with existing cached bid/ask
             existing = self._prices.get(asset_id)
+            ask_received_at = 0.0
             if existing:
                 if bid is None:
                     bid = existing.best_bid
                 if ask is None:
                     ask = existing.best_ask
+                    ask_received_at = existing.best_ask_received_at
+            if ask is not None and ask_str:
+                ask_received_at = time.monotonic()
 
             midpoint = (bid + ask) / 2 if bid is not None and ask is not None else price
             spread = abs(ask - bid) if ask is not None and bid is not None else None
 
+            received_at = time.monotonic()
             update = PriceUpdate(
                 token_id=asset_id,
                 best_bid=bid,
@@ -364,6 +392,8 @@ class PriceStream:
                 midpoint=midpoint,
                 spread=spread,
                 source="price_change",
+                received_at=received_at,
+                best_ask_received_at=ask_received_at,
             )
             self._prices[asset_id] = update
             self._schedule_callback(update)
@@ -380,6 +410,7 @@ class PriceStream:
             return
 
         existing = self._prices.get(asset_id)
+        received_at = time.monotonic()
         update = PriceUpdate(
             token_id=asset_id,
             best_bid=existing.best_bid if existing else None,
@@ -387,6 +418,8 @@ class PriceStream:
             midpoint=price,
             spread=existing.spread if existing else None,
             source="last_trade_price",
+            received_at=received_at,
+            best_ask_received_at=existing.best_ask_received_at if existing else 0.0,
         )
         self._prices[asset_id] = update
         self._schedule_callback(update)

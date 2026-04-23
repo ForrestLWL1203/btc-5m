@@ -40,24 +40,89 @@ async def _noop_price_callback(update: PriceUpdate) -> None:
     return None
 
 
-def _entry_price_band(strategy: Optional[Strategy]) -> tuple[Optional[float], Optional[float]]:
+def _entry_price_band(
+    strategy: Optional[Strategy],
+    state: Optional[MonitorState] = None,
+) -> tuple[Optional[float], Optional[float]]:
     """Return configured min/max entry prices when exposed by the strategy."""
     if strategy is None:
         return None, None
     min_price = getattr(strategy, "min_entry_price", getattr(strategy, "_min_entry_price", None))
-    max_price = getattr(strategy, "max_entry_price", getattr(strategy, "_max_entry_price", None))
+    max_price = None
+    if state is not None:
+        max_price = state.target_max_entry_price
+    if max_price is None:
+        max_price = getattr(strategy, "max_entry_price", getattr(strategy, "_max_entry_price", None))
     return min_price, max_price
 
 
-def _buffer_price_hint(token_id: str, best_ask: Optional[float]) -> Optional[float]:
+def _buffer_price_hint(
+    token_id: str,
+    best_ask: Optional[float],
+    buffer_ticks: Optional[float] = None,
+) -> Optional[float]:
     """Add a small upward tick buffer to the BUY hint."""
     if best_ask is None:
         return None
     tick = get_tick_size(token_id)
     if tick <= 0:
         tick = 0.001
-    buffered = best_ask + tick * config.PRICE_HINT_BUFFER_TICKS
+    ticks = config.PRICE_HINT_BUFFER_TICKS if buffer_ticks is None else buffer_ticks
+    buffered = best_ask + tick * ticks
     return max(0.0, min(1.0, math.ceil(buffered / tick) * tick))
+
+
+def _price_hint_refresher(
+    ws: PriceStream,
+    token_id: str,
+    strategy: Optional[Strategy],
+    state: Optional[MonitorState] = None,
+):
+    """Return a callback that refreshes retry BUY hints from the latest WS ask."""
+
+    def refresh() -> Optional[float]:
+        min_entry_price, max_entry_price = _entry_price_band(strategy, state)
+        latest_ask = ws.get_latest_best_ask(
+            token_id,
+            max_age_sec=config.FAK_RETRY_MAX_BEST_ASK_AGE_SEC,
+        )
+        ask_age = ws.get_latest_best_ask_age(token_id)
+        if latest_ask is None:
+            log_event(log, logging.INFO, SIGNAL, {
+                "action": "BUY_RETRY_ABORT",
+                "best_ask_age_sec": round(ask_age, 3) if ask_age is not None else None,
+                "reason": "target best_ask unavailable or stale",
+            })
+            return None
+        if (
+            (min_entry_price is not None and latest_ask < min_entry_price)
+            or (max_entry_price is not None and latest_ask > max_entry_price)
+        ):
+            log_event(log, logging.INFO, SIGNAL, {
+                "action": "BUY_RETRY_ABORT",
+                "price": latest_ask,
+                "best_ask_age_sec": round(ask_age, 3) if ask_age is not None else None,
+                "reason": "target best_ask outside entry band",
+            })
+            return None
+        return _buffer_price_hint(
+            token_id,
+            latest_ask,
+            buffer_ticks=config.FAK_RETRY_PRICE_HINT_BUFFER_TICKS,
+        )
+
+    return refresh
+
+
+def _entry_ask_changed(state: MonitorState, side: str, best_ask: Optional[float]) -> bool:
+    """Return True once for each changed target ask checked for entry."""
+    if best_ask is None:
+        return True
+    if state.last_entry_check_side == side and state.last_entry_check_best_ask == best_ask:
+        return False
+    state.last_entry_check_side = side
+    state.last_entry_check_best_ask = best_ask
+    return True
 
 
 def _get_utc8_date() -> str:
@@ -199,6 +264,7 @@ async def _monitor_single_window(
     strategy: Optional[Strategy] = None,
     series: Optional[MarketSeries] = None,
     side: str = "up",
+    prefetch_next_window: bool = True,
 ) -> Optional[MarketWindow]:
     """
     Monitor a single window until expiry or exit_triggered, then clean up.
@@ -255,8 +321,9 @@ async def _monitor_single_window(
 
                 state.exit_triggered = True
 
-            # All positions resolved, pre-fetch next window
-            if fetch_task is None:
+            # All positions resolved, pre-fetch next window unless this is the
+            # caller's final planned round.
+            if prefetch_next_window and fetch_task is None:
                 fetch_task = asyncio.create_task(
                     asyncio.to_thread(_find_next_window_after, window.end_epoch, series)
                 )
@@ -269,11 +336,16 @@ async def _monitor_single_window(
                 "window": window.short_label,
                 "sleep_seconds": remaining,
             })
-            # Pre-fetch next window while we sleep
-            fetch_task = asyncio.create_task(
-                asyncio.to_thread(_find_next_window_after, window.end_epoch, series)
-            )
+            # Pre-fetch next window while we sleep unless this is the caller's
+            # final planned round.
+            if prefetch_next_window:
+                fetch_task = asyncio.create_task(
+                    asyncio.to_thread(_find_next_window_after, window.end_epoch, series)
+                )
             await asyncio.sleep(remaining)
+            if fetch_task is None:
+                _log_window_summary(state, window, dry_run)
+                return None
             try:
                 next_win = _sanitize_next_window(window, fetch_task.result())
             except Exception as e:
@@ -340,6 +412,7 @@ async def monitor_window(
     strategy: Optional[Strategy] = None,
     series: Optional[MarketSeries] = None,
     state: Optional[MonitorState] = None,
+    prefetch_next_window: bool = True,
 ) -> tuple[Optional[MarketWindow], Optional[PriceStream], bool]:
     """
     Monitor a trading window using WebSocket real-time price updates.
@@ -490,32 +563,29 @@ async def monitor_window(
             if strategy.should_buy(opening_price, state):
                 if state.target_side is not None:
                     buy_token_id, price_token_id = _side_token(window, state.target_side)
-                opening_best_ask = ws.get_latest_best_ask(buy_token_id)
-                min_entry_price, max_entry_price = _entry_price_band(strategy)
+                opening_best_ask = ws.get_latest_best_ask(
+                    buy_token_id,
+                    max_age_sec=config.FAK_RETRY_MAX_BEST_ASK_AGE_SEC,
+                )
+                opening_best_ask_age = ws.get_latest_best_ask_age(buy_token_id)
+                min_entry_price, max_entry_price = _entry_price_band(strategy, state)
                 if opening_best_ask is None:
-                    log_event(log, logging.INFO, SIGNAL, {
-                        "action": "BUY_SKIP",
-                        "side": (state.target_side or side).upper(),
-                        "window": window.short_label,
-                        "reason": "target best_ask unavailable",
-                    })
+                    state.target_entry_price = None
+                elif not _entry_ask_changed(state, state.target_side or side, opening_best_ask):
+                    state.target_entry_price = None
                 elif (
                     (min_entry_price is not None and opening_best_ask < min_entry_price)
                     or (max_entry_price is not None and opening_best_ask > max_entry_price)
                 ):
-                    log_event(log, logging.INFO, SIGNAL, {
-                        "action": "BUY_SKIP",
-                        "side": (state.target_side or side).upper(),
-                        "window": window.short_label,
-                        "price": opening_best_ask,
-                        "reason": "target best_ask outside entry band",
-                    })
+                    state.target_entry_price = None
                 else:
                     buffered_hint = _buffer_price_hint(buy_token_id, opening_best_ask)
                     state.target_entry_price = opening_best_ask
                     await _handle_opening_price(
                         window, state, buy_token_id, opening_price, dry_run, trade_config, strategy, state.target_side or side,
                         best_ask=buffered_hint,
+                        best_ask_age_sec=opening_best_ask_age,
+                        price_hint_refresher=_price_hint_refresher(ws, buy_token_id, strategy, state),
                     )
                     # Re-resolve token if strategy set target_side during opening buy
                     if state.target_side is not None:
@@ -529,10 +599,14 @@ async def monitor_window(
     # Monitor until window expires or exit triggered (ws is NOT closed inside)
     next_win = await _monitor_single_window(
         window, state, ws, dry_run, trade_config, strategy, series, side,
+        prefetch_next_window=prefetch_next_window,
     )
 
     if next_win is not None:
         return next_win, ws, True
+
+    if not prefetch_next_window:
+        return None, ws, True
 
     # Fallback: window ended without pre-fetch
     next_win = _sanitize_next_window(window, find_next_window())
@@ -615,31 +689,25 @@ async def _on_price_update(
                 if state.target_side is not None:
                     effective_side = state.target_side
                     buy_token_id, _ = _side_token(window, effective_side)
-                best_ask = ws.get_latest_best_ask(buy_token_id)
-                min_entry_price, max_entry_price = _entry_price_band(strategy)
+                best_ask = ws.get_latest_best_ask(
+                    buy_token_id,
+                    max_age_sec=config.FAK_RETRY_MAX_BEST_ASK_AGE_SEC,
+                )
+                best_ask_age = ws.get_latest_best_ask_age(buy_token_id)
+                min_entry_price, max_entry_price = _entry_price_band(strategy, state)
                 if best_ask is None and update.token_id == buy_token_id:
                     best_ask = update.best_ask
+                    best_ask_age = 0.0 if update.best_ask is not None else None
                 if best_ask is None:
-                    log_event(log, logging.INFO, SIGNAL, {
-                        "action": "BUY_SKIP",
-                        "side": effective_side.upper(),
-                        "window": window.short_label,
-                        "reason": "target best_ask unavailable",
-                    })
+                    state.target_entry_price = None
+                    return
+                if not _entry_ask_changed(state, effective_side, best_ask):
                     state.target_entry_price = None
                     return
                 if (
                     (min_entry_price is not None and best_ask < min_entry_price)
                     or (max_entry_price is not None and best_ask > max_entry_price)
                 ):
-                    log_event(log, logging.INFO, SIGNAL, {
-                        "action": "BUY_SKIP",
-                        "side": effective_side.upper(),
-                        "window": window.short_label,
-                        "price": best_ask,
-                        "signal_price": price,
-                        "reason": "target best_ask outside entry band",
-                    })
                     state.target_entry_price = None
                     return
                 state.target_entry_price = best_ask
@@ -649,11 +717,16 @@ async def _on_price_update(
                     "signal_price": price,
                     "side": effective_side.upper(),
                     "window": window.short_label,
+                    "confidence": state.target_signal_confidence,
+                    "max_entry_price": max_entry_price,
+                    "best_ask_age_ms": round(best_ask_age * 1000) if best_ask_age is not None else None,
                 })
                 buffered_hint = _buffer_price_hint(buy_token_id, best_ask)
                 await _handle_opening_price(
                     window, state, buy_token_id, price, dry_run, trade_config, strategy, effective_side,
                     best_ask=buffered_hint,
+                    best_ask_age_sec=best_ask_age,
+                    price_hint_refresher=_price_hint_refresher(ws, buy_token_id, strategy, state),
                 )
             return
 
@@ -673,6 +746,8 @@ async def _handle_opening_price(
     strategy: Optional[Strategy] = None,
     side: str = "up",
     best_ask: Optional[float] = None,
+    best_ask_age_sec: Optional[float] = None,
+    price_hint_refresher=None,
 ) -> None:
     """Handle the opening price check and buy decision."""
     if state.bought:
@@ -698,11 +773,13 @@ async def _handle_opening_price(
             "signal_price": price,
             "target_price": buy_price,
             "price_hint": best_ask,
+            "best_ask_age_ms": round(best_ask_age_sec * 1000) if best_ask_age_sec is not None else None,
         })
         result = await buy_token(
             buy_token_id, trade_config.amount, window.short_label,
             window_end_epoch=window.end_epoch,
             price_hint=best_ask,
+            price_hint_refresher=price_hint_refresher,
         )
         if result.success:
             entry_latency_ms = round((time.time() - t_signal) * 1000)
@@ -752,6 +829,7 @@ async def _handle_opening_price(
             "signal_price": price,
             "target_price": buy_price,
             "price_hint": best_ask,
+            "best_ask_age_ms": round(best_ask_age_sec * 1000) if best_ask_age_sec is not None else None,
             "dry_run": True,
         })
         log_event(log, logging.INFO, TRADE, {

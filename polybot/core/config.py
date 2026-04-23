@@ -14,6 +14,8 @@ WS_RECONNECT_MAX_RETRIES: int = 10  # max consecutive WS reconnect attempts
 FOK_RETRY_COUNT: int = 10  # FAK retry attempts (reuses FOK constant name)
 FOK_RETRY_INTERVAL: float = 0.1  # seconds between retries (~10x per second)
 PRICE_HINT_BUFFER_TICKS: float = 1.0  # add one tick above best ask for BUY hints
+FAK_RETRY_PRICE_HINT_BUFFER_TICKS: float = 2.0  # slightly wider retry hint after FAK no-depth
+FAK_RETRY_MAX_BEST_ASK_AGE_SEC: float = 1.0  # require fresh WS ask before retrying FAK
 
 # Window timing
 WINDOW_END_BUFFER: int = 5  # treat window as ending this many seconds early to avoid boundary issues

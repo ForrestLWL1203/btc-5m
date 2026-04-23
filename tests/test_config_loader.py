@@ -80,6 +80,23 @@ class TestBuildStrategy:
         assert isinstance(strat, PairedWindowStrategy)
         assert strat._theta_pct == pytest.approx(0.03)
 
+    def test_build_paired_window_strategy_with_dynamic_cap(self):
+        series = MarketSeries.from_known("btc-updown-5m")
+        cfg = {
+            "strategy": {
+                "type": "paired_window",
+                "theta_pct": 0.03,
+                "max_entry_price": 0.65,
+                "strong_signal_threshold": 1.5,
+                "strong_signal_max_entry_price": 0.67,
+            }
+        }
+        strat = build_strategy(cfg, series)
+        assert isinstance(strat, PairedWindowStrategy)
+        assert strat._max_entry_price == pytest.approx(0.65)
+        assert strat._strong_signal_threshold == pytest.approx(1.5)
+        assert strat._strong_signal_max_entry_price == pytest.approx(0.67)
+
     def test_missing_strategy_raises(self):
         series = MarketSeries.from_known("btc-updown-5m")
         with pytest.raises(ValueError, match="Strategy type is required"):

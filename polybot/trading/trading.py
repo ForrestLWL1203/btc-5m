@@ -4,7 +4,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional
 
 from py_clob_client.clob_types import MarketOrderArgs, OrderType
 from py_clob_client.order_builder.constants import BUY, SELL
@@ -63,6 +63,7 @@ def _safe_float(value) -> float:
 async def _post_fak_market(
     token_id: str, amount: float, side: str, retry_count: int, retry_interval: float,
     price_hint: Optional[float] = None,
+    price_hint_refresher: Optional[Callable[[], Optional[float]]] = None,
 ) -> OrderResult:
     """
     Attempt a FAK (Fill-And-Kill) market order with retry.
@@ -75,21 +76,45 @@ async def _post_fak_market(
     engine_retry = 0
     max_engine_retries = 3
     engine_backoff = 2.0
+    current_price_hint = price_hint
 
     t_total = time.monotonic()
     for attempt in range(1, retry_count + 1):
+        t_attempt = None
+        create_ms = None
+        post_ms = None
+        if attempt > 1 and price_hint_refresher is not None:
+            refreshed_hint = price_hint_refresher()
+            if refreshed_hint is None:
+                return OrderResult(
+                    success=False,
+                    message="FAK retry aborted: refreshed best_ask unavailable or outside entry band",
+                )
+            if refreshed_hint != current_price_hint:
+                log_event(log, logging.INFO, TRADE, {
+                    "action": "FAK_PRICE_HINT_REFRESH",
+                    "old_price_hint": current_price_hint,
+                    "new_price_hint": refreshed_hint,
+                    "attempt": attempt,
+                })
+            current_price_hint = refreshed_hint
+
         try:
             client = get_client()
             args = MarketOrderArgs(
                 token_id=token_id,
                 amount=amount,
                 side=side_const,
-                price=price_hint or 0,  # non-zero skips SDK's internal GET /book
+                price=current_price_hint or 0,  # non-zero skips SDK's internal GET /book
             )
             options = get_order_options(token_id)
             t_attempt = time.monotonic()
+            t_create = time.monotonic()
             signed = client.create_market_order(args, options=options)
+            create_ms = round((time.monotonic() - t_create) * 1000)
+            t_post = time.monotonic()
             resp = client.post_order(signed, OrderType.FAK)
+            post_ms = round((time.monotonic() - t_post) * 1000)
             attempt_ms = round((time.monotonic() - t_attempt) * 1000)
 
             resp_id = resp.get("orderID") or resp.get("orderId") or resp.get("id", "")
@@ -112,6 +137,8 @@ async def _post_fak_market(
                 "making_amount": making_amount,
                 "raw_keys": list(resp.keys()),
                 "attempt": attempt,
+                "create_market_order_ms": create_ms,
+                "post_order_ms": post_ms,
             })
 
             # Some Polymarket FAK responses omit sizeFilled/avgPrice entirely even
@@ -119,7 +146,7 @@ async def _post_fak_market(
             # derive a reasonable filled-size fallback so we don't retry and double-buy.
             if filled <= 0 and success and status == "MATCHED":
                 if side == BUY:
-                    derived_price = price_hint or price
+                    derived_price = current_price_hint or price
                     if derived_price > 0:
                         filled = amount / derived_price
                         price = derived_price
@@ -149,6 +176,8 @@ async def _post_fak_market(
                     "effective_fill": effective_fill,
                     "fill_pct": round(fill_pct, 1),
                     "attempt": attempt,
+                    "create_market_order_ms": create_ms,
+                    "post_order_ms": post_ms,
                     "attempt_ms": attempt_ms,
                     "total_ms": total_ms,
                 })
@@ -166,6 +195,7 @@ async def _post_fak_market(
             )
 
         except Exception as e:
+            attempt_ms = round((time.monotonic() - t_attempt) * 1000) if t_attempt is not None else None
             if _is_425_error(e) and engine_retry < max_engine_retries:
                 engine_retry += 1
                 log.warning(
@@ -183,6 +213,10 @@ async def _post_fak_market(
                 "amount": amount,
                 "attempt": attempt,
                 "retry_count": retry_count,
+                "price_hint": current_price_hint,
+                "create_market_order_ms": create_ms,
+                "post_order_ms": post_ms,
+                "attempt_ms": attempt_ms,
                 **_extract_error_details(e),
             })
 
@@ -200,6 +234,7 @@ async def buy_token(
     label: str,
     window_end_epoch: Optional[int] = None,
     price_hint: Optional[float] = None,
+    price_hint_refresher: Optional[Callable[[], Optional[float]]] = None,
 ) -> OrderResult:
     """
     Buy a token using FAK market order with retry.
@@ -224,6 +259,7 @@ async def buy_token(
         retry_count=config.FOK_RETRY_COUNT,
         retry_interval=config.FOK_RETRY_INTERVAL,
         price_hint=price_hint,
+        price_hint_refresher=price_hint_refresher,
     )
 
     if result.success:

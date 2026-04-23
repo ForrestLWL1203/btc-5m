@@ -144,6 +144,66 @@ async def test_fak_buy_matched_without_sizefilled_is_treated_as_success():
 
 
 @pytest.mark.asyncio
+async def test_fak_buy_refreshes_price_hint_before_retry():
+    """After a failed FAK attempt, retry uses the refreshed WS-derived hint."""
+    fills = [
+        Exception("no orders found to match with FAK order"),
+        {
+            "orderID": "ord-matched",
+            "status": "MATCHED",
+            "success": True,
+            "takingAmount": "1.0",
+            "makingAmount": "1.6129",
+        },
+    ]
+    mock_client = _mock_client(fills)
+    refresher = MagicMock(return_value=0.62)
+
+    with patch("polybot.trading.trading.get_client", return_value=mock_client):
+        result = await _post_fak_market(
+            token_id="token-1",
+            amount=1.0,
+            side="BUY",
+            retry_count=3,
+            retry_interval=0.01,
+            price_hint=0.60,
+            price_hint_refresher=refresher,
+        )
+
+    assert result.success
+    assert result.avg_price == pytest.approx(0.62)
+    assert refresher.call_count == 1
+    prices = [
+        call.args[0].price
+        for call in mock_client.create_market_order.call_args_list
+    ]
+    assert prices == [0.60, 0.62]
+
+
+@pytest.mark.asyncio
+async def test_fak_buy_aborts_retry_when_refreshed_hint_unavailable():
+    """If retry ask is unavailable/outside band, don't keep posting stale FAKs."""
+    mock_client = _mock_client([Exception("no orders found to match with FAK order")] * 3)
+    refresher = MagicMock(return_value=None)
+
+    with patch("polybot.trading.trading.get_client", return_value=mock_client):
+        result = await _post_fak_market(
+            token_id="token-1",
+            amount=1.0,
+            side="BUY",
+            retry_count=3,
+            retry_interval=0.01,
+            price_hint=0.60,
+            price_hint_refresher=refresher,
+        )
+
+    assert not result.success
+    assert "retry aborted" in result.message
+    assert refresher.call_count == 1
+    assert mock_client.post_order.call_count == 1
+
+
+@pytest.mark.asyncio
 async def test_fak_buy_all_retries_fail():
     """FAK BUY returns failure after exhausting retries with zero fills."""
     fills = [Exception("No liquidity")] * 5

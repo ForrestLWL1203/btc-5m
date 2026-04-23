@@ -101,9 +101,17 @@ def create_clob_client(
         funder=funder_addr,
     )
 
-    # Set API credentials (required for L2 auth on trading endpoints)
+    # Set API credentials (required for L2 auth on trading endpoints).
+    #
+    # py-clob-client's create_or_derive_api_creds() tries POST /auth/api-key
+    # before deriving an existing key. For accounts that already have CLOB API
+    # credentials, that POST consistently returns 400 and then derive succeeds.
+    # Derive first to avoid a noisy, guaranteed-failing request on every start.
     try:
-        client.set_api_creds(client.create_or_derive_api_creds())
+        creds = client.derive_api_key()
+        if creds is None:
+            creds = client.create_api_key()
+        client.set_api_creds(creds)
     except Exception as e:
         raise RuntimeError(
             f"Failed to set API credentials — all orders will fail. "
