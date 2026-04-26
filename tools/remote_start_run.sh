@@ -46,6 +46,7 @@ cat > "${RUN_DIR}/run.sh" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 cd "${ROOT_DIR}"
+mkdir -p log
 find log -maxdepth 1 -type f \( -name '*_trade.log' -o -name '*_trade.jsonl' \) -delete
 if [ "${MODE}" = "dry" ]; then
   polybot-run --preset "${PRESET}" --rounds "${ROUNDS}" --dry
