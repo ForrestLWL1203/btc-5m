@@ -77,6 +77,34 @@ def test_should_buy_allows_early_window_for_strong_signal():
     assert state.target_side == "up"
 
 
+def test_should_buy_uses_shorter_early_persistence_in_first_minute():
+    strat = _strategy(
+        theta_pct=0.025,
+        max_entry_price=0.65,
+        persistence_sec=8,
+        entry_start_remaining_sec=270.0,
+        early_entry_start_remaining_sec=270.0,
+        early_entry_strength_threshold=1.0,
+        early_entry_past_strength_threshold=0.5,
+        early_entry_persistence_sec=5,
+    )
+    now = time.time()
+    strat._window_start_epoch = now - 30
+    strat._window_open_btc = 100.0
+    strat._feed.latest_price = 100.026
+    calls = []
+
+    def price_at_or_before(ts):
+        calls.append(now - ts)
+        return 100.020
+
+    strat._feed.price_at_or_before = price_at_or_before
+    state = MonitorState()
+
+    assert strat.should_buy(0.60, state) is True
+    assert calls[0] == pytest.approx(5.0, abs=0.5)
+
+
 def test_should_buy_rejects_early_window_when_past_strength_too_low():
     strat = _strategy(
         theta_pct=0.03,

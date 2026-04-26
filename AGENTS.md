@@ -234,6 +234,7 @@ These are small samples, not backtests.
 ```bash
 python3.11 run.py --preset enhanced --dry --rounds 6
 python3.11 run.py --preset enhanced --amount 1.5 --max-entry-price 0.69 --rounds 24
+python3.11 run.py --preset aggressive-early-test --rounds 3
 python3.11 run.py --preset uncapped-depth-test --rounds 3
 ```
 
@@ -242,6 +243,11 @@ python3.11 run.py --preset uncapped-depth-test --rounds 3
 `uncapped-depth-test` is a live experiment: cap still gates BUY_SIGNAL, but
 the FAK price hint uses the fresh order-book depth level that can cover the
 configured amount, even if that hint is above cap.
+
+`aggressive-early-test` is a more aggressive live experiment: `theta_pct=0.025`,
+`persistence_sec=8`, entries may start 30 seconds into the window, early
+confirmation uses 5 seconds, cap is logged but does not block entry, and the FAK
+price hint uses book depth.
 
 **Collect data**
 

@@ -125,6 +125,7 @@ class TestBuildStrategy:
                 "early_entry_start_remaining_sec": 270,
                 "early_entry_strength_threshold": 2.5,
                 "early_entry_past_strength_threshold": 1.5,
+                "early_entry_persistence_sec": 5,
             }
         }
         strat = build_strategy(cfg, series)
@@ -133,6 +134,7 @@ class TestBuildStrategy:
         assert strat._early_entry_start_remaining_sec == pytest.approx(270.0)
         assert strat._early_entry_strength_threshold == pytest.approx(2.5)
         assert strat._early_entry_past_strength_threshold == pytest.approx(1.5)
+        assert strat._early_entry_persistence_sec == pytest.approx(5.0)
 
     def test_missing_strategy_raises(self):
         series = MarketSeries.from_known("btc-updown-5m")
@@ -180,6 +182,9 @@ class TestBuildTradeConfig:
                 "uncapped_depth_price_hint": {
                     "enabled": True,
                 },
+                "entry_cap_gate": {
+                    "enabled": False,
+                },
                 "max_entries_per_window": 5,
             },
             "risk": {
@@ -202,6 +207,7 @@ class TestBuildTradeConfig:
         assert tc.normal_full_cap_guard_enabled is True
         assert tc.normal_full_cap_min_signal_strength == pytest.approx(1.05)
         assert tc.normal_full_cap_min_remaining_sec == pytest.approx(210.0)
+        assert tc.entry_cap_gate_enabled is False
         assert tc.uncapped_depth_price_hint_enabled is True
         assert tc.max_entries_per_window == 5
         assert tc.rounds == 3

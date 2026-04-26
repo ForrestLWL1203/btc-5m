@@ -18,6 +18,7 @@ from polybot.runtime_inputs import (
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
 PRESET_PATHS = {
+    "aggressive-early-test": _REPO_ROOT / "paired_window_aggressive_early_live_test.yaml",
     "conservative": _REPO_ROOT / "paired_window_cap61_5r_live.yaml",
     "enhanced": _REPO_ROOT / "paired_window_early_entry_dry.yaml",
     "uncapped-depth-test": _REPO_ROOT / "paired_window_uncapped_depth_live_test.yaml",

@@ -33,6 +33,7 @@ class PairedWindowStrategy(Strategy):
         early_entry_start_remaining_sec: Optional[float] = None,
         early_entry_strength_threshold: Optional[float] = None,
         early_entry_past_strength_threshold: Optional[float] = None,
+        early_entry_persistence_sec: Optional[float] = None,
         entry_end_remaining_sec: float = 120.0,
         persistence_sec: float = 10.0,
         max_entry_price: float = 0.70,
@@ -48,6 +49,7 @@ class PairedWindowStrategy(Strategy):
         self._early_entry_start_remaining_sec = early_entry_start_remaining_sec
         self._early_entry_strength_threshold = early_entry_strength_threshold
         self._early_entry_past_strength_threshold = early_entry_past_strength_threshold
+        self._early_entry_persistence_sec = early_entry_persistence_sec
         self._entry_end_remaining_sec = entry_end_remaining_sec
         self._persistence_sec = persistence_sec
         self._max_entry_price = max_entry_price
@@ -152,7 +154,8 @@ class PairedWindowStrategy(Strategy):
         if open_price is None or current_btc is None or open_price <= 0:
             return False
 
-        past_btc = self._feed.price_at_or_before(now - self._persistence_sec)
+        persistence_sec = self._resolve_persistence_sec(remaining)
+        past_btc = self._feed.price_at_or_before(now - persistence_sec)
         if past_btc is None:
             return False
 
@@ -297,3 +300,12 @@ class PairedWindowStrategy(Strategy):
         if past_threshold is not None and past_signal_strength < past_threshold:
             return self._entry_start_remaining_sec
         return early_start
+
+    def _resolve_persistence_sec(self, remaining: float) -> float:
+        """Use shorter confirmation for the first 30s after entry opens."""
+        if self._early_entry_persistence_sec is None:
+            return self._persistence_sec
+        early_window_end = self._entry_start_remaining_sec - 30.0
+        if early_window_end <= remaining <= self._entry_start_remaining_sec:
+            return min(self._persistence_sec, self._early_entry_persistence_sec)
+        return self._persistence_sec

@@ -827,7 +827,11 @@ async def monitor_window(
                 )
                 if opening_best_ask is None:
                     state.target_entry_price = None
-                elif max_entry_price is not None and opening_best_ask > max_entry_price:
+                elif (
+                    trade_config.entry_cap_gate_enabled
+                    and max_entry_price is not None
+                    and opening_best_ask > max_entry_price
+                ):
                     state.target_entry_price = None
                 else:
                     guard_reason = _normal_full_cap_guard_reason(
@@ -836,7 +840,7 @@ async def monitor_window(
                         opening_best_ask,
                         max_entry_price,
                     )
-                    if guard_reason is not None:
+                    if trade_config.entry_cap_gate_enabled and guard_reason is not None:
                         state.target_entry_price = None
                         if _should_log_entry_guard_skip(
                             state,
@@ -1004,7 +1008,11 @@ async def _on_price_update(
                 if best_ask is None:
                     state.target_entry_price = None
                     return
-                if max_entry_price is not None and best_ask > max_entry_price:
+                if (
+                    trade_config.entry_cap_gate_enabled
+                    and max_entry_price is not None
+                    and best_ask > max_entry_price
+                ):
                     state.target_entry_price = None
                     return
                 guard_reason = _normal_full_cap_guard_reason(
@@ -1013,7 +1021,7 @@ async def _on_price_update(
                     best_ask,
                     max_entry_price,
                 )
-                if guard_reason is not None:
+                if trade_config.entry_cap_gate_enabled and guard_reason is not None:
                     state.target_entry_price = None
                     if _should_log_entry_guard_skip(
                         state,
