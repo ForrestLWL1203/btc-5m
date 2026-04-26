@@ -275,7 +275,7 @@ fi
 . /opt/polybot/venv/bin/activate
 pip install -q --upgrade pip
 pip install -q -r /opt/polybot/current/requirements.txt
-install -m 755 /tmp/remote_start_run.sh /usr/local/bin/polybot-remote-start
+install -m 755 /opt/polybot/current/tools/remote_start_run.sh /usr/local/bin/polybot-remote-start
 cat >/usr/local/bin/polybot-update <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -287,6 +287,7 @@ git pull --ff-only origin ${BRANCH}
 pip install -q -r requirements.txt
 mkdir -p /root/.config/polymarket
 cp /opt/polybot/shared/polymarket_config.json /root/.config/polymarket/config.json
+install -m 755 /opt/polybot/current/tools/remote_start_run.sh /usr/local/bin/polybot-remote-start
 echo "updated \$(git rev-parse --short HEAD)"
 SH
 chmod +x /usr/local/bin/polybot-update
