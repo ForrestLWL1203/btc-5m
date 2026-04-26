@@ -71,10 +71,10 @@ strategy:
   type: paired_window
   theta_pct: 0.03
   persistence_sec: 10
-  entry_start_remaining_sec: 240
-  early_entry_start_remaining_sec: 270
-  early_entry_strength_threshold: 2.0
-  early_entry_past_strength_threshold: 1.0
+  entry_start_remaining_sec: 255
+  early_entry_start_remaining_sec: 285
+  early_entry_strength_threshold: 1.5
+  early_entry_past_strength_threshold: 0.8
   entry_end_remaining_sec: 180
   max_entry_price: 0.68
   min_move_ratio: 0.7
@@ -119,18 +119,18 @@ Enhanced behavior:
 - `signal_strength >= 2.0x` -> amount `1.5`
 - normal full-cap guard: if a normal-confidence entry is priced at the active
   base cap, skip it when strength `< 1.05x` or remaining time `< 210s`
-- `signal_strength >= 2.0x` and past strength `>= 1.0x` allows entry as early
-  as `remaining=270s`, i.e. 30 seconds into a 5-minute window
+- `signal_strength >= 1.5x` and past strength `>= 0.8x` allows entry as early
+  as `remaining=285s`, i.e. 15 seconds into a 5-minute window
 - runtime has no lower entry-price floor; low target asks are allowed
 
 ## Runtime Behavior
 
 1. Anchor BTC at the current window open.
-2. In the normal entry band `[60s, 180s]` into the window:
+2. In the normal entry band `[45s, 180s]` into the window:
    - require BTC move from open >= `theta_pct`
    - require same direction to have existed `persistence_sec` ago
    - require current move >= `min_move_ratio * past_move`
-3. If early-entry fields are enabled, allow strong signals as early as 30s into
+3. If early-entry fields are enabled, allow earlier persistent signals as early as 15s into
    the window.
 4. Lock the first valid direction for that window.
 5. Keep checking the chosen target leg until its fresh ask from the active

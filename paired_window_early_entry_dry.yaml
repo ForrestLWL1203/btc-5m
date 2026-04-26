@@ -6,10 +6,10 @@ strategy:
   type: paired_window
   theta_pct: 0.03
   persistence_sec: 10
-  entry_start_remaining_sec: 240
-  early_entry_start_remaining_sec: 270
-  early_entry_strength_threshold: 2.0
-  early_entry_past_strength_threshold: 1.0
+  entry_start_remaining_sec: 255
+  early_entry_start_remaining_sec: 285
+  early_entry_strength_threshold: 1.5
+  early_entry_past_strength_threshold: 0.8
   entry_end_remaining_sec: 180
   max_entry_price: 0.68
   min_move_ratio: 0.7

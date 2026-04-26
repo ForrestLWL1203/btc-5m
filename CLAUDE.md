@@ -63,10 +63,10 @@ strategy:
   type: paired_window
   theta_pct: 0.03
   persistence_sec: 10
-  entry_start_remaining_sec: 240
-  early_entry_start_remaining_sec: 270
-  early_entry_strength_threshold: 2.0
-  early_entry_past_strength_threshold: 1.0
+  entry_start_remaining_sec: 255
+  early_entry_start_remaining_sec: 285
+  early_entry_strength_threshold: 1.5
+  early_entry_past_strength_threshold: 0.8
   entry_end_remaining_sec: 180
   max_entry_price: 0.68
   min_move_ratio: 0.7
@@ -111,8 +111,8 @@ Enhanced behavior:
 - strength `>= 2.0x` -> amount `1.5`
 - normal full-cap guard: if a normal-confidence entry is priced at the active
   base cap, skip it when strength `< 1.05x` or remaining time `< 210s`
-- strength `>= 2.0x` and past strength `>= 1.0x` -> entry can start at
-  `remaining=270s`, i.e. 30s after window open
+- strength `>= 1.5x` and past strength `>= 0.8x` -> entry can start at
+  `remaining=285s`, i.e. 15s after window open
 - runtime has no lower entry-price floor; low target asks are allowed
 
 ## Current Runtime Behavior
@@ -120,9 +120,9 @@ Enhanced behavior:
 1. Anchor BTC to the current 5-minute window open.
    - If the WS deque does not contain the open, seed it with Binance 1m kline
      REST data.
-2. Normal entries run while remaining time is in `[240s, 180s]`.
-3. Optional early entry extends start to `270s` only for strong persistent
-   signals.
+2. Normal entries run while remaining time is in `[255s, 180s]`.
+3. Optional early entry extends start to `285s` for earlier persistent signals
+   at `>=1.5x` current strength and `>=0.8x` past strength.
 4. Signal requirements:
    - `abs(move_pct) >= theta_pct`
    - same direction existed `persistence_sec` ago
