@@ -34,6 +34,7 @@ class PairedWindowStrategy(Strategy):
         early_entry_strength_threshold: Optional[float] = None,
         early_entry_past_strength_threshold: Optional[float] = None,
         early_entry_persistence_sec: Optional[float] = None,
+        ultra_early_entry: Optional[dict[str, float]] = None,
         entry_end_remaining_sec: float = 120.0,
         persistence_sec: float = 10.0,
         max_entry_price: float = 0.70,
@@ -50,6 +51,7 @@ class PairedWindowStrategy(Strategy):
         self._early_entry_strength_threshold = early_entry_strength_threshold
         self._early_entry_past_strength_threshold = early_entry_past_strength_threshold
         self._early_entry_persistence_sec = early_entry_persistence_sec
+        self._ultra_early_entry = self._normalize_ultra_early_entry(ultra_early_entry)
         self._entry_end_remaining_sec = entry_end_remaining_sec
         self._persistence_sec = persistence_sec
         self._max_entry_price = max_entry_price
@@ -154,28 +156,44 @@ class PairedWindowStrategy(Strategy):
         if open_price is None or current_btc is None or open_price <= 0:
             return False
 
-        persistence_sec = self._resolve_persistence_sec(remaining)
+        ultra = self._active_ultra_early_rule(elapsed)
+        persistence_sec = (
+            ultra["persistence_sec"]
+            if ultra is not None
+            else self._resolve_persistence_sec(remaining)
+        )
         past_btc = self._feed.price_at_or_before(now - persistence_sec)
         if past_btc is None:
             return False
 
+        active_theta = ultra["theta_pct"] if ultra is not None else self._theta_pct
+        active_min_move_ratio = (
+            ultra["min_move_ratio"] if ultra is not None else self._min_move_ratio
+        )
         move_pct = (current_btc - open_price) / open_price * 100.0
-        if abs(move_pct) < self._theta_pct:
+        if abs(move_pct) < active_theta:
             return False
 
         past_move_pct = (past_btc - open_price) / open_price * 100.0
         if (move_pct > 0) != (past_move_pct > 0):
             return False
-        if abs(move_pct) < abs(past_move_pct) * self._min_move_ratio:
+        if abs(move_pct) < abs(past_move_pct) * active_min_move_ratio:
             return False
 
-        signal_strength = abs(move_pct) / self._theta_pct if self._theta_pct > 0 else 0.0
-        past_signal_strength = abs(past_move_pct) / self._theta_pct if self._theta_pct > 0 else 0.0
-        entry_start_remaining_sec = self._resolve_entry_start_remaining_sec(
-            signal_strength=signal_strength,
-            past_signal_strength=past_signal_strength,
-        )
-        if remaining > entry_start_remaining_sec or remaining < self._entry_end_remaining_sec:
+        signal_strength = abs(move_pct) / active_theta if active_theta > 0 else 0.0
+        past_signal_strength = abs(past_move_pct) / active_theta if active_theta > 0 else 0.0
+        if ultra is None:
+            entry_start_remaining_sec = self._resolve_entry_start_remaining_sec(
+                signal_strength=signal_strength,
+                past_signal_strength=past_signal_strength,
+            )
+            in_entry_band = (
+                remaining <= entry_start_remaining_sec
+                and remaining >= self._entry_end_remaining_sec
+            )
+        else:
+            in_entry_band = True
+        if not in_entry_band:
             return False
 
         direction = "up" if move_pct > 0 else "down"
@@ -192,7 +210,7 @@ class PairedWindowStrategy(Strategy):
             resolved_cap,
             previous_cap if previous_cap is not None else self._max_entry_price,
         )
-        confidence = "normal"
+        confidence = "ultra_early" if ultra is not None else "normal"
         if dynamic_cap > self._max_entry_price:
             confidence = "strong"
 
@@ -225,9 +243,11 @@ class PairedWindowStrategy(Strategy):
 
         if not self._signal_logged:
             log.info(
-                "SIGNAL: dir=%s btc_open=%.1f btc_now=%.1f move=%.4f%% past=%.4f%% "
-                "strength=%.2fx signal_ref_price=%.3f max_entry=%.3f remaining=%.0fs",
+                "SIGNAL: dir=%s mode=%s btc_open=%.1f btc_now=%.1f move=%.4f%% "
+                "past=%.4f%% strength=%.2fx signal_ref_price=%.3f max_entry=%.3f "
+                "remaining=%.0fs",
                 direction.upper(),
+                confidence,
                 open_price,
                 current_btc,
                 move_pct,
@@ -309,3 +329,23 @@ class PairedWindowStrategy(Strategy):
         if early_window_end <= remaining <= self._entry_start_remaining_sec:
             return min(self._persistence_sec, self._early_entry_persistence_sec)
         return self._persistence_sec
+
+    @staticmethod
+    def _normalize_ultra_early_entry(raw: Optional[dict[str, float]]) -> Optional[dict[str, float]]:
+        if not raw or not raw.get("enabled", False):
+            return None
+        return {
+            "start_elapsed_sec": float(raw.get("start_elapsed_sec", 10.0)),
+            "end_elapsed_sec": float(raw.get("end_elapsed_sec", 30.0)),
+            "theta_pct": float(raw.get("theta_pct", 0.04)),
+            "persistence_sec": float(raw.get("persistence_sec", 3.0)),
+            "min_move_ratio": float(raw.get("min_move_ratio", 0.5)),
+        }
+
+    def _active_ultra_early_rule(self, elapsed: float) -> Optional[dict[str, float]]:
+        rule = self._ultra_early_entry
+        if rule is None:
+            return None
+        if rule["start_elapsed_sec"] <= elapsed <= rule["end_elapsed_sec"]:
+            return rule
+        return None

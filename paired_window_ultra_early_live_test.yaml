@@ -1,0 +1,51 @@
+market:
+  asset: btc
+  timeframe: 5m
+
+strategy:
+  type: paired_window
+  theta_pct: 0.025
+  persistence_sec: 8
+  entry_start_remaining_sec: 270
+  early_entry_start_remaining_sec: 270
+  early_entry_strength_threshold: 1.0
+  early_entry_past_strength_threshold: 0.5
+  early_entry_persistence_sec: 5
+  ultra_early_entry:
+    enabled: true
+    start_elapsed_sec: 10
+    end_elapsed_sec: 30
+    theta_pct: 0.04
+    persistence_sec: 3
+    min_move_ratio: 0.5
+  entry_end_remaining_sec: 180
+  max_entry_price: 0.68
+  min_move_ratio: 0.7
+  strength_caps:
+    - threshold: 2.0
+      max_entry_price: 0.72
+    - threshold: 3.5
+      max_entry_price: 0.75
+
+params:
+  amount: 1.0
+  entry_ask_level: 1
+  ask_level_tiers:
+    - threshold: 2.0
+      level: 2
+    - threshold: 3.5
+      level: 4
+  amount_tiers:
+    - threshold: 2.0
+      amount: 1.5
+  entry_cap_gate:
+    enabled: false
+  uncapped_depth_price_hint:
+    enabled: true
+  max_entries_per_window: 1
+
+risk:
+  consecutive_loss_amount: 3.0
+  daily_loss_amount: 5.0
+  consecutive_loss_pause_windows: 2
+  daily_loss_pause_windows: 5

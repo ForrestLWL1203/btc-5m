@@ -70,6 +70,7 @@ def build_strategy(cfg: dict, series: Optional[MarketSeries] = None):
             early_entry_strength_threshold=strat_cfg.get("early_entry_strength_threshold"),
             early_entry_past_strength_threshold=strat_cfg.get("early_entry_past_strength_threshold"),
             early_entry_persistence_sec=strat_cfg.get("early_entry_persistence_sec"),
+            ultra_early_entry=strat_cfg.get("ultra_early_entry"),
             entry_end_remaining_sec=strat_cfg.get("entry_end_remaining_sec", 120.0),
             persistence_sec=strat_cfg.get("persistence_sec", 10.0),
             max_entry_price=max_entry_price,

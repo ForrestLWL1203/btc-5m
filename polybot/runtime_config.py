@@ -22,6 +22,7 @@ PRESET_PATHS = {
     "conservative": _REPO_ROOT / "paired_window_cap61_5r_live.yaml",
     "enhanced": _REPO_ROOT / "paired_window_early_entry_dry.yaml",
     "uncapped-depth-test": _REPO_ROOT / "paired_window_uncapped_depth_live_test.yaml",
+    "ultra-early-test": _REPO_ROOT / "paired_window_ultra_early_live_test.yaml",
 }
 
 

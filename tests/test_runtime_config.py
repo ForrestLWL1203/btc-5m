@@ -67,6 +67,19 @@ def test_preset_config_loads_aggressive_early_experiment():
     assert cfg["params"]["uncapped_depth_price_hint"]["enabled"] is True
 
 
+def test_preset_config_loads_ultra_early_experiment():
+    cfg = preset_config("ultra-early-test")
+    ultra = cfg["strategy"]["ultra_early_entry"]
+    assert ultra["enabled"] is True
+    assert ultra["start_elapsed_sec"] == pytest.approx(10)
+    assert ultra["end_elapsed_sec"] == pytest.approx(30)
+    assert ultra["theta_pct"] == pytest.approx(0.04)
+    assert ultra["persistence_sec"] == pytest.approx(3)
+    assert ultra["min_move_ratio"] == pytest.approx(0.5)
+    assert cfg["params"]["entry_cap_gate"]["enabled"] is False
+    assert cfg["params"]["uncapped_depth_price_hint"]["enabled"] is True
+
+
 def test_build_runtime_config_requires_exactly_one_source():
     with pytest.raises(ValueError, match="exactly one of --config or --preset"):
         build_runtime_config(_args())

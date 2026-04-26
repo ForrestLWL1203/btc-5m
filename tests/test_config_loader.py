@@ -126,6 +126,14 @@ class TestBuildStrategy:
                 "early_entry_strength_threshold": 2.5,
                 "early_entry_past_strength_threshold": 1.5,
                 "early_entry_persistence_sec": 5,
+                "ultra_early_entry": {
+                    "enabled": True,
+                    "start_elapsed_sec": 10,
+                    "end_elapsed_sec": 30,
+                    "theta_pct": 0.04,
+                    "persistence_sec": 3,
+                    "min_move_ratio": 0.5,
+                },
             }
         }
         strat = build_strategy(cfg, series)
@@ -135,6 +143,13 @@ class TestBuildStrategy:
         assert strat._early_entry_strength_threshold == pytest.approx(2.5)
         assert strat._early_entry_past_strength_threshold == pytest.approx(1.5)
         assert strat._early_entry_persistence_sec == pytest.approx(5.0)
+        assert strat._ultra_early_entry == {
+            "start_elapsed_sec": 10.0,
+            "end_elapsed_sec": 30.0,
+            "theta_pct": 0.04,
+            "persistence_sec": 3.0,
+            "min_move_ratio": 0.5,
+        }
 
     def test_missing_strategy_raises(self):
         series = MarketSeries.from_known("btc-updown-5m")

@@ -105,6 +105,67 @@ def test_should_buy_uses_shorter_early_persistence_in_first_minute():
     assert calls[0] == pytest.approx(5.0, abs=0.5)
 
 
+def test_should_buy_allows_ultra_early_strong_signal():
+    strat = _strategy(
+        theta_pct=0.025,
+        max_entry_price=0.65,
+        persistence_sec=8,
+        entry_start_remaining_sec=270.0,
+        early_entry_persistence_sec=5,
+        ultra_early_entry={
+            "enabled": True,
+            "start_elapsed_sec": 10,
+            "end_elapsed_sec": 30,
+            "theta_pct": 0.04,
+            "persistence_sec": 3,
+            "min_move_ratio": 0.5,
+        },
+    )
+    now = time.time()
+    strat._window_start_epoch = now - 15
+    strat._window_open_btc = 100.0
+    strat._feed.latest_price = 100.045
+    calls = []
+
+    def price_at_or_before(ts):
+        calls.append(now - ts)
+        return 100.030
+
+    strat._feed.price_at_or_before = price_at_or_before
+    state = MonitorState()
+
+    assert strat.should_buy(0.60, state) is True
+    assert state.target_side == "up"
+    assert state.target_signal_confidence == "ultra_early"
+    assert state.target_signal_strength == pytest.approx(1.125)
+    assert calls[0] == pytest.approx(3.0, abs=0.5)
+
+
+def test_should_buy_rejects_ultra_early_weak_signal():
+    strat = _strategy(
+        theta_pct=0.025,
+        max_entry_price=0.65,
+        persistence_sec=8,
+        entry_start_remaining_sec=270.0,
+        ultra_early_entry={
+            "enabled": True,
+            "start_elapsed_sec": 10,
+            "end_elapsed_sec": 30,
+            "theta_pct": 0.04,
+            "persistence_sec": 3,
+            "min_move_ratio": 0.5,
+        },
+    )
+    now = time.time()
+    strat._window_start_epoch = now - 15
+    strat._window_open_btc = 100.0
+    strat._feed.latest_price = 100.030
+    strat._feed.price_at_or_before = lambda ts: 100.025
+    state = MonitorState()
+
+    assert strat.should_buy(0.60, state) is False
+
+
 def test_should_buy_rejects_early_window_when_past_strength_too_low():
     strat = _strategy(
         theta_pct=0.03,
