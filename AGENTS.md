@@ -299,13 +299,14 @@ bash tools/vps_fetch_run.sh --host 70.34.207.45 --run-id latest
 **Unified VPS control**
 
 ```bash
-bash tools/vpsctl.sh bootstrap --host 70.34.207.45 --ask-pass
-bash tools/vpsctl.sh run --host 70.34.207.45 --ask-pass --preset enhanced --rounds 6
-bash tools/vpsctl.sh fetch --host 70.34.207.45 --ask-pass --run-id latest
+bash tools/vpsctl.sh bootstrap --host 70.34.207.45
+bash tools/vpsctl.sh run --host 70.34.207.45 --preset enhanced --rounds 6
+bash tools/vpsctl.sh fetch --host 70.34.207.45 --run-id latest
 ```
 
 Prefer `tools/vpsctl.sh` when the VPS host may change. It accepts dynamic
-`host/user/password` and handles bootstrap, update, run, and log fetch.
+`host/user` plus local profiles and handles bootstrap, update, run, and log
+fetch.
 
 Profiles:
 

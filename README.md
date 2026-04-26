@@ -328,13 +328,13 @@ bash tools/vps_fetch_run.sh --host 70.34.207.45 --run-id latest
 Unified VPS control tool:
 
 ```bash
-bash tools/vpsctl.sh bootstrap --host 70.34.207.45 --ask-pass
-bash tools/vpsctl.sh run --host 70.34.207.45 --ask-pass --preset enhanced --rounds 6
-bash tools/vpsctl.sh fetch --host 70.34.207.45 --ask-pass --run-id latest
+bash tools/vpsctl.sh bootstrap --host 70.34.207.45
+bash tools/vpsctl.sh run --host 70.34.207.45 --preset enhanced --rounds 6
+bash tools/vpsctl.sh fetch --host 70.34.207.45 --run-id latest
 ```
 
 `tools/vpsctl.sh` is the preferred path for dynamic VPS changes because it can
-take a new host/user/password and perform:
+take a new host/user plus a local VPS profile and perform:
 
 - remote environment bootstrap
 - repo clone / pull
@@ -365,6 +365,30 @@ bash tools/vpsctl.sh run --vps-profile <vps_name> --preset enhanced --rounds 12
 bash tools/vpsctl.sh fetch --vps-profile <vps_name> --run-id latest
 ```
 
+Manual setup notes:
+
+- `~/.polybot/` is only the default profile location. It may not exist yet.
+- Create the default directories manually if needed:
+
+```bash
+mkdir -p ~/.polybot/vps ~/.polybot/accounts
+```
+
+- Then create:
+  - `~/.polybot/vps/<name>.env`
+  - `~/.polybot/accounts/<name>.json`
+- If you do not want to use the default directory, pass direct file paths:
+
+```bash
+bash tools/vpsctl.sh bootstrap \
+  --vps-profile /path/to/my_vps.env \
+  --account-profile /path/to/my_account.json
+```
+
+If the user has an AI agent, the agent can create these directories and files
+from the examples below. If the user does not have an agent, the examples and
+step-by-step commands here are intended to be sufficient for manual setup.
+
 Profile-driven usage for other users:
 
 ```bash
@@ -386,7 +410,6 @@ Required / supported keys:
 - one of:
   - `PASSWORD=your_vps_password`
   - `PASSWORD_ENV_VAR=MY_VPS_PASSWORD`
-  - `ASK_PASS=1`
 - optional:
   - `REPO_URL=https://github.com/ForrestLWL1203/btc-5m.git`
   - `BRANCH=main`
@@ -396,7 +419,7 @@ Example `~/.polybot/vps/sweden.env`:
 ```bash
 HOST=70.34.207.45
 USER_NAME=root
-PASSWORD_ENV_VAR=POLYBOT_SWEDEN_PASS
+PASSWORD=your_vps_password
 REPO_URL=https://github.com/ForrestLWL1203/btc-5m.git
 BRANCH=main
 ```
@@ -445,6 +468,8 @@ Notes:
 
 - `bootstrap` uploads the chosen account profile to the VPS as the active
   Polymarket config.
+- `vpsctl.sh` no longer takes password as a command-line parameter; put the
+  password source in the VPS profile.
 - In normal proxy-wallet usage, users usually only need to provide their
   `private_key` and the proxy wallet address they see on Polymarket.
 - If `chain_id` is omitted, runtime defaults to `137`.

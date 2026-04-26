@@ -13,17 +13,12 @@ DEFAULT_PROFILE_HOME="${HOME}/.polybot"
 usage() {
   cat <<'EOF'
 usage:
-  tools/vpsctl.sh bootstrap --host <ip> [--user root] [auth...]
+  tools/vpsctl.sh bootstrap --host <ip> [--user root]
                           [--repo URL] [--branch main] [--account-profile NAME|PATH]
-  tools/vpsctl.sh run      --host <ip> [--user root] [auth...] [--preset enhanced] [--rounds 6] [--dry] [--label LABEL]
-  tools/vpsctl.sh fetch    --host <ip> [--user root] [auth...] [--run-id latest] [--dest remote_runs]
-  tools/vpsctl.sh status   --host <ip> [--user root] [auth...] [--run-id latest]
-  tools/vpsctl.sh probe    --host <ip> [--user root] [auth...] --token-id <TOKEN> [extra probe args...]
-
-auth options:
-  --password PASS
-  --password-env VAR
-  --ask-pass
+  tools/vpsctl.sh run      --host <ip> [--user root] [--preset enhanced] [--rounds 6] [--dry] [--label LABEL]
+  tools/vpsctl.sh fetch    --host <ip> [--user root] [--run-id latest] [--dest remote_runs]
+  tools/vpsctl.sh status   --host <ip> [--user root] [--run-id latest]
+  tools/vpsctl.sh probe    --host <ip> [--user root] --token-id <TOKEN> [extra probe args...]
 
 profile options:
   --vps-profile NAME|PATH
@@ -32,6 +27,9 @@ profile options:
 default profile locations:
   ~/.polybot/vps/<name>.env
   ~/.polybot/accounts/<name>.json
+
+password source:
+  Put `PASSWORD=...` or `PASSWORD_ENV_VAR=...` inside the VPS profile.
 EOF
 }
 
@@ -44,7 +42,7 @@ require_file() {
   [ -f "$1" ] || die "missing file: $1"
 }
 
-PASSWORD=""
+PASSWORD="${POLYBOT_VPS_PASSWORD:-}"
 HOST=""
 USER_NAME="${POLYBOT_VPS_USER:-$DEFAULT_USER}"
 REPO_URL="${POLYBOT_VPS_REPO:-$DEFAULT_REPO}"
@@ -61,6 +59,7 @@ ACCOUNT_PROFILE=""
 PROFILE_HOME="${POLYBOT_PROFILE_HOME:-$DEFAULT_PROFILE_HOME}"
 
 EXPECT_TIMEOUT="${POLYBOT_EXPECT_TIMEOUT:-120}"
+REMAINING_ARGS=()
 
 resolve_vps_profile_path() {
   local value="$1"
@@ -92,7 +91,6 @@ load_vps_profile() {
   local old_repo="$REPO_URL"
   local old_branch="$BRANCH"
   local old_password_env="${PASSWORD_ENV_VAR:-}"
-  local old_ask="${ASK_PASS:-0}"
 
   # shellcheck disable=SC1090
   source "$profile_path"
@@ -103,7 +101,6 @@ load_vps_profile() {
   REPO_URL="${REPO_URL:-$old_repo}"
   BRANCH="${BRANCH:-$old_branch}"
   PASSWORD_ENV_VAR="${PASSWORD_ENV_VAR:-$old_password_env}"
-  ASK_PASS="${ASK_PASS:-$old_ask}"
 }
 
 resolve_local_account_cfg() {
@@ -121,14 +118,7 @@ read_password() {
   if [ -n "${PASSWORD_ENV_VAR:-}" ]; then
     PASSWORD="${!PASSWORD_ENV_VAR:-}"
   fi
-  if [ -z "$PASSWORD" ] && [ "${ASK_PASS:-0}" = "1" ]; then
-    printf 'VPS password: ' >&2
-    stty -echo
-    read -r PASSWORD
-    stty echo
-    printf '\n' >&2
-  fi
-  [ -n "$PASSWORD" ] || die "password required: use --password, --password-env, or --ask-pass"
+  [ -n "$PASSWORD" ] || die "password required: set PASSWORD or PASSWORD_ENV_VAR in the VPS profile (or POLYBOT_VPS_PASSWORD in the environment)"
 }
 
 expect_ssh() {
@@ -220,18 +210,6 @@ parse_common_args() {
         USER_NAME="$2"
         shift 2
         ;;
-      --password)
-        PASSWORD="$2"
-        shift 2
-        ;;
-      --password-env)
-        PASSWORD_ENV_VAR="$2"
-        shift 2
-        ;;
-      --ask-pass)
-        ASK_PASS=1
-        shift
-        ;;
       *)
         REMAINING_ARGS+=("$@")
         return 0
@@ -248,7 +226,11 @@ subcommand="${1:-}"
 shift
 
 parse_common_args "$@"
-set -- "${REMAINING_ARGS[@]}"
+if [ "${#REMAINING_ARGS[@]}" -gt 0 ]; then
+  set -- "${REMAINING_ARGS[@]}"
+else
+  set --
+fi
 
 load_vps_profile
 [ -n "$HOST" ] || die "--host is required"
@@ -257,11 +239,18 @@ LOCAL_REMOTE_START="${ROOT_DIR}/tools/remote_start_run.sh"
 
 bootstrap_remote() {
   local local_poly_cfg
+  local tmp_dir
+  local staged_cfg
   local_poly_cfg="$(resolve_local_account_cfg)"
   require_file "$local_poly_cfg"
   require_file "$LOCAL_REMOTE_START"
 
-  expect_scp_to_remote "$local_poly_cfg" "$LOCAL_REMOTE_START" "/tmp/"
+  tmp_dir="$(mktemp -d)"
+  staged_cfg="${tmp_dir}/config.json"
+  cp "$local_poly_cfg" "$staged_cfg"
+  trap 'rm -rf "$tmp_dir"' RETURN
+
+  expect_scp_to_remote "$staged_cfg" "$LOCAL_REMOTE_START" "/tmp/"
 
   local remote_script
   remote_script=$(cat <<EOF
