@@ -11,11 +11,15 @@ SIGNATURE_TYPE: int = 1  # 1 = proxy/Magic wallet (matches polymarket CLI config
 WS_RECONNECT_DELAY: float = 1.0  # initial WS reconnect backoff (seconds)
 WS_RECONNECT_MAX_DELAY: float = 30.0  # max WS reconnect backoff (seconds)
 WS_RECONNECT_MAX_RETRIES: int = 10  # max consecutive WS reconnect attempts
-FOK_RETRY_COUNT: int = 10  # FAK retry attempts (reuses FOK constant name)
-FOK_RETRY_INTERVAL: float = 0.1  # seconds between retries (~10x per second)
+FAK_RETRY_COUNT: int = 10  # FAK retry attempts
+FAK_RETRY_INTERVAL: float = 0.1  # seconds between retries (~10x per second)
 PRICE_HINT_BUFFER_TICKS: float = 1.0  # add one tick above best ask for BUY hints
 FAK_RETRY_PRICE_HINT_BUFFER_TICKS: float = 2.0  # slightly wider retry hint after FAK no-depth
 FAK_RETRY_MAX_BEST_ASK_AGE_SEC: float = 1.0  # require fresh WS ask before retrying FAK
+
+# Backward-compatible aliases for older local scripts/config imports.
+FOK_RETRY_COUNT: int = FAK_RETRY_COUNT
+FOK_RETRY_INTERVAL: float = FAK_RETRY_INTERVAL
 
 # Window timing
 WINDOW_END_BUFFER: int = 5  # treat window as ending this many seconds early to avoid boundary issues

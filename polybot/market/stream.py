@@ -177,10 +177,7 @@ class PriceStream:
             "custom_feature_enabled": True,
         }
         await self._ws.send(json.dumps(msg))
-        log_event(log, logging.INFO, WS, {
-            "action": "SUBSCRIBED",
-            "tokens": [t[:20] + "..." for t in token_ids],
-        })
+        log.debug("WS subscribed to %d token(s)", len(token_ids))
 
     async def _reconnect_locked(self, log_reconnect: bool = True) -> None:
         """Recreate the WS connection and subscribe to the current token set.
@@ -208,7 +205,7 @@ class PriceStream:
                     await self._ws.send("{}")
                     log.debug("Sent WS ping {}")
                 except Exception as e:
-                    log.warning("WS ping failed: %s", e)
+                    log.debug("WS ping failed: %s", e)
                     break
 
     async def _recv_loop(self) -> None:

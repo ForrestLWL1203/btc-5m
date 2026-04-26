@@ -25,7 +25,7 @@ def get_client() -> ClobClient:
     global _client
     if _client is None:
         _client = create_clob_client()
-        log.info("CLOB client initialized")
+        log.debug("CLOB client initialized")
     return _client
 
 

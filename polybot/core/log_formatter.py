@@ -51,9 +51,13 @@ class ConsoleFormatter(logging.Formatter):
             parts = [f"[{record.event_type}]", action]
 
             # Add key fields in a consistent order
-            for key in ("side", "window", "price", "amount", "shares",
-                        "threshold", "source", "reentry", "count",
-                        "reason", "message", "slug"):
+            for key in (
+                "side", "window", "result", "price", "avg_price", "amount",
+                "shares", "filled_size", "entries", "entry_latency_ms",
+                "post_order_ms", "total_ms", "best_ask_age_ms",
+                "max_entry_price", "windows_remaining", "threshold", "source",
+                "count", "reason", "message", "slug",
+            ):
                 if key in data:
                     val = data[key]
                     if isinstance(val, float):

@@ -81,7 +81,7 @@ class BinancePriceFeed:
                     open_price = float(data[0][1])
                     # Inject at exact epoch so first_price_at_or_after can find it
                     self._inject(epoch, open_price)
-                    log.info(
+                    log.debug(
                         "BinancePriceFeed REST fallback: epoch=%.0f open=%.2f",
                         epoch, open_price,
                     )
@@ -113,7 +113,7 @@ class BinancePriceFeed:
             try:
                 if self._ws is None:
                     self._ws = await websockets.connect(self._ws_url)
-                    log.info("BinancePriceFeed connected: %s", self._ws_url)
+                    log.debug("BinancePriceFeed connected: %s", self._ws_url)
 
                 async for msg in self._ws:
                     data = json.loads(msg)

@@ -35,6 +35,21 @@ def _is_425_error(exc: Exception) -> bool:
     return "425" in msg or "too early" in msg
 
 
+def _is_insufficient_funds_error(exc: Exception) -> bool:
+    """Check if an exception is caused by insufficient balance/allowance."""
+    msg = str(exc).lower()
+    return any(
+        marker in msg
+        for marker in (
+            "insufficient",
+            "not enough",
+            "balance",
+            "allowance",
+            "collateral",
+        )
+    )
+
+
 def _extract_error_details(exc: Exception) -> dict:
     """Return structured details from SDK/API exceptions for logging."""
     details = {
@@ -88,7 +103,7 @@ async def _post_fak_market(
             if refreshed_hint is None:
                 return OrderResult(
                     success=False,
-                    message="FAK retry aborted: refreshed best_ask unavailable or outside entry band",
+                    message="FAK retry aborted: refreshed best_ask unavailable or above cap",
                 )
             if refreshed_hint != current_price_hint:
                 log_event(log, logging.INFO, TRADE, {
@@ -157,13 +172,7 @@ async def _post_fak_market(
                     if price <= 0 and taking_amount > 0 and amount > 0:
                         price = taking_amount / amount
 
-            # FAK success: fill must reach 60% of requested amount.
-            # Below that threshold (including zero) the book is too thin — retry.
-            # BUY amount is dollars, so compare dollars-vs-dollars using filled * price.
-            # SELL amount is shares, so compare shares-vs-shares directly.
-            effective_fill = filled * price if side == BUY and price > 0 else filled
-            fill_pct = effective_fill / amount * 100 if amount > 0 else 0
-            if effective_fill >= amount * 0.6:
+            if filled > 0:
                 avg_price = price if price > 0 else 0.0
                 total_ms = round((time.monotonic() - t_total) * 1000)
                 log_event(log, logging.INFO, TRADE, {
@@ -173,8 +182,6 @@ async def _post_fak_market(
                     "filled_size": filled,
                     "avg_price": avg_price,
                     "requested": amount,
-                    "effective_fill": effective_fill,
-                    "fill_pct": round(fill_pct, 1),
                     "attempt": attempt,
                     "create_market_order_ms": create_ms,
                     "post_order_ms": post_ms,
@@ -189,13 +196,25 @@ async def _post_fak_market(
                     message=f"FAK filled (attempt {attempt})",
                 )
 
-            log.debug(
-                "FAK low fill: %.1f%% of requested (threshold 60%%) — retrying",
-                fill_pct,
-            )
-
         except Exception as e:
             attempt_ms = round((time.monotonic() - t_attempt) * 1000) if t_attempt is not None else None
+            if _is_insufficient_funds_error(e):
+                log_event(log, logging.ERROR, TRADE, {
+                    "action": "FAK_INSUFFICIENT_FUNDS",
+                    "side": side,
+                    "token": token_id[:20],
+                    "amount": amount,
+                    "attempt": attempt,
+                    "price_hint": current_price_hint,
+                    "create_market_order_ms": create_ms,
+                    "post_order_ms": post_ms,
+                    "attempt_ms": attempt_ms,
+                    **_extract_error_details(e),
+                })
+                return OrderResult(
+                    success=False,
+                    message=f"INSUFFICIENT_FUNDS: {e}",
+                )
             if _is_425_error(e) and engine_retry < max_engine_retries:
                 engine_retry += 1
                 log.warning(
@@ -231,8 +250,6 @@ async def _post_fak_market(
 async def buy_token(
     token_id: str,
     amount: float,
-    label: str,
-    window_end_epoch: Optional[int] = None,
     price_hint: Optional[float] = None,
     price_hint_refresher: Optional[Callable[[], Optional[float]]] = None,
 ) -> OrderResult:
@@ -245,19 +262,12 @@ async def buy_token(
 
     price_hint: best_ask from WS feed — skips SDK's internal GET /book when provided.
     """
-    log_event(log, logging.INFO, TRADE, {
-        "action": "BUY",
-        "amount": amount,
-        "label": label,
-        "price_hint": price_hint,
-    })
-
     result = await _post_fak_market(
         token_id=token_id,
         amount=amount,
         side=BUY,
-        retry_count=config.FOK_RETRY_COUNT,
-        retry_interval=config.FOK_RETRY_INTERVAL,
+        retry_count=config.FAK_RETRY_COUNT,
+        retry_interval=config.FAK_RETRY_INTERVAL,
         price_hint=price_hint,
         price_hint_refresher=price_hint_refresher,
     )
@@ -265,8 +275,4 @@ async def buy_token(
     if result.success:
         return result
 
-    log_event(log, logging.WARNING, TRADE, {
-        "action": "BUY_SKIPPED",
-        "reason": "FAK zero depth, window skipped",
-    })
     return result

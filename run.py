@@ -18,15 +18,18 @@ from pathlib import Path
 from dotenv import load_dotenv
 load_dotenv()
 
-from polybot.config_loader import load_config, build_series, build_strategy, build_trade_config
+from polybot.config_loader import build_series, build_strategy, build_trade_config
 from polybot.market.market import find_next_window
 from polybot.core.log_formatter import ConsoleFormatter, JsonFormatter
+from polybot.runtime_config import add_runtime_config_args, build_runtime_config
 from polybot.trading.monitor import monitor_window, MonitorState
 LOG_DIR = Path("log")
 LOG_DIR.mkdir(exist_ok=True)
 
 root_log = logging.getLogger()
 root_log.setLevel(logging.INFO)
+for noisy_logger in ("httpx", "httpcore", "websockets", "urllib3"):
+    logging.getLogger(noisy_logger).setLevel(logging.WARNING)
 
 # Console — human-readable with [EVENT_TYPE] prefix
 console = logging.StreamHandler()
@@ -76,34 +79,6 @@ def _setup_file_logging(slug_prefix: str) -> None:
     _jsonl_handler.setFormatter(JsonFormatter())
     root_log.addHandler(_jsonl_handler)
 
-
-def _apply_cli_overrides(cfg: dict, args: argparse.Namespace) -> None:
-    """Merge explicit CLI args into the loaded YAML config dict in-place."""
-    strat = cfg.setdefault("strategy", {})
-    params = cfg.setdefault("params", {})
-
-    if args.rounds is not None:
-        cfg["rounds"] = args.rounds
-    if args.theta is not None:
-        strat["theta_pct"] = args.theta
-    if args.persistence is not None:
-        strat["persistence_sec"] = args.persistence
-    if args.max_entry_price is not None:
-        strat["max_entry_price"] = args.max_entry_price
-    if args.min_entry_price is not None:
-        strat["min_entry_price"] = args.min_entry_price
-    if args.entry_start is not None:
-        strat["entry_start_remaining_sec"] = args.entry_start
-    if args.entry_end is not None:
-        strat["entry_end_remaining_sec"] = args.entry_end
-    if args.min_move_ratio is not None:
-        strat["min_move_ratio"] = args.min_move_ratio
-    if args.amount is not None:
-        params["amount"] = args.amount
-    if args.max_entries is not None:
-        params["max_entries_per_window"] = args.max_entries
-
-
 async def main() -> None:
     global _LAST_DRY_RUN
     parser = argparse.ArgumentParser(
@@ -111,44 +86,26 @@ async def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python3.11 run.py --config strategy.yaml --dry
+  python3.11 run.py --preset enhanced --dry
+  python3.11 run.py --config strategy.yaml --amount 1.5 --rounds 24
         """,
     )
-    parser.add_argument(
-        "--config", type=str,
-        help="Path to YAML config file (base config; CLI args override individual fields)"
-    )
+    add_runtime_config_args(parser)
     parser.add_argument(
         "--dry", action="store_true",
         help="Dry-run: log actions but do not place orders"
     )
-    parser.add_argument("--rounds", type=int, help="Number of windows to run (omit for infinite)")
-    # Strategy overrides (all optional — override YAML when provided)
-    parser.add_argument("--theta", type=float, metavar="PCT", help="BTC move threshold %% (e.g. 0.03)")
-    parser.add_argument("--persistence", type=float, metavar="SEC", help="BTC move persistence seconds")
-    parser.add_argument("--max-entry-price", type=float, metavar="PRICE", help="Entry price cap")
-    parser.add_argument("--min-entry-price", type=float, metavar="PRICE", help="Entry price floor (default: cap×0.88)")
-    parser.add_argument("--entry-start", type=float, metavar="SEC", help="Entry band start remaining seconds")
-    parser.add_argument("--entry-end", type=float, metavar="SEC", help="Entry band end remaining seconds")
-    parser.add_argument("--min-move-ratio", type=float, metavar="RATIO", help="Min ratio of current to past BTC move")
-    # Execution overrides
-    parser.add_argument("--amount", type=float, metavar="USD", help="Trade size in USD per window")
-    parser.add_argument("--max-entries", type=int, metavar="N", help="Max entries per window")
     args = parser.parse_args()
 
     # ── Build TradeConfig, Strategy, and Series ─────────────────────────────
+    try:
+        runtime_cfg = build_runtime_config(args)
+    except ValueError as exc:
+        parser.error(str(exc))
 
-    if not args.config:
-        parser.error(
-            "No runtime trading strategies are currently configured. "
-            "Use the analysis scripts instead, or add a new strategy before running run.py."
-        )
-
-    yaml_cfg = load_config(args.config)
-    _apply_cli_overrides(yaml_cfg, args)
-    series = build_series(yaml_cfg)
-    strategy = build_strategy(yaml_cfg, series)
-    trade_config = build_trade_config(yaml_cfg)
+    series = build_series(runtime_cfg)
+    strategy = build_strategy(runtime_cfg, series)
+    trade_config = build_trade_config(runtime_cfg)
 
     dry_run = args.dry
     _LAST_DRY_RUN = dry_run
@@ -159,19 +116,16 @@ Examples:
     # Get display side from strategy for logging
     display_side = "DYNAMIC" if getattr(strategy, "dynamic_side", False) else (strategy.get_side() or "UP")
 
-    log.info("=== %s %s Up/Down Trader Started ===", series.asset.upper(), series.timeframe)
+    rounds_desc = trade_config.rounds if trade_config.rounds is not None else "∞"
+    mode = "DRY" if dry_run else "LIVE"
     log.info(
-        "Strategy: %s | Side: %s | Amount: $%.1f | Exit: hold-to-window-end",
+        "RUN_START: mode=%s strategy=%s side=%s amount=$%.1f rounds=%s exit=window_end",
+        mode,
         type(strategy).__name__,
         display_side.upper(),
         trade_config.amount,
+        rounds_desc,
     )
-    if trade_config.rounds is not None:
-        log.info("Rounds: %d", trade_config.rounds)
-    else:
-        log.info("Rounds: infinite")
-    if dry_run:
-        log.info("[DRY-RUN MODE — no orders will be placed]")
 
     # Print key strategy parameters for verification
     if hasattr(strategy, '_theta_pct'):
@@ -180,12 +134,12 @@ Examples:
         end_at = window_sec - strategy._entry_end_remaining_sec
         msg = (
             "Params: theta=%.3f%% | entry_band=[%ds,%ds] into window | "
-            "price=[%.2f,%.2f] | persistence=%ds | max_entries=%s"
+            "max_entry=%.2f | persistence=%ds | max_entries=%s"
         )
-        log.info(msg,
+        log.debug(msg,
             strategy._theta_pct,
             int(start_at), int(end_at),
-            strategy._min_entry_price, strategy._max_entry_price,
+            strategy._max_entry_price,
             strategy._persistence_sec,
             trade_config.max_entries_per_window,
         )
@@ -208,8 +162,7 @@ Examples:
                 await asyncio.sleep(10)
                 continue
 
-            log.info("Next window: %s", window.short_label)
-            log.info("  Window: %s → %s", window.start_time, window.end_time)
+            log.info("NEXT_WINDOW: %s | %s -> %s", window.short_label, window.start_time, window.end_time)
 
             should_prefetch_next = not (
                 trade_config.rounds is not None and completed + 1 >= trade_config.rounds
@@ -221,13 +174,13 @@ Examples:
             )
             if monitored:
                 completed += 1
-                log.info("Round %d/%s complete", completed, trade_config.rounds if trade_config.rounds else "∞")
+                log.info("ROUND_COMPLETE: %d/%s", completed, trade_config.rounds if trade_config.rounds else "∞")
                 if trade_config.rounds is not None and completed >= trade_config.rounds:
-                    log.info("=== All %d rounds complete, exiting ===", completed)
+                    log.info("RUN_COMPLETE: completed=%d", completed)
                     break
 
             if next_win is not None:
-                log.info("=== Pre-opened window ready, monitoring immediately ===")
+                log.debug("Pre-opened window ready, monitoring immediately")
                 should_prefetch_next = not (
                     trade_config.rounds is not None and completed + 1 >= trade_config.rounds
                 )
@@ -238,13 +191,13 @@ Examples:
                 )
                 if monitored:
                     completed += 1
-                    log.info("Round %d/%s complete", completed, trade_config.rounds if trade_config.rounds else "∞")
+                    log.info("ROUND_COMPLETE: %d/%s", completed, trade_config.rounds if trade_config.rounds else "∞")
                     if trade_config.rounds is not None and completed >= trade_config.rounds:
-                        log.info("=== All %d rounds complete, exiting ===", completed)
+                        log.info("RUN_COMPLETE: completed=%d", completed)
                         break
 
                 while next_win is not None:
-                    log.info("=== Chained window ready: %s ===", next_win.short_label)
+                    log.debug("Chained window ready: %s", next_win.short_label)
                     should_prefetch_next = not (
                         trade_config.rounds is not None and completed + 1 >= trade_config.rounds
                     )
@@ -255,9 +208,9 @@ Examples:
                     )
                     if monitored:
                         completed += 1
-                        log.info("Round %d/%s complete", completed, trade_config.rounds if trade_config.rounds else "∞")
+                        log.info("ROUND_COMPLETE: %d/%s", completed, trade_config.rounds if trade_config.rounds else "∞")
                         if trade_config.rounds is not None and completed >= trade_config.rounds:
-                            log.info("=== All %d rounds complete, exiting ===", completed)
+                            log.info("RUN_COMPLETE: completed=%d", completed)
                             break
                     if trade_config.rounds is not None and completed >= trade_config.rounds:
                         break
@@ -269,11 +222,11 @@ Examples:
             if next_win is None and monitored and remaining_to_boundary > 0:
                 await asyncio.sleep(remaining_to_boundary)
 
-            log.info("=== Window pair complete, restarting search ===")
+            log.debug("Window pair complete, restarting search")
     finally:
         if ws:
             await ws.close()
-            log.info("WebSocket closed on exit")
+            log.debug("WebSocket closed on exit")
         if hasattr(strategy, 'stop'):
             await strategy.stop()
 

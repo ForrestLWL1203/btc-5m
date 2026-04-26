@@ -40,26 +40,26 @@ async def _noop_price_callback(update: PriceUpdate) -> None:
     return None
 
 
-def _entry_price_band(
+def _entry_price_cap(
     strategy: Optional[Strategy],
     state: Optional[MonitorState] = None,
-) -> tuple[Optional[float], Optional[float]]:
-    """Return configured min/max entry prices when exposed by the strategy."""
+) -> Optional[float]:
+    """Return the active max entry cap when exposed by the strategy."""
     if strategy is None:
-        return None, None
-    min_price = getattr(strategy, "min_entry_price", getattr(strategy, "_min_entry_price", None))
+        return None
     max_price = None
     if state is not None:
         max_price = state.target_max_entry_price
     if max_price is None:
         max_price = getattr(strategy, "max_entry_price", getattr(strategy, "_max_entry_price", None))
-    return min_price, max_price
+    return max_price
 
 
 def _buffer_price_hint(
     token_id: str,
     best_ask: Optional[float],
     buffer_ticks: Optional[float] = None,
+    max_price: Optional[float] = None,
 ) -> Optional[float]:
     """Add a small upward tick buffer to the BUY hint."""
     if best_ask is None:
@@ -69,7 +69,28 @@ def _buffer_price_hint(
         tick = 0.001
     ticks = config.PRICE_HINT_BUFFER_TICKS if buffer_ticks is None else buffer_ticks
     buffered = best_ask + tick * ticks
+    if max_price is not None:
+        buffered = min(buffered, max_price)
     return max(0.0, min(1.0, math.ceil(buffered / tick) * tick))
+
+
+def _initial_price_hint(
+    token_id: str,
+    best_ask: Optional[float],
+    strategy: Optional[Strategy],
+    state: Optional[MonitorState],
+) -> Optional[float]:
+    """Return first-attempt BUY hint using the dynamic strength cap directly."""
+    if best_ask is None:
+        return None
+    max_entry_price = _entry_price_cap(strategy, state)
+    if max_entry_price is not None and best_ask <= max_entry_price:
+        return max(0.0, min(1.0, max_entry_price))
+    return _buffer_price_hint(
+        token_id,
+        best_ask,
+        max_price=max_entry_price,
+    )
 
 
 def _price_hint_refresher(
@@ -81,7 +102,7 @@ def _price_hint_refresher(
     """Return a callback that refreshes retry BUY hints from the latest WS ask."""
 
     def refresh() -> Optional[float]:
-        min_entry_price, max_entry_price = _entry_price_band(strategy, state)
+        max_entry_price = _entry_price_cap(strategy, state)
         latest_ask = ws.get_latest_best_ask(
             token_id,
             max_age_sec=config.FAK_RETRY_MAX_BEST_ASK_AGE_SEC,
@@ -94,24 +115,66 @@ def _price_hint_refresher(
                 "reason": "target best_ask unavailable or stale",
             })
             return None
-        if (
-            (min_entry_price is not None and latest_ask < min_entry_price)
-            or (max_entry_price is not None and latest_ask > max_entry_price)
-        ):
+        if max_entry_price is not None and latest_ask > max_entry_price:
             log_event(log, logging.INFO, SIGNAL, {
                 "action": "BUY_RETRY_ABORT",
                 "price": latest_ask,
                 "best_ask_age_sec": round(ask_age, 3) if ask_age is not None else None,
-                "reason": "target best_ask outside entry band",
+                "reason": "target best_ask above cap",
             })
             return None
         return _buffer_price_hint(
             token_id,
             latest_ask,
             buffer_ticks=config.FAK_RETRY_PRICE_HINT_BUFFER_TICKS,
+            max_price=max_entry_price,
         )
 
     return refresh
+
+
+def _normal_full_cap_guard_reason(
+    trade_config: TradeConfig,
+    state: MonitorState,
+    best_ask: Optional[float],
+    max_entry_price: Optional[float],
+) -> Optional[str]:
+    return trade_config.normal_full_cap_guard_reason(
+        confidence=state.target_signal_confidence,
+        best_ask=best_ask,
+        max_entry_price=max_entry_price,
+        signal_strength=state.target_signal_strength,
+        remaining_sec=state.target_remaining_sec,
+    )
+
+
+def _log_entry_guard_skip(
+    window: MarketWindow,
+    state: MonitorState,
+    side: str,
+    best_ask: float,
+    max_entry_price: Optional[float],
+    reason: str,
+) -> None:
+    log_event(log, logging.INFO, SIGNAL, {
+        "action": "ENTRY_GUARD_SKIP",
+        "reason": reason,
+        "side": side.upper(),
+        "window": window.short_label,
+        "price": best_ask,
+        "max_entry_price": max_entry_price,
+        "confidence": state.target_signal_confidence,
+        "signal_strength": (
+            round(state.target_signal_strength, 3)
+            if state.target_signal_strength is not None
+            else None
+        ),
+        "remaining_sec": (
+            round(state.target_remaining_sec)
+            if state.target_remaining_sec is not None
+            else None
+        ),
+    })
 
 
 def _entry_ask_changed(state: MonitorState, side: str, best_ask: Optional[float]) -> bool:
@@ -135,15 +198,13 @@ def _check_and_reset_daily_state(state: MonitorState) -> None:
     """Reset daily risk management stats at UTC+8 midnight."""
     current_date = _get_utc8_date()
     if state.last_reset_date != current_date:
-        log_event(log, logging.INFO, TRADE, {
-            "action": "DAILY_RESET",
-            "date": current_date,
-            "previous_date": state.last_reset_date,
-        })
+        log.debug("DAILY_RESET: %s -> %s", state.last_reset_date, current_date)
         state.last_reset_date = current_date
         state.daily_wins = 0
         state.daily_losses = 0
+        state.daily_realized_pnl = 0.0
         state.consecutive_losses = 0
+        state.consecutive_loss_amount = 0.0
         state.windows_to_skip = 0
 
 
@@ -160,14 +221,22 @@ def _should_skip_window(state: MonitorState) -> bool:
     return False
 
 
-def _process_trade_result(state: MonitorState, direction_correct: bool) -> None:
+def _process_trade_result(
+    state: MonitorState,
+    direction_correct: bool,
+    realized_pnl: float,
+    trade_config: Optional[TradeConfig] = None,
+) -> None:
     """Update daily statistics and check risk management triggers."""
+    state.daily_realized_pnl += realized_pnl
     if direction_correct:
         state.daily_wins += 1
         state.consecutive_losses = 0
+        state.consecutive_loss_amount = 0.0
     else:
         state.daily_losses += 1
         state.consecutive_losses += 1
+        state.consecutive_loss_amount += abs(realized_pnl)
 
         # Trigger 1: 5 consecutive losses
         if state.consecutive_losses >= 5:
@@ -179,6 +248,23 @@ def _process_trade_result(state: MonitorState, direction_correct: bool) -> None:
                 "reason": "System anomaly detected",
             })
             state.consecutive_losses = 0  # Reset after triggering pause
+
+        if (
+            trade_config is not None
+            and trade_config.consecutive_loss_amount_limit is not None
+            and state.consecutive_loss_amount >= trade_config.consecutive_loss_amount_limit
+        ):
+            state.windows_to_skip = max(
+                state.windows_to_skip,
+                trade_config.consecutive_loss_pause_windows,
+            )
+            log_event(log, logging.WARNING, TRADE, {
+                "action": "RISK_ALERT_CONSECUTIVE_LOSS_AMOUNT",
+                "consecutive_loss_amount": round(state.consecutive_loss_amount, 4),
+                "limit": trade_config.consecutive_loss_amount_limit,
+                "window_pause": trade_config.consecutive_loss_pause_windows,
+            })
+            state.consecutive_loss_amount = 0.0
 
     # Trigger 2: Check win rate after minimum trades
     total_trades = state.daily_wins + state.daily_losses
@@ -197,6 +283,22 @@ def _process_trade_result(state: MonitorState, direction_correct: bool) -> None:
                     "window_pause": 5,
                     "reason": "Strategy failure - win rate < 50%",
                 })
+
+    if (
+        trade_config is not None
+        and trade_config.daily_loss_amount_limit is not None
+        and state.daily_realized_pnl <= -trade_config.daily_loss_amount_limit
+    ):
+        state.windows_to_skip = max(
+            state.windows_to_skip,
+            trade_config.daily_loss_pause_windows,
+        )
+        log_event(log, logging.CRITICAL, TRADE, {
+            "action": "RISK_ALERT_DAILY_LOSS_AMOUNT",
+            "daily_realized_pnl": round(state.daily_realized_pnl, 4),
+            "limit": trade_config.daily_loss_amount_limit,
+            "window_pause": trade_config.daily_loss_pause_windows,
+        })
 
 
 def _strategy_attach_skip_threshold(
@@ -272,20 +374,11 @@ async def _monitor_single_window(
     # Check daily reset at start of each window
     _check_and_reset_daily_state(state)
 
-    buy_token_id, _ = _side_token(window, side)
     fetch_task = None
-    window_end_epoch = None
 
     while True:
         now = int(time.time())
         if now >= window.end_epoch:
-            if window_end_epoch is None:
-                window_end_epoch = now
-            log_event(log, logging.INFO, WINDOW, {
-                "action": "EXPIRED",
-                "window": window.short_label,
-                "holding": state.bought,
-            })
             if state.bought and not state.exit_triggered:
                 # Post-window-end phase: record trade result and await auto-redeem
                 # Polymarket has auto-redeem enabled, so position will be automatically
@@ -293,21 +386,20 @@ async def _monitor_single_window(
                 token_price = state.latest_midpoint
                 direction_correct = token_price is not None and token_price > 0.5
 
-                # Log position at window end
-                log_event(log, logging.INFO, TRADE, {
-                    "action": "WINDOW_END_POSITION",
-                    "window": window.short_label,
-                    "token_price": token_price,
-                    "direction_correct": direction_correct,
-                    "shares": state.holding_size,
-                    "seconds_since_window_end": now - window.end_epoch,
-                    "daily_record": f"{state.daily_wins}W {state.daily_losses}L",
-                    "dry_run": dry_run,
-                    "note": "awaiting auto-redeem (no manual sell)",
-                })
+                entry_amount = state.entry_amount or state.entry_price * state.holding_size
+                realized_pnl = (
+                    state.holding_size * token_price - entry_amount
+                    if token_price is not None
+                    else 0.0
+                )
 
                 # Process trade result for risk management
-                _process_trade_result(state, direction_correct)
+                _process_trade_result(
+                    state,
+                    direction_correct,
+                    realized_pnl,
+                    trade_config,
+                )
 
                 # Record trade resolution
                 log_event(log, logging.INFO, TRADE, {
@@ -316,6 +408,9 @@ async def _monitor_single_window(
                     "result": "WIN" if direction_correct else "LOSS",
                     "shares": state.holding_size,
                     "price": token_price,
+                    "amount": entry_amount,
+                    "realized_pnl": round(realized_pnl, 4),
+                    "daily_realized_pnl": round(state.daily_realized_pnl, 4),
                     "note": "Position held to window end, auto-redeem in progress",
                 })
 
@@ -331,14 +426,9 @@ async def _monitor_single_window(
 
         if state.exit_triggered:
             remaining = window.end_epoch - now
-            log_event(log, logging.INFO, WINDOW, {
-                "action": "EXIT_WAIT",
-                "window": window.short_label,
-                "sleep_seconds": remaining,
-            })
             # Pre-fetch next window while we sleep unless this is the caller's
             # final planned round.
-            if prefetch_next_window:
+            if prefetch_next_window and fetch_task is None:
                 fetch_task = asyncio.create_task(
                     asyncio.to_thread(_find_next_window_after, window.end_epoch, series)
                 )
@@ -347,7 +437,7 @@ async def _monitor_single_window(
                 _log_window_summary(state, window, dry_run)
                 return None
             try:
-                next_win = _sanitize_next_window(window, fetch_task.result())
+                next_win = _sanitize_next_window(window, await fetch_task)
             except Exception as e:
                 log.debug("Pre-fetch next window failed: %s", e)
                 next_win = _sanitize_next_window(window, find_next_window())
@@ -359,7 +449,7 @@ async def _monitor_single_window(
 
     if fetch_task is not None:
         try:
-            next_win = _sanitize_next_window(window, fetch_task.result())
+            next_win = _sanitize_next_window(window, await fetch_task)
         except Exception as e:
             log.debug("Pre-fetch next window after expiry failed: %s", e)
             next_win = None
@@ -422,7 +512,7 @@ async def monitor_window(
         dry_run: If True, log actions but don't place orders.
         preopened: If True, skip the stale check.
         existing_ws: Reuse this WS connection instead of creating a new one.
-        trade_config: Common trading parameters (TP/SL, amount, etc).
+        trade_config: Common execution parameters (amount, per-window cap, rounds).
         strategy: Strategy handling direction + buy decision.
         series: Market series definition (uses config defaults if None).
         state: Shared MonitorState for risk management tracking across windows.
@@ -445,12 +535,6 @@ async def monitor_window(
         })
         next_win = _find_and_preopen_next_window(window, series)
         return next_win, existing_ws, False
-    log_event(log, logging.INFO, SIGNAL, {
-        "action": "SIDE_RESOLVED",
-        "side": side.upper(),
-        "window": window.short_label,
-    })
-
     # Use shared state if provided, otherwise create new (which won't persist)
     if state is None:
         state = MonitorState()
@@ -459,10 +543,24 @@ async def monitor_window(
     # Reset per-window state for new window
     # (risk management state like daily_wins persists across windows)
     state.bought = False
+    state.holding_size = 0.0
+    state.entry_price = 0.0
     state.exit_triggered = False
     state.buy_blocked_window_cap = False
     state.entry_count = 0
     state.entry_timestamps = []
+    state.latest_midpoint = None
+    state.target_side = None
+    state.target_entry_price = None
+    state.target_max_entry_price = None
+    state.target_signal_confidence = None
+    state.target_signal_strength = None
+    state.target_past_signal_strength = None
+    state.target_remaining_sec = None
+    state.entry_amount = 0.0
+    state.last_entry_check_side = None
+    state.last_entry_check_best_ask = None
+    state.started = False
 
     # Check daily reset and risk management before monitoring this window
     _check_and_reset_daily_state(state)
@@ -501,10 +599,6 @@ async def monitor_window(
     if existing_ws is not None:
         # Reuse existing WS — switch subscription to new window's tokens
         await ws.switch_tokens(token_ids)
-        log_event(log, logging.INFO, WINDOW, {
-            "action": "WS_SWITCHED",
-            "window": window.short_label,
-        })
     else:
         # First window — create new WS connection
         await ws.connect(token_ids)
@@ -531,14 +625,6 @@ async def monitor_window(
     if hasattr(strategy, 'preload_open_btc'):
         await strategy.preload_open_btc(window.start_epoch)
 
-    log_event(log, logging.INFO, WINDOW, {
-        "action": "STARTED",
-        "window": window.short_label,
-        "side": side.upper(),
-        "buy_token": buy_token_id[:20],
-        "price_token": price_token_id[:20],
-    })
-
     # Price should already be cached from WS pre-connection
     # Use UP token price as the reference entry signal input.
     opening_token = window.up_token
@@ -547,19 +633,7 @@ async def monitor_window(
         opening_price = await get_midpoint_async(opening_token)
 
     if opening_price is not None:
-        if state.bought:
-            log_event(log, logging.INFO, SIGNAL, {
-                "action": "OPENING_PRICE",
-                "price": opening_price,
-                "window": window.short_label,
-                "note": "already bought via WS",
-            })
-        else:
-            log_event(log, logging.INFO, SIGNAL, {
-                "action": "OPENING_PRICE",
-                "price": opening_price,
-                "window": window.short_label,
-            })
+        if not state.bought:
             if strategy.should_buy(opening_price, state):
                 if state.target_side is not None:
                     buy_token_id, price_token_id = _side_token(window, state.target_side)
@@ -568,34 +642,47 @@ async def monitor_window(
                     max_age_sec=config.FAK_RETRY_MAX_BEST_ASK_AGE_SEC,
                 )
                 opening_best_ask_age = ws.get_latest_best_ask_age(buy_token_id)
-                min_entry_price, max_entry_price = _entry_price_band(strategy, state)
+                max_entry_price = _entry_price_cap(strategy, state)
                 if opening_best_ask is None:
                     state.target_entry_price = None
-                elif not _entry_ask_changed(state, state.target_side or side, opening_best_ask):
-                    state.target_entry_price = None
-                elif (
-                    (min_entry_price is not None and opening_best_ask < min_entry_price)
-                    or (max_entry_price is not None and opening_best_ask > max_entry_price)
-                ):
+                elif max_entry_price is not None and opening_best_ask > max_entry_price:
                     state.target_entry_price = None
                 else:
-                    buffered_hint = _buffer_price_hint(buy_token_id, opening_best_ask)
-                    state.target_entry_price = opening_best_ask
-                    await _handle_opening_price(
-                        window, state, buy_token_id, opening_price, dry_run, trade_config, strategy, state.target_side or side,
-                        best_ask=buffered_hint,
-                        best_ask_age_sec=opening_best_ask_age,
-                        price_hint_refresher=_price_hint_refresher(ws, buy_token_id, strategy, state),
+                    guard_reason = _normal_full_cap_guard_reason(
+                        trade_config,
+                        state,
+                        opening_best_ask,
+                        max_entry_price,
                     )
-                    # Re-resolve token if strategy set target_side during opening buy
-                    if state.target_side is not None:
-                        buy_token_id, price_token_id = _side_token(window, state.target_side)
-    else:
-        log_event(log, logging.WARNING, SIGNAL, {
-            "action": "OPENING_PRICE_MISSING",
-            "window": window.short_label,
-        })
-
+                    if guard_reason is not None:
+                        state.target_entry_price = None
+                        _log_entry_guard_skip(
+                            window,
+                            state,
+                            state.target_side or side,
+                            opening_best_ask,
+                            max_entry_price,
+                            guard_reason,
+                        )
+                    elif not _entry_ask_changed(state, state.target_side or side, opening_best_ask):
+                        state.target_entry_price = None
+                    else:
+                        buffered_hint = _initial_price_hint(
+                            buy_token_id,
+                            opening_best_ask,
+                            strategy,
+                            state,
+                        )
+                        state.target_entry_price = opening_best_ask
+                        await _handle_opening_price(
+                            window, state, buy_token_id, opening_price, dry_run, trade_config, strategy, state.target_side or side,
+                            best_ask=buffered_hint,
+                            best_ask_age_sec=opening_best_ask_age,
+                            price_hint_refresher=_price_hint_refresher(ws, buy_token_id, strategy, state),
+                        )
+                        # Re-resolve token if strategy set target_side during opening buy
+                        if state.target_side is not None:
+                            buy_token_id, price_token_id = _side_token(window, state.target_side)
     # Monitor until window expires or exit triggered (ws is NOT closed inside)
     next_win = await _monitor_single_window(
         window, state, ws, dry_run, trade_config, strategy, series, side,
@@ -694,20 +781,34 @@ async def _on_price_update(
                     max_age_sec=config.FAK_RETRY_MAX_BEST_ASK_AGE_SEC,
                 )
                 best_ask_age = ws.get_latest_best_ask_age(buy_token_id)
-                min_entry_price, max_entry_price = _entry_price_band(strategy, state)
+                max_entry_price = _entry_price_cap(strategy, state)
                 if best_ask is None and update.token_id == buy_token_id:
                     best_ask = update.best_ask
                     best_ask_age = 0.0 if update.best_ask is not None else None
                 if best_ask is None:
                     state.target_entry_price = None
                     return
-                if not _entry_ask_changed(state, effective_side, best_ask):
+                if max_entry_price is not None and best_ask > max_entry_price:
                     state.target_entry_price = None
                     return
-                if (
-                    (min_entry_price is not None and best_ask < min_entry_price)
-                    or (max_entry_price is not None and best_ask > max_entry_price)
-                ):
+                guard_reason = _normal_full_cap_guard_reason(
+                    trade_config,
+                    state,
+                    best_ask,
+                    max_entry_price,
+                )
+                if guard_reason is not None:
+                    state.target_entry_price = None
+                    _log_entry_guard_skip(
+                        window,
+                        state,
+                        effective_side,
+                        best_ask,
+                        max_entry_price,
+                        guard_reason,
+                    )
+                    return
+                if not _entry_ask_changed(state, effective_side, best_ask):
                     state.target_entry_price = None
                     return
                 state.target_entry_price = best_ask
@@ -719,9 +820,32 @@ async def _on_price_update(
                     "window": window.short_label,
                     "confidence": state.target_signal_confidence,
                     "max_entry_price": max_entry_price,
+                    "signal_strength": (
+                        round(state.target_signal_strength, 3)
+                        if state.target_signal_strength is not None
+                        else None
+                    ),
+                    "past_signal_strength": (
+                        round(state.target_past_signal_strength, 3)
+                        if state.target_past_signal_strength is not None
+                        else None
+                    ),
+                    "remaining_sec": (
+                        round(state.target_remaining_sec)
+                        if state.target_remaining_sec is not None
+                        else None
+                    ),
+                    "amount": trade_config.amount_for_signal_strength(
+                        state.target_signal_strength
+                    ),
                     "best_ask_age_ms": round(best_ask_age * 1000) if best_ask_age is not None else None,
                 })
-                buffered_hint = _buffer_price_hint(buy_token_id, best_ask)
+                buffered_hint = _initial_price_hint(
+                    buy_token_id,
+                    best_ask,
+                    strategy,
+                    state,
+                )
                 await _handle_opening_price(
                     window, state, buy_token_id, price, dry_run, trade_config, strategy, effective_side,
                     best_ask=buffered_hint,
@@ -762,6 +886,8 @@ async def _handle_opening_price(
     if state.target_side is not None:
         buy_token_id, _ = _side_token(window, state.target_side)
     buy_price = state.target_entry_price if state.target_entry_price is not None else price
+    trade_amount = trade_config.amount_for_signal_strength(state.target_signal_strength)
+    state.entry_amount = trade_amount
     if not dry_run:
         state.bought = True
         t_signal = time.time()
@@ -773,11 +899,26 @@ async def _handle_opening_price(
             "signal_price": price,
             "target_price": buy_price,
             "price_hint": best_ask,
+            "amount": trade_amount,
+            "signal_strength": (
+                round(state.target_signal_strength, 3)
+                if state.target_signal_strength is not None
+                else None
+            ),
+            "past_signal_strength": (
+                round(state.target_past_signal_strength, 3)
+                if state.target_past_signal_strength is not None
+                else None
+            ),
+            "remaining_sec": (
+                round(state.target_remaining_sec)
+                if state.target_remaining_sec is not None
+                else None
+            ),
             "best_ask_age_ms": round(best_ask_age_sec * 1000) if best_ask_age_sec is not None else None,
         })
         result = await buy_token(
-            buy_token_id, trade_config.amount, window.short_label,
-            window_end_epoch=window.end_epoch,
+            buy_token_id, trade_amount,
             price_hint=best_ask,
             price_hint_refresher=price_hint_refresher,
         )
@@ -788,15 +929,15 @@ async def _handle_opening_price(
             if result.filled_size > 0 and result.avg_price > 0:
                 state.holding_size = result.filled_size
             elif result.avg_price > 0:
-                state.holding_size = trade_config.amount / result.avg_price
+                state.holding_size = trade_amount / result.avg_price
             else:
-                state.holding_size = trade_config.amount / buy_price if buy_price > 0 else trade_config.amount
+                state.holding_size = trade_amount / buy_price if buy_price > 0 else trade_amount
             state.entry_price = buy_price
             log_event(log, logging.INFO, TRADE, {
                 "action": "BUY_FILLED",
                 "side": side.upper(),
                 "price": buy_price,
-                "amount": trade_config.amount,
+                "amount": trade_amount,
                 "shares": state.holding_size,
                 "window": window.short_label,
                 "entry_latency_ms": entry_latency_ms,
@@ -811,15 +952,23 @@ async def _handle_opening_price(
                 "action": "BUY_FAILED",
                 "side": side.upper(),
                 "price": buy_price,
+                "amount": trade_amount,
                 "message": result.message,
                 "window": window.short_label,
                 "note": "window locked to prevent duplicate entries",
             })
+            if "INSUFFICIENT_FUNDS" in result.message:
+                log_event(log, logging.CRITICAL, TRADE, {
+                    "action": "STOP_INSUFFICIENT_FUNDS",
+                    "window": window.short_label,
+                    "message": result.message,
+                })
+                raise RuntimeError(result.message)
     else:
         state.bought = True
         state.entry_count += 1
         state.entry_timestamps.append(time.time())
-        state.holding_size = trade_config.amount / buy_price if buy_price > 0 else trade_config.amount
+        state.holding_size = trade_amount / buy_price if buy_price > 0 else trade_amount
         state.entry_price = buy_price
         log_event(log, logging.INFO, TRADE, {
             "action": "BUY_PREP",
@@ -829,14 +978,30 @@ async def _handle_opening_price(
             "signal_price": price,
             "target_price": buy_price,
             "price_hint": best_ask,
+            "amount": trade_amount,
+            "signal_strength": (
+                round(state.target_signal_strength, 3)
+                if state.target_signal_strength is not None
+                else None
+            ),
+            "past_signal_strength": (
+                round(state.target_past_signal_strength, 3)
+                if state.target_past_signal_strength is not None
+                else None
+            ),
+            "remaining_sec": (
+                round(state.target_remaining_sec)
+                if state.target_remaining_sec is not None
+                else None
+            ),
             "best_ask_age_ms": round(best_ask_age_sec * 1000) if best_ask_age_sec is not None else None,
             "dry_run": True,
         })
         log_event(log, logging.INFO, TRADE, {
-            "action": "BUY",
+            "action": "BUY_FILLED",
             "side": side.upper(),
             "price": buy_price,
-            "amount": trade_config.amount,
+            "amount": trade_amount,
             "shares": state.holding_size,
             "window": window.short_label,
             "dry_run": True,

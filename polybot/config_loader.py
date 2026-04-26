@@ -53,11 +53,7 @@ STRATEGY_REGISTRY: dict[str, type] = {
 
 
 def build_strategy(cfg: dict, series: Optional[MarketSeries] = None):
-    """Build Strategy from config dict.
-
-    For paired_window strategy:
-    - If min_entry_price is not specified, automatically set it to max_entry_price * 0.88
-    """
+    """Build Strategy from config dict."""
     strat_cfg = cfg.get("strategy", {})
     strat_type = strat_cfg.get("type")
     if strat_type == "paired_window":
@@ -65,21 +61,20 @@ def build_strategy(cfg: dict, series: Optional[MarketSeries] = None):
             raise ValueError("PairedWindowStrategy requires a market series")
 
         max_entry_price = strat_cfg.get("max_entry_price", 0.70)
-        if "min_entry_price" in strat_cfg:
-            min_entry_price = strat_cfg["min_entry_price"]
-        else:
-            min_entry_price = round(max_entry_price * 0.88, 2)
 
         return PairedWindowStrategy(
             series=series,
             theta_pct=strat_cfg.get("theta_pct", 0.02),
             entry_start_remaining_sec=strat_cfg.get("entry_start_remaining_sec", 270.0),
+            early_entry_start_remaining_sec=strat_cfg.get("early_entry_start_remaining_sec"),
+            early_entry_strength_threshold=strat_cfg.get("early_entry_strength_threshold"),
+            early_entry_past_strength_threshold=strat_cfg.get("early_entry_past_strength_threshold"),
             entry_end_remaining_sec=strat_cfg.get("entry_end_remaining_sec", 120.0),
             persistence_sec=strat_cfg.get("persistence_sec", 10.0),
-            min_entry_price=min_entry_price,
             max_entry_price=max_entry_price,
             strong_signal_threshold=strat_cfg.get("strong_signal_threshold"),
             strong_signal_max_entry_price=strat_cfg.get("strong_signal_max_entry_price"),
+            strength_caps=strat_cfg.get("strength_caps"),
             min_move_ratio=strat_cfg.get("min_move_ratio", 0.7),
             open_price_max_wait_sec=strat_cfg.get("open_price_max_wait_sec", 30.0),
         )
@@ -98,6 +93,7 @@ def build_strategy(cfg: dict, series: Optional[MarketSeries] = None):
 def build_trade_config(cfg: dict) -> TradeConfig:
     """Build runtime execution config for the active strategy."""
     params = cfg.get("params", {})
+    risk = cfg.get("risk", {})
 
     rounds_val = cfg.get("rounds")
     if rounds_val is not None and int(rounds_val) <= 0:
@@ -107,4 +103,46 @@ def build_trade_config(cfg: dict) -> TradeConfig:
         amount=params.get("amount", 5.0),
         max_entries_per_window=params.get("max_entries_per_window"),
         rounds=int(rounds_val) if rounds_val is not None else None,
+        amount_tiers=_build_amount_tiers(params.get("amount_tiers")),
+        **_build_normal_full_cap_guard(params.get("normal_full_cap_guard")),
+        consecutive_loss_amount_limit=risk.get("consecutive_loss_amount"),
+        daily_loss_amount_limit=risk.get("daily_loss_amount"),
+        consecutive_loss_pause_windows=int(risk.get("consecutive_loss_pause_windows", 2)),
+        daily_loss_pause_windows=int(risk.get("daily_loss_pause_windows", 5)),
     )
+
+def _build_amount_tiers(raw: Optional[list[dict]]) -> list[tuple[float, float]]:
+    """Build sorted signal-strength amount tiers from YAML."""
+    tiers: list[tuple[float, float]] = []
+    if not raw:
+        return tiers
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        threshold = item.get("threshold")
+        amount = item.get("amount")
+        if threshold is None or amount is None:
+            continue
+        tiers.append((float(threshold), float(amount)))
+    tiers.sort(key=lambda pair: pair[0])
+    return tiers
+
+
+def _build_normal_full_cap_guard(raw: Optional[dict]) -> dict:
+    """Build optional full-cap guard for normal-confidence entries."""
+    if not raw:
+        return {}
+    return {
+        "normal_full_cap_guard_enabled": bool(raw.get("enabled", False)),
+        "normal_full_cap_min_signal_strength": (
+            float(raw["min_signal_strength"])
+            if raw.get("min_signal_strength") is not None
+            else None
+        ),
+        "normal_full_cap_min_remaining_sec": (
+            float(raw["min_remaining_sec"])
+            if raw.get("min_remaining_sec") is not None
+            else None
+        ),
+        "normal_full_cap_price_tolerance": float(raw.get("price_tolerance", 1e-9)),
+    }

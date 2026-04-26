@@ -182,13 +182,6 @@ def find_next_window(series: Optional[MarketSeries] = None) -> Optional[MarketWi
     slug_step = series.slug_step if series else config.SLUG_STEP
     current_start_epoch = (now_epoch // slug_step) * slug_step
 
-    log.info(
-        "Current time: %s UTC (epoch %d), window start: %d",
-        now.strftime("%H:%M:%S"),
-        now_epoch,
-        current_start_epoch,
-    )
-
     window = _scan_forward(current_start_epoch, series)
     if window is None:
         series_info = series.series_key if series else "BTC 5-min"

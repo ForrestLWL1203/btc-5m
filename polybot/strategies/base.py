@@ -1,7 +1,7 @@
 """Strategy protocol — abstract interface for buy + direction decisions.
 
 A Strategy encapsulates both "which side to buy" and "when to buy" logic.
-Common trading parameters (amount, TP/SL, re-entry, rounds) live in TradeConfig.
+Common execution parameters (amount, per-window cap, rounds) live in TradeConfig.
 
 To add a new strategy:
   1. Create polybot/strategies/your_strategy.py
