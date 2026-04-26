@@ -397,6 +397,10 @@ bash tools/vpsctl.sh run --vps-profile sweden --preset enhanced --rounds 12
 bash tools/vpsctl.sh fetch --vps-profile sweden --run-id latest
 ```
 
+`run` now returns an immediate startup health check from the VPS, including
+`RUN_ID`, `PID`, `STATUS`, and the initial `stdout` tail, so obvious startup
+failures are visible immediately instead of only after a later log fetch.
+
 VPS profile format:
 
 - location by name: `~/.polybot/vps/<name>.env`

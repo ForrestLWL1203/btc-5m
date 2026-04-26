@@ -73,4 +73,26 @@ echo "PID=${RUN_PID}" >> "${RUN_DIR}/meta.env"
 
 ln -sfn "${RUN_DIR}" "${RUNS_DIR}/latest"
 
-printf 'RUN_ID=%s\nRUN_DIR=%s\nPID=%s\nGIT_HEAD=%s\n' "${RUN_ID}" "${RUN_DIR}" "${RUN_PID}" "${GIT_HEAD}"
+sleep 3
+
+STATUS="running"
+EXIT_CODE_VALUE=""
+if [ -f "${RUN_DIR}/exit_code" ]; then
+  STATUS="failed"
+  EXIT_CODE_VALUE="$(cat "${RUN_DIR}/exit_code" 2>/dev/null || true)"
+elif ! kill -0 "${RUN_PID}" 2>/dev/null; then
+  STATUS="exited"
+fi
+
+printf 'RUN_ID=%s\nRUN_DIR=%s\nPID=%s\nGIT_HEAD=%s\nSTATUS=%s\n' \
+  "${RUN_ID}" "${RUN_DIR}" "${RUN_PID}" "${GIT_HEAD}" "${STATUS}"
+
+if [ -n "${EXIT_CODE_VALUE}" ]; then
+  printf 'EXIT_CODE=%s\n' "${EXIT_CODE_VALUE}"
+fi
+
+if [ -f "${RUN_DIR}/stdout.log" ]; then
+  echo "STDOUT_TAIL_BEGIN"
+  tail -n 20 "${RUN_DIR}/stdout.log" || true
+  echo "STDOUT_TAIL_END"
+fi
