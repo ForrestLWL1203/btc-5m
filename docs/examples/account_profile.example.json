@@ -1,6 +1,4 @@
 {
   "private_key": "0xYOUR_PRIVATE_KEY",
-  "chain_id": 137,
-  "signature_type": "proxy",
   "proxy_address": "0xYOUR_PROXY_ADDRESS"
 }

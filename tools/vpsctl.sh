@@ -201,6 +201,7 @@ EOF
 }
 
 parse_common_args() {
+  REMAINING_ARGS=()
   while [ $# -gt 0 ]; do
     case "$1" in
       --vps-profile)
@@ -232,7 +233,7 @@ parse_common_args() {
         shift
         ;;
       *)
-        echo "$@"
+        REMAINING_ARGS+=("$@")
         return 0
         ;;
     esac
@@ -246,8 +247,8 @@ subcommand="${1:-}"
 }
 shift
 
-rest="$(parse_common_args "$@")"
-set -- $rest
+parse_common_args "$@"
+set -- "${REMAINING_ARGS[@]}"
 
 load_vps_profile
 [ -n "$HOST" ] || die "--host is required"

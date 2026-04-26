@@ -325,6 +325,12 @@ Profile support:
 - account profile: `~/.polybot/accounts/<name>.json`
 - example:
   - `bash tools/vpsctl.sh bootstrap --vps-profile sweden --account-profile alice`
+- account profile minimum:
+  - `private_key`
+  - `proxy_address`
+- optional defaults:
+  - `chain_id=137`
+  - `signature_type=proxy`
 
 Run tests:
 

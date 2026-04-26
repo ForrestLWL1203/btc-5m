@@ -410,22 +410,30 @@ Account profile format:
 - or pass a direct file path to `--account-profile`
 - JSON file with the same structure as Polymarket CLI config
 
-Required / supported keys:
+Minimum required keys:
 
 - `private_key`
+- `proxy_address`
+
+Recommended interpretation:
+
+- `private_key`: the exported Polymarket signer private key
+- `proxy_address`: the wallet address shown in the Polymarket web UI
+
+Optional keys with defaults:
+
 - `chain_id`
+  - default: `137`
 - `signature_type`
-- usually one of:
-  - `proxy_address`
-  - `funder`
+  - default: `proxy`
+- `funder`
+  - optional fallback alias for `proxy_address`
 
 Example `~/.polybot/accounts/alice.json`:
 
 ```json
 {
   "private_key": "0xYOUR_PRIVATE_KEY",
-  "chain_id": 137,
-  "signature_type": "proxy",
   "proxy_address": "0xYOUR_PROXY_ADDRESS"
 }
 ```
@@ -437,6 +445,10 @@ Notes:
 
 - `bootstrap` uploads the chosen account profile to the VPS as the active
   Polymarket config.
+- In normal proxy-wallet usage, users usually only need to provide their
+  `private_key` and the proxy wallet address they see on Polymarket.
+- If `chain_id` is omitted, runtime defaults to `137`.
+- If `signature_type` is omitted, runtime defaults to `proxy`.
 - If `--account-profile` is omitted, `vpsctl.sh` falls back to the local
   `~/.config/polymarket/config.json`.
 - Do not store other users' account profiles inside the repo.
