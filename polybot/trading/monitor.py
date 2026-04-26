@@ -94,86 +94,6 @@ def _initial_price_hint(
     )
 
 
-def _depth_price_hint(
-    ws: PriceStream,
-    token_id: str,
-    amount: float,
-    max_depth_price: Optional[float] = None,
-) -> Optional[float]:
-    """Return a fresh book price that can cover the requested BUY notional."""
-    depth = ws.get_ask_price_for_notional(
-        token_id,
-        amount,
-        max_age_sec=config.FAK_RETRY_MAX_BEST_ASK_AGE_SEC,
-    )
-    ask_age = ws.get_latest_best_ask_age(token_id, level=1)
-    if depth is None:
-        log_event(log, logging.INFO, SIGNAL, {
-            "action": "UNCAPPED_DEPTH_ABORT",
-            "amount": amount,
-            "best_ask_age_ms": round(ask_age * 1000) if ask_age is not None else None,
-            "reason": "fresh book depth cannot cover amount",
-        })
-        return None
-
-    depth_price, depth_levels_used, depth_notional = depth
-    tick = get_tick_size(token_id)
-    if tick <= 0:
-        tick = 0.001
-    hint = max(0.0, min(1.0, math.ceil(depth_price / tick) * tick))
-    best_ask_level_1 = ws.get_latest_best_ask(
-        token_id,
-        max_age_sec=config.FAK_RETRY_MAX_BEST_ASK_AGE_SEC,
-        level=1,
-    )
-    if max_depth_price is not None and hint > max_depth_price:
-        log_event(log, logging.INFO, SIGNAL, {
-            "action": "UNCAPPED_DEPTH_ABORT",
-            "price_hint": hint,
-            "depth_price": depth_price,
-            "depth_levels_used": depth_levels_used,
-            "depth_notional": round(depth_notional, 4),
-            "best_ask_level_1": best_ask_level_1,
-            "amount": amount,
-            "max_depth_price": max_depth_price,
-            "best_ask_age_ms": round(ask_age * 1000) if ask_age is not None else None,
-            "reason": "depth price above hard max",
-        })
-        return None
-    log_event(log, logging.INFO, SIGNAL, {
-        "action": "UNCAPPED_DEPTH_PRICE_HINT",
-        "price_hint": hint,
-        "depth_price": depth_price,
-        "depth_levels_used": depth_levels_used,
-        "depth_notional": round(depth_notional, 4),
-        "best_ask_level_1": best_ask_level_1,
-        "amount": amount,
-        "best_ask_age_ms": round(ask_age * 1000) if ask_age is not None else None,
-        "reason": "cap ignored after entry gate",
-    })
-    return hint
-
-
-def _entry_price_hint(
-    ws: PriceStream,
-    token_id: str,
-    best_ask: Optional[float],
-    strategy: Optional[Strategy],
-    trade_config: TradeConfig,
-    state: Optional[MonitorState],
-    amount: float,
-) -> Optional[float]:
-    """Return first-attempt BUY hint for normal or uncapped-depth mode."""
-    if trade_config.uncapped_depth_price_hint_enabled:
-        return _depth_price_hint(
-            ws,
-            token_id,
-            amount,
-            max_depth_price=trade_config.max_depth_price,
-        )
-    return _initial_price_hint(token_id, best_ask, strategy, state)
-
-
 def _price_hint_refresher(
     ws: PriceStream,
     token_id: str,
@@ -186,16 +106,6 @@ def _price_hint_refresher(
     def refresh() -> Optional[float]:
         max_entry_price = _entry_price_cap(strategy, state)
         ask_level = _entry_ask_level(trade_config, state)
-        amount = trade_config.amount_for_signal_strength(
-            state.target_signal_strength if state is not None else None
-        )
-        if trade_config.uncapped_depth_price_hint_enabled:
-            return _depth_price_hint(
-                ws,
-                token_id,
-                amount,
-                max_depth_price=trade_config.max_depth_price,
-            )
         latest_ask = ws.get_latest_best_ask(
             token_id,
             max_age_sec=config.FAK_RETRY_MAX_BEST_ASK_AGE_SEC,
@@ -852,11 +762,7 @@ async def monitor_window(
                 )
                 if opening_best_ask is None:
                     state.target_entry_price = None
-                elif (
-                    trade_config.entry_cap_gate_enabled
-                    and max_entry_price is not None
-                    and opening_best_ask > max_entry_price
-                ):
+                elif max_entry_price is not None and opening_best_ask > max_entry_price:
                     state.target_entry_price = None
                 else:
                     guard_reason = _normal_full_cap_guard_reason(
@@ -865,7 +771,7 @@ async def monitor_window(
                         opening_best_ask,
                         max_entry_price,
                     )
-                    if trade_config.entry_cap_gate_enabled and guard_reason is not None:
+                    if guard_reason is not None:
                         state.target_entry_price = None
                         if _should_log_entry_guard_skip(
                             state,
@@ -886,17 +792,11 @@ async def monitor_window(
                         state.target_entry_price = None
                     else:
                         _clear_entry_guard_skip_cache(state)
-                        trade_amount = trade_config.amount_for_signal_strength(
-                            state.target_signal_strength
-                        )
-                        buffered_hint = _entry_price_hint(
-                            ws,
+                        buffered_hint = _initial_price_hint(
                             buy_token_id,
                             opening_best_ask,
                             strategy,
-                            trade_config,
                             state,
-                            trade_amount,
                         )
                         if buffered_hint is None:
                             state.target_entry_price = None
@@ -1033,11 +933,7 @@ async def _on_price_update(
                 if best_ask is None:
                     state.target_entry_price = None
                     return
-                if (
-                    trade_config.entry_cap_gate_enabled
-                    and max_entry_price is not None
-                    and best_ask > max_entry_price
-                ):
+                if max_entry_price is not None and best_ask > max_entry_price:
                     state.target_entry_price = None
                     return
                 guard_reason = _normal_full_cap_guard_reason(
@@ -1046,7 +942,7 @@ async def _on_price_update(
                     best_ask,
                     max_entry_price,
                 )
-                if trade_config.entry_cap_gate_enabled and guard_reason is not None:
+                if guard_reason is not None:
                     state.target_entry_price = None
                     if _should_log_entry_guard_skip(
                         state,
@@ -1100,17 +996,11 @@ async def _on_price_update(
                     "entry_ask_level": ask_level,
                     "best_ask_age_ms": round(best_ask_age * 1000) if best_ask_age is not None else None,
                 })
-                trade_amount = trade_config.amount_for_signal_strength(
-                    state.target_signal_strength
-                )
-                buffered_hint = _entry_price_hint(
-                    ws,
+                buffered_hint = _initial_price_hint(
                     buy_token_id,
                     best_ask,
                     strategy,
-                    trade_config,
                     state,
-                    trade_amount,
                 )
                 if buffered_hint is None:
                     state.target_entry_price = None

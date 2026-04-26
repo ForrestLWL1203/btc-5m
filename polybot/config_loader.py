@@ -69,8 +69,6 @@ def build_strategy(cfg: dict, series: Optional[MarketSeries] = None):
             early_entry_start_remaining_sec=strat_cfg.get("early_entry_start_remaining_sec"),
             early_entry_strength_threshold=strat_cfg.get("early_entry_strength_threshold"),
             early_entry_past_strength_threshold=strat_cfg.get("early_entry_past_strength_threshold"),
-            early_entry_persistence_sec=strat_cfg.get("early_entry_persistence_sec"),
-            ultra_early_entry=strat_cfg.get("ultra_early_entry"),
             entry_end_remaining_sec=strat_cfg.get("entry_end_remaining_sec", 120.0),
             persistence_sec=strat_cfg.get("persistence_sec", 10.0),
             max_entry_price=max_entry_price,
@@ -109,13 +107,6 @@ def build_trade_config(cfg: dict) -> TradeConfig:
         rounds=int(rounds_val) if rounds_val is not None else None,
         amount_tiers=_build_amount_tiers(params.get("amount_tiers")),
         **_build_normal_full_cap_guard(params.get("normal_full_cap_guard")),
-        **_build_entry_cap_gate(params.get("entry_cap_gate")),
-        **_build_uncapped_depth_price_hint(params.get("uncapped_depth_price_hint")),
-        max_depth_price=(
-            float(params["max_depth_price"])
-            if params.get("max_depth_price") is not None
-            else None
-        ),
         consecutive_loss_amount_limit=risk.get("consecutive_loss_amount"),
         daily_loss_amount_limit=risk.get("daily_loss_amount"),
         consecutive_loss_pause_windows=int(risk.get("consecutive_loss_pause_windows", 2)),
@@ -175,20 +166,3 @@ def _build_normal_full_cap_guard(raw: Optional[dict]) -> dict:
         "normal_full_cap_price_tolerance": float(raw.get("price_tolerance", 1e-9)),
     }
 
-
-def _build_entry_cap_gate(raw: Optional[dict]) -> dict:
-    """Build optional cap gate switch for live experiments."""
-    if not raw:
-        return {}
-    return {
-        "entry_cap_gate_enabled": bool(raw.get("enabled", True)),
-    }
-
-
-def _build_uncapped_depth_price_hint(raw: Optional[dict]) -> dict:
-    """Build optional experimental uncapped depth price-hint mode."""
-    if not raw:
-        return {}
-    return {
-        "uncapped_depth_price_hint_enabled": bool(raw.get("enabled", False)),
-    }

@@ -22,9 +22,6 @@ class TradeConfig:
     normal_full_cap_min_signal_strength: Optional[float] = None
     normal_full_cap_min_remaining_sec: Optional[float] = None
     normal_full_cap_price_tolerance: float = 1e-9
-    entry_cap_gate_enabled: bool = True
-    uncapped_depth_price_hint_enabled: bool = False
-    max_depth_price: Optional[float] = None
 
     def amount_for_signal_strength(self, signal_strength: Optional[float]) -> float:
         """Return configured stake size for signal strength."""

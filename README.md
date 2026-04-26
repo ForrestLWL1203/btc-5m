@@ -245,9 +245,6 @@ On the 8-hour / 96-window dataset, this remains the main local reference set.
 - [run.py](/Users/forrestliao/workspace/run.py)
 - [paired_window_cap61_5r_live.yaml](/Users/forrestliao/workspace/paired_window_cap61_5r_live.yaml)
 - [paired_window_early_entry_dry.yaml](/Users/forrestliao/workspace/paired_window_early_entry_dry.yaml)
-- [paired_window_aggressive_early_live_test.yaml](/Users/forrestliao/workspace/paired_window_aggressive_early_live_test.yaml)
-- [paired_window_ultra_early_live_test.yaml](/Users/forrestliao/workspace/paired_window_ultra_early_live_test.yaml)
-- [paired_window_uncapped_depth_live_test.yaml](/Users/forrestliao/workspace/paired_window_uncapped_depth_live_test.yaml)
 - [polybot/strategies/paired_window.py](/Users/forrestliao/workspace/polybot/strategies/paired_window.py)
 - [polybot/trading/monitor.py](/Users/forrestliao/workspace/polybot/trading/monitor.py)
 - [polybot/trading/trading.py](/Users/forrestliao/workspace/polybot/trading/trading.py)
@@ -266,26 +263,9 @@ Preset-based startup:
 ```bash
 python3.11 run.py --preset enhanced --dry --rounds 6
 python3.11 run.py --preset enhanced --amount 1.5 --max-entry-price 0.69 --rounds 24
-python3.11 run.py --preset aggressive-early-test --rounds 3
-python3.11 run.py --preset ultra-early-test --rounds 3
-python3.11 run.py --preset uncapped-depth-test --rounds 3
 ```
 
 `run.py` now requires exactly one of `--preset` or `--config`.
-
-`uncapped-depth-test` is a live experiment: cap still gates BUY_SIGNAL, but
-the FAK price hint uses the fresh order-book depth level that can cover the
-configured amount, even if that hint is above cap.
-
-`aggressive-early-test` is a more aggressive live experiment: `theta_pct=0.025`,
-`persistence_sec=8`, entries may start 30 seconds into the window, early
-confirmation uses 5 seconds, cap is logged but does not block entry, and the FAK
-price hint uses book depth with a hard `max_depth_price=0.80`.
-
-`ultra-early-test` adds a stronger 10-30s rule: `theta_pct=0.04`,
-`persistence_sec=3`, `min_move_ratio=0.5`. It is intended to test whether very
-strong early BTC moves can enter before Polymarket prices become too expensive;
-it also uses hard `max_depth_price=0.80`.
 
 Dry-run fixed cap:
 

@@ -125,15 +125,6 @@ class TestBuildStrategy:
                 "early_entry_start_remaining_sec": 270,
                 "early_entry_strength_threshold": 2.5,
                 "early_entry_past_strength_threshold": 1.5,
-                "early_entry_persistence_sec": 5,
-                "ultra_early_entry": {
-                    "enabled": True,
-                    "start_elapsed_sec": 10,
-                    "end_elapsed_sec": 30,
-                    "theta_pct": 0.04,
-                    "persistence_sec": 3,
-                    "min_move_ratio": 0.5,
-                },
             }
         }
         strat = build_strategy(cfg, series)
@@ -142,14 +133,6 @@ class TestBuildStrategy:
         assert strat._early_entry_start_remaining_sec == pytest.approx(270.0)
         assert strat._early_entry_strength_threshold == pytest.approx(2.5)
         assert strat._early_entry_past_strength_threshold == pytest.approx(1.5)
-        assert strat._early_entry_persistence_sec == pytest.approx(5.0)
-        assert strat._ultra_early_entry == {
-            "start_elapsed_sec": 10.0,
-            "end_elapsed_sec": 30.0,
-            "theta_pct": 0.04,
-            "persistence_sec": 3.0,
-            "min_move_ratio": 0.5,
-        }
 
     def test_missing_strategy_raises(self):
         series = MarketSeries.from_known("btc-updown-5m")
@@ -194,13 +177,6 @@ class TestBuildTradeConfig:
                     "min_signal_strength": 1.05,
                     "min_remaining_sec": 210,
                 },
-                "uncapped_depth_price_hint": {
-                    "enabled": True,
-                },
-                "entry_cap_gate": {
-                    "enabled": False,
-                },
-                "max_depth_price": 0.80,
                 "max_entries_per_window": 5,
             },
             "risk": {
@@ -223,9 +199,6 @@ class TestBuildTradeConfig:
         assert tc.normal_full_cap_guard_enabled is True
         assert tc.normal_full_cap_min_signal_strength == pytest.approx(1.05)
         assert tc.normal_full_cap_min_remaining_sec == pytest.approx(210.0)
-        assert tc.entry_cap_gate_enabled is False
-        assert tc.uncapped_depth_price_hint_enabled is True
-        assert tc.max_depth_price == pytest.approx(0.80)
         assert tc.max_entries_per_window == 5
         assert tc.rounds == 3
         assert tc.consecutive_loss_amount_limit == pytest.approx(30.0)

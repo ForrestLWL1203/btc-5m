@@ -59,7 +59,6 @@ class ConsoleFormatter(logging.Formatter):
                 "best_ask_age_ms",
                 "entry_ask_level", "best_ask_level_1", "target_entry_ask",
                 "signal_strength", "remaining_sec", "max_entry_price",
-                "max_depth_price",
                 "windows_remaining", "threshold", "source",
                 "count", "reason", "message", "slug",
             ):
