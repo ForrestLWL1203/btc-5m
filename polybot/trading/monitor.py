@@ -158,6 +158,55 @@ def _entry_ask_level(trade_config: TradeConfig, state: Optional[MonitorState]) -
     return trade_config.ask_level_for_signal_strength(signal_strength)
 
 
+def _log_signal_eval(
+    state: MonitorState,
+    side: str,
+    signal_price: float,
+    best_ask_level_1: Optional[float],
+    target_entry_ask: Optional[float],
+    entry_ask_level: int,
+    max_entry_price: Optional[float],
+) -> None:
+    key = (
+        side,
+        round(signal_price, 6),
+        round(best_ask_level_1, 6) if best_ask_level_1 is not None else None,
+        round(target_entry_ask, 6) if target_entry_ask is not None else None,
+        entry_ask_level,
+        round(max_entry_price, 6) if max_entry_price is not None else None,
+        round(state.target_signal_strength, 6) if state.target_signal_strength is not None else None,
+    )
+    if state.last_signal_eval_key == key:
+        return
+    state.last_signal_eval_key = key
+    log_event(log, logging.INFO, SIGNAL, {
+        "action": "SIGNAL_EVAL",
+        "side": side.upper(),
+        "signal_price": signal_price,
+        "signal_ref_price": state.signal_reference_price,
+        "best_ask_level_1": best_ask_level_1,
+        "target_entry_ask": target_entry_ask,
+        "entry_ask_level": entry_ask_level,
+        "max_entry_price": max_entry_price,
+        "confidence": state.target_signal_confidence,
+        "signal_strength": (
+            round(state.target_signal_strength, 3)
+            if state.target_signal_strength is not None
+            else None
+        ),
+        "past_signal_strength": (
+            round(state.target_past_signal_strength, 3)
+            if state.target_past_signal_strength is not None
+            else None
+        ),
+        "remaining_sec": (
+            round(state.target_remaining_sec)
+            if state.target_remaining_sec is not None
+            else None
+        ),
+    })
+
+
 def _best_ask_level_1(ws: PriceStream, token_id: str) -> Optional[float]:
     return ws.get_latest_best_ask(
         token_id,
@@ -603,6 +652,8 @@ async def monitor_window(
     state.target_signal_strength = None
     state.target_past_signal_strength = None
     state.target_remaining_sec = None
+    state.signal_reference_price = None
+    state.last_signal_eval_key = None
     state.entry_amount = 0.0
     state.last_entry_check_side = None
     state.last_entry_check_best_ask = None
@@ -695,6 +746,15 @@ async def monitor_window(
                     level=ask_level,
                 )
                 max_entry_price = _entry_price_cap(strategy, state)
+                _log_signal_eval(
+                    state,
+                    state.target_side or side,
+                    opening_price,
+                    best_ask_level_1,
+                    opening_best_ask,
+                    ask_level,
+                    max_entry_price,
+                )
                 if opening_best_ask is None:
                     state.target_entry_price = None
                 elif max_entry_price is not None and opening_best_ask > max_entry_price:
@@ -853,6 +913,15 @@ async def _on_price_update(
                 if best_ask is None and ask_level == 1 and update.token_id == buy_token_id:
                     best_ask = update.best_ask
                     best_ask_age = 0.0 if update.best_ask is not None else None
+                _log_signal_eval(
+                    state,
+                    effective_side,
+                    price,
+                    best_ask_level_1,
+                    best_ask,
+                    ask_level,
+                    max_entry_price,
+                )
                 if best_ask is None:
                     state.target_entry_price = None
                     return

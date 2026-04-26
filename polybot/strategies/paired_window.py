@@ -194,7 +194,9 @@ class PairedWindowStrategy(Strategy):
             confidence = "strong"
 
         state.target_side = direction
-        state.target_entry_price = price if direction == "up" else max(0.0, min(1.0, 1.0 - price))
+        state.signal_reference_price = (
+            price if direction == "up" else max(0.0, min(1.0, 1.0 - price))
+        )
         state.target_max_entry_price = dynamic_cap
         state.target_signal_confidence = confidence
         state.target_signal_strength = signal_strength
@@ -207,9 +209,11 @@ class PairedWindowStrategy(Strategy):
             and dynamic_cap > self._last_logged_cap
         ):
             log.info(
-                "CAP_ESCALATED: dir=%s strength=%.2fx max_entry=%.3f previous_max_entry=%.3f remaining=%.0fs",
+                "CAP_ESCALATED: dir=%s strength=%.2fx signal_ref_price=%.3f "
+                "max_entry=%.3f previous_max_entry=%.3f remaining=%.0fs",
                 direction.upper(),
                 signal_strength,
+                state.signal_reference_price,
                 dynamic_cap,
                 self._last_logged_cap,
                 remaining,
@@ -219,14 +223,14 @@ class PairedWindowStrategy(Strategy):
         if not self._signal_logged:
             log.info(
                 "SIGNAL: dir=%s btc_open=%.1f btc_now=%.1f move=%.4f%% past=%.4f%% "
-                "strength=%.2fx entry_price=%.3f max_entry=%.3f remaining=%.0fs",
+                "strength=%.2fx signal_ref_price=%.3f max_entry=%.3f remaining=%.0fs",
                 direction.upper(),
                 open_price,
                 current_btc,
                 move_pct,
                 past_move_pct,
                 signal_strength,
-                state.target_entry_price,
+                state.signal_reference_price,
                 state.target_max_entry_price,
                 remaining,
             )
