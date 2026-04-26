@@ -248,11 +248,12 @@ configured amount, even if that hint is above cap.
 `aggressive-early-test` is a more aggressive live experiment: `theta_pct=0.025`,
 `persistence_sec=8`, entries may start 30 seconds into the window, early
 confirmation uses 5 seconds, cap is logged but does not block entry, and the FAK
-price hint uses book depth.
+price hint uses book depth with a hard `max_depth_price=0.80`.
 
 `ultra-early-test` adds a stronger 10-30s rule: `theta_pct=0.04`,
 `persistence_sec=3`, `min_move_ratio=0.5`. It is intended to test whether very
-strong early BTC moves can enter before Polymarket prices become too expensive.
+strong early BTC moves can enter before Polymarket prices become too expensive;
+it also uses hard `max_depth_price=0.80`.
 
 **Collect data**
 

@@ -98,6 +98,7 @@ def _depth_price_hint(
     ws: PriceStream,
     token_id: str,
     amount: float,
+    max_depth_price: Optional[float] = None,
 ) -> Optional[float]:
     """Return a fresh book price that can cover the requested BUY notional."""
     depth = ws.get_ask_price_for_notional(
@@ -125,6 +126,20 @@ def _depth_price_hint(
         max_age_sec=config.FAK_RETRY_MAX_BEST_ASK_AGE_SEC,
         level=1,
     )
+    if max_depth_price is not None and hint > max_depth_price:
+        log_event(log, logging.INFO, SIGNAL, {
+            "action": "UNCAPPED_DEPTH_ABORT",
+            "price_hint": hint,
+            "depth_price": depth_price,
+            "depth_levels_used": depth_levels_used,
+            "depth_notional": round(depth_notional, 4),
+            "best_ask_level_1": best_ask_level_1,
+            "amount": amount,
+            "max_depth_price": max_depth_price,
+            "best_ask_age_ms": round(ask_age * 1000) if ask_age is not None else None,
+            "reason": "depth price above hard max",
+        })
+        return None
     log_event(log, logging.INFO, SIGNAL, {
         "action": "UNCAPPED_DEPTH_PRICE_HINT",
         "price_hint": hint,
@@ -150,7 +165,12 @@ def _entry_price_hint(
 ) -> Optional[float]:
     """Return first-attempt BUY hint for normal or uncapped-depth mode."""
     if trade_config.uncapped_depth_price_hint_enabled:
-        return _depth_price_hint(ws, token_id, amount)
+        return _depth_price_hint(
+            ws,
+            token_id,
+            amount,
+            max_depth_price=trade_config.max_depth_price,
+        )
     return _initial_price_hint(token_id, best_ask, strategy, state)
 
 
@@ -170,7 +190,12 @@ def _price_hint_refresher(
             state.target_signal_strength if state is not None else None
         )
         if trade_config.uncapped_depth_price_hint_enabled:
-            return _depth_price_hint(ws, token_id, amount)
+            return _depth_price_hint(
+                ws,
+                token_id,
+                amount,
+                max_depth_price=trade_config.max_depth_price,
+            )
         latest_ask = ws.get_latest_best_ask(
             token_id,
             max_age_sec=config.FAK_RETRY_MAX_BEST_ASK_AGE_SEC,

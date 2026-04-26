@@ -200,6 +200,7 @@ class TestBuildTradeConfig:
                 "entry_cap_gate": {
                     "enabled": False,
                 },
+                "max_depth_price": 0.80,
                 "max_entries_per_window": 5,
             },
             "risk": {
@@ -224,6 +225,7 @@ class TestBuildTradeConfig:
         assert tc.normal_full_cap_min_remaining_sec == pytest.approx(210.0)
         assert tc.entry_cap_gate_enabled is False
         assert tc.uncapped_depth_price_hint_enabled is True
+        assert tc.max_depth_price == pytest.approx(0.80)
         assert tc.max_entries_per_window == 5
         assert tc.rounds == 3
         assert tc.consecutive_loss_amount_limit == pytest.approx(30.0)

@@ -35,6 +35,7 @@ params:
     enabled: false
   uncapped_depth_price_hint:
     enabled: true
+  max_depth_price: 0.80
   max_entries_per_window: 1
 
 risk:

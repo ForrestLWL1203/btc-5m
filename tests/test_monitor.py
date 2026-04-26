@@ -15,6 +15,7 @@ from polybot.trading.monitor import (
     _handle_opening_price,
     _monitor_single_window,
     _on_price_update,
+    _entry_price_hint,
     _process_trade_result,
     _sanitize_next_window,
     monitor_window,
@@ -70,6 +71,52 @@ def _mock_strategy() -> MagicMock:
 def test_sanitize_next_window_rejects_same_window():
     window = _make_window()
     assert _sanitize_next_window(window, window) is None
+
+
+def test_uncapped_depth_price_hint_respects_hard_max():
+    ws = MagicMock()
+    ws.get_ask_price_for_notional.return_value = (0.81, 1, 10.0)
+    ws.get_latest_best_ask.return_value = 0.81
+    ws.get_latest_best_ask_age.return_value = 0.001
+
+    with patch("polybot.trading.monitor.get_tick_size", return_value=0.01):
+        hint = _entry_price_hint(
+            ws,
+            "token",
+            0.81,
+            strategy=None,
+            trade_config=_tc(
+                uncapped_depth_price_hint_enabled=True,
+                max_depth_price=0.80,
+            ),
+            state=None,
+            amount=1.0,
+        )
+
+    assert hint is None
+
+
+def test_uncapped_depth_price_hint_allows_price_at_hard_max():
+    ws = MagicMock()
+    ws.get_ask_price_for_notional.return_value = (0.80, 1, 10.0)
+    ws.get_latest_best_ask.return_value = 0.80
+    ws.get_latest_best_ask_age.return_value = 0.001
+
+    with patch("polybot.trading.monitor.get_tick_size", return_value=0.01):
+        hint = _entry_price_hint(
+            ws,
+            "token",
+            0.80,
+            strategy=None,
+            trade_config=_tc(
+                uncapped_depth_price_hint_enabled=True,
+                max_depth_price=0.80,
+            ),
+            state=None,
+            amount=1.0,
+        )
+
+    assert hint == pytest.approx(0.80)
 
 
 def test_process_trade_result_triggers_dollar_loss_pause():

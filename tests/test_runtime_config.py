@@ -65,6 +65,7 @@ def test_preset_config_loads_aggressive_early_experiment():
     assert cfg["strategy"]["early_entry_persistence_sec"] == pytest.approx(5)
     assert cfg["params"]["entry_cap_gate"]["enabled"] is False
     assert cfg["params"]["uncapped_depth_price_hint"]["enabled"] is True
+    assert cfg["params"]["max_depth_price"] == pytest.approx(0.80)
 
 
 def test_preset_config_loads_ultra_early_experiment():
@@ -78,6 +79,7 @@ def test_preset_config_loads_ultra_early_experiment():
     assert ultra["min_move_ratio"] == pytest.approx(0.5)
     assert cfg["params"]["entry_cap_gate"]["enabled"] is False
     assert cfg["params"]["uncapped_depth_price_hint"]["enabled"] is True
+    assert cfg["params"]["max_depth_price"] == pytest.approx(0.80)
 
 
 def test_build_runtime_config_requires_exactly_one_source():

@@ -111,6 +111,11 @@ def build_trade_config(cfg: dict) -> TradeConfig:
         **_build_normal_full_cap_guard(params.get("normal_full_cap_guard")),
         **_build_entry_cap_gate(params.get("entry_cap_gate")),
         **_build_uncapped_depth_price_hint(params.get("uncapped_depth_price_hint")),
+        max_depth_price=(
+            float(params["max_depth_price"])
+            if params.get("max_depth_price") is not None
+            else None
+        ),
         consecutive_loss_amount_limit=risk.get("consecutive_loss_amount"),
         daily_loss_amount_limit=risk.get("daily_loss_amount"),
         consecutive_loss_pause_windows=int(risk.get("consecutive_loss_pause_windows", 2)),
