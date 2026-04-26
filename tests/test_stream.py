@@ -128,8 +128,35 @@ async def test_dispatch_book_caches_full_ask_depth():
     assert stream.get_latest_best_ask("token-book", level=4) == pytest.approx(0.55)
     assert stream.get_latest_best_ask("token-book", level=5) is None
     assert stream.get_latest_ask_levels("token-book") == [0.52, 0.53, 0.54, 0.55]
+    assert stream.get_latest_ask_levels_with_size("token-book") == [
+        (0.52, 25.0),
+        (0.53, 60.0),
+        (0.54, 10.0),
+        (0.55, 5.0),
+    ]
     callback.assert_called_once()
     assert callback.call_args[0][0].source == "book"
+
+
+@pytest.mark.asyncio
+async def test_get_ask_price_for_notional_uses_depth():
+    callback = AsyncMock()
+    stream = PriceStream(on_price=callback)
+
+    stream._dispatch('''{
+        "event_type": "book",
+        "asset_id": "token-book",
+        "bids": [{"price": "0.48", "size": "30"}],
+        "asks": [
+            {"price": "0.60", "size": "1"},
+            {"price": "0.75", "size": "1"},
+            {"price": "0.90", "size": "5"}
+        ]
+    }''')
+    await asyncio.sleep(0.05)
+
+    assert stream.get_ask_price_for_notional("token-book", 1.0) == pytest.approx((0.75, 2, 1.35))
+    assert stream.get_ask_price_for_notional("token-book", 10.0) is None
 
 
 @pytest.mark.asyncio

@@ -51,6 +51,12 @@ def test_preset_config_loads_enhanced_yaml():
     assert cfg["params"]["normal_full_cap_guard"]["enabled"] is True
 
 
+def test_preset_config_loads_uncapped_depth_experiment():
+    cfg = preset_config("uncapped-depth-test")
+    assert cfg["strategy"]["max_entry_price"] == pytest.approx(0.68)
+    assert cfg["params"]["uncapped_depth_price_hint"]["enabled"] is True
+
+
 def test_build_runtime_config_requires_exactly_one_source():
     with pytest.raises(ValueError, match="exactly one of --config or --preset"):
         build_runtime_config(_args())

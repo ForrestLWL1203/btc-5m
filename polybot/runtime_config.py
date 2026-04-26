@@ -20,6 +20,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 PRESET_PATHS = {
     "conservative": _REPO_ROOT / "paired_window_cap61_5r_live.yaml",
     "enhanced": _REPO_ROOT / "paired_window_early_entry_dry.yaml",
+    "uncapped-depth-test": _REPO_ROOT / "paired_window_uncapped_depth_live_test.yaml",
 }
 
 

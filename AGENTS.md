@@ -234,9 +234,14 @@ These are small samples, not backtests.
 ```bash
 python3.11 run.py --preset enhanced --dry --rounds 6
 python3.11 run.py --preset enhanced --amount 1.5 --max-entry-price 0.69 --rounds 24
+python3.11 run.py --preset uncapped-depth-test --rounds 3
 ```
 
 `run.py` now requires exactly one of `--preset` or `--config`.
+
+`uncapped-depth-test` is a live experiment: cap still gates BUY_SIGNAL, but
+the FAK price hint uses the fresh order-book depth level that can cover the
+configured amount, even if that hint is above cap.
 
 **Collect data**
 
@@ -312,6 +317,9 @@ Profiles:
 
 - VPS profile file: `~/.polybot/vps/<name>.env`
 - account profile file: `~/.polybot/accounts/<name>.json`
+- Use `vpsctl.sh --vps-profile ...` for remote `run`, `status`, `stop`, and
+  `fetch`; do not use raw `ssh` for stop/status unless you also load the
+  profile password.
 - bootstrap can use:
   - `bash tools/vpsctl.sh bootstrap --vps-profile sweden --account-profile alice`
 - account profile minimum:

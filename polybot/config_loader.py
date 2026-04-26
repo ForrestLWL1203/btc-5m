@@ -107,6 +107,7 @@ def build_trade_config(cfg: dict) -> TradeConfig:
         rounds=int(rounds_val) if rounds_val is not None else None,
         amount_tiers=_build_amount_tiers(params.get("amount_tiers")),
         **_build_normal_full_cap_guard(params.get("normal_full_cap_guard")),
+        **_build_uncapped_depth_price_hint(params.get("uncapped_depth_price_hint")),
         consecutive_loss_amount_limit=risk.get("consecutive_loss_amount"),
         daily_loss_amount_limit=risk.get("daily_loss_amount"),
         consecutive_loss_pause_windows=int(risk.get("consecutive_loss_pause_windows", 2)),
@@ -164,4 +165,13 @@ def _build_normal_full_cap_guard(raw: Optional[dict]) -> dict:
             else None
         ),
         "normal_full_cap_price_tolerance": float(raw.get("price_tolerance", 1e-9)),
+    }
+
+
+def _build_uncapped_depth_price_hint(raw: Optional[dict]) -> dict:
+    """Build optional experimental uncapped depth price-hint mode."""
+    if not raw:
+        return {}
+    return {
+        "uncapped_depth_price_hint_enabled": bool(raw.get("enabled", False)),
     }

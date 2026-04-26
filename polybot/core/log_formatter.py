@@ -54,8 +54,12 @@ class ConsoleFormatter(logging.Formatter):
             for key in (
                 "side", "window", "result", "price", "avg_price", "amount",
                 "shares", "filled_size", "entries", "entry_latency_ms",
-                "post_order_ms", "total_ms", "best_ask_age_ms",
-                "max_entry_price", "windows_remaining", "threshold", "source",
+                "price_hint", "depth_price", "depth_levels_used",
+                "depth_notional", "post_order_ms", "total_ms", "attempt_ms",
+                "best_ask_age_ms",
+                "entry_ask_level", "best_ask_level_1", "target_entry_ask",
+                "signal_strength", "remaining_sec", "max_entry_price",
+                "windows_remaining", "threshold", "source",
                 "count", "reason", "message", "slug",
             ):
                 if key in data:

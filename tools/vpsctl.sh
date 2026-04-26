@@ -16,6 +16,7 @@ usage:
   tools/vpsctl.sh bootstrap --host <ip> [--user root]
                           [--repo URL] [--branch main] [--account-profile NAME|PATH]
   tools/vpsctl.sh run      --host <ip> [--user root] [--preset enhanced] [--rounds 6] [--dry] [--label LABEL]
+  tools/vpsctl.sh stop     --host <ip> [--user root] [--run-id latest]
   tools/vpsctl.sh fetch    --host <ip> [--user root] [--run-id latest] [--dest remote_runs]
   tools/vpsctl.sh status   --host <ip> [--user root] [--run-id latest]
   tools/vpsctl.sh probe    --host <ip> [--user root] --token-id <TOKEN> [extra probe args...]
@@ -321,6 +322,11 @@ run_remote() {
   expect_ssh "$remote_cmd"
 }
 
+stop_remote() {
+  local remote_cmd="RUN_DIR=\$(if [ '${RUN_ID}' = 'latest' ]; then readlink -f /opt/polybot/log/runs/latest; else echo /opt/polybot/log/runs/'${RUN_ID}'; fi); echo RUN_DIR=\$RUN_DIR; if [ ! -f \"\$RUN_DIR/pid\" ]; then echo STATUS=no_pid; exit 0; fi; PID=\$(cat \"\$RUN_DIR/pid\"); kill \"\$PID\" 2>/dev/null || true; sleep 2; if kill -0 \"\$PID\" 2>/dev/null; then echo STATUS=still_running; echo PID=\$PID; else find /opt/polybot/current/log -maxdepth 1 -type f \\( -name '*_trade.log' -o -name '*_trade.jsonl' \\) -exec cp {} \"\$RUN_DIR/\" \\; 2>/dev/null || true; printf '143\n' > \"\$RUN_DIR/exit_code\"; date -u '+%Y-%m-%dT%H:%M:%SZ' > \"\$RUN_DIR/finished_at\"; date -u '+%Y-%m-%dT%H:%M:%SZ' > \"\$RUN_DIR/stopped_at\"; echo STATUS=stopped; echo PID=\$PID; fi"
+  expect_ssh "$remote_cmd"
+}
+
 fetch_remote() {
   local remote_dir
   remote_dir="$(expect_ssh "if [ '${RUN_ID}' = 'latest' ]; then readlink -f /opt/polybot/log/runs/latest; else echo /opt/polybot/log/runs/'${RUN_ID}'; fi")"
@@ -334,7 +340,7 @@ fetch_remote() {
 }
 
 status_remote() {
-  local remote_cmd="RUN_DIR=\$(if [ '${RUN_ID}' = 'latest' ]; then readlink -f /opt/polybot/log/runs/latest; else echo /opt/polybot/log/runs/'${RUN_ID}'; fi); echo RUN_DIR=\$RUN_DIR; if [ -f \"\$RUN_DIR/meta.env\" ]; then cat \"\$RUN_DIR/meta.env\"; fi; if [ -f \"\$RUN_DIR/exit_code\" ]; then echo STATUS=done; echo EXIT_CODE=\$(cat \"\$RUN_DIR/exit_code\"); else echo STATUS=running; fi"
+  local remote_cmd="RUN_DIR=\$(if [ '${RUN_ID}' = 'latest' ]; then readlink -f /opt/polybot/log/runs/latest; else echo /opt/polybot/log/runs/'${RUN_ID}'; fi); echo RUN_DIR=\$RUN_DIR; if [ -f \"\$RUN_DIR/meta.env\" ]; then cat \"\$RUN_DIR/meta.env\"; fi; if [ -f \"\$RUN_DIR/exit_code\" ]; then CODE=\$(cat \"\$RUN_DIR/exit_code\"); if [ \"\$CODE\" = '143' ] && [ -f \"\$RUN_DIR/stopped_at\" ]; then echo STATUS=stopped; else echo STATUS=done; fi; echo EXIT_CODE=\$CODE; elif [ -f \"\$RUN_DIR/pid\" ]; then PID=\$(cat \"\$RUN_DIR/pid\"); if kill -0 \"\$PID\" 2>/dev/null; then echo STATUS=running; else echo STATUS=stopped_no_exit; echo PID=\$PID; fi; else echo STATUS=unknown; fi"
   expect_ssh "$remote_cmd"
 }
 
@@ -400,6 +406,24 @@ case "$subcommand" in
       esac
     done
     run_remote
+    ;;
+  stop)
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --run-id)
+          RUN_ID="$2"
+          shift 2
+          ;;
+        -h|--help)
+          usage
+          exit 0
+          ;;
+        *)
+          die "unknown stop arg: $1"
+          ;;
+      esac
+    done
+    stop_remote
     ;;
   fetch)
     while [ $# -gt 0 ]; do

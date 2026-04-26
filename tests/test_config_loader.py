@@ -177,6 +177,9 @@ class TestBuildTradeConfig:
                     "min_signal_strength": 1.05,
                     "min_remaining_sec": 210,
                 },
+                "uncapped_depth_price_hint": {
+                    "enabled": True,
+                },
                 "max_entries_per_window": 5,
             },
             "risk": {
@@ -199,6 +202,7 @@ class TestBuildTradeConfig:
         assert tc.normal_full_cap_guard_enabled is True
         assert tc.normal_full_cap_min_signal_strength == pytest.approx(1.05)
         assert tc.normal_full_cap_min_remaining_sec == pytest.approx(210.0)
+        assert tc.uncapped_depth_price_hint_enabled is True
         assert tc.max_entries_per_window == 5
         assert tc.rounds == 3
         assert tc.consecutive_loss_amount_limit == pytest.approx(30.0)

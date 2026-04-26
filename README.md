@@ -245,6 +245,7 @@ On the 8-hour / 96-window dataset, this remains the main local reference set.
 - [run.py](/Users/forrestliao/workspace/run.py)
 - [paired_window_cap61_5r_live.yaml](/Users/forrestliao/workspace/paired_window_cap61_5r_live.yaml)
 - [paired_window_early_entry_dry.yaml](/Users/forrestliao/workspace/paired_window_early_entry_dry.yaml)
+- [paired_window_uncapped_depth_live_test.yaml](/Users/forrestliao/workspace/paired_window_uncapped_depth_live_test.yaml)
 - [polybot/strategies/paired_window.py](/Users/forrestliao/workspace/polybot/strategies/paired_window.py)
 - [polybot/trading/monitor.py](/Users/forrestliao/workspace/polybot/trading/monitor.py)
 - [polybot/trading/trading.py](/Users/forrestliao/workspace/polybot/trading/trading.py)
@@ -263,9 +264,14 @@ Preset-based startup:
 ```bash
 python3.11 run.py --preset enhanced --dry --rounds 6
 python3.11 run.py --preset enhanced --amount 1.5 --max-entry-price 0.69 --rounds 24
+python3.11 run.py --preset uncapped-depth-test --rounds 3
 ```
 
 `run.py` now requires exactly one of `--preset` or `--config`.
+
+`uncapped-depth-test` is a live experiment: cap still gates BUY_SIGNAL, but
+the FAK price hint uses the fresh order-book depth level that can cover the
+configured amount, even if that hint is above cap.
 
 Dry-run fixed cap:
 
@@ -359,7 +365,13 @@ bash tools/vpsctl.sh bootstrap --vps-profile <vps_name> --account-profile <accou
 bash tools/vpsctl.sh run --vps-profile <vps_name> --preset enhanced --rounds 12
 ```
 
-5. After the run finishes, fetch logs:
+5. Stop a remote run if needed:
+
+```bash
+bash tools/vpsctl.sh stop --vps-profile <vps_name> --run-id latest
+```
+
+6. After the run finishes, fetch logs:
 
 ```bash
 bash tools/vpsctl.sh fetch --vps-profile <vps_name> --run-id latest
@@ -472,6 +484,8 @@ Notes:
 
 - `bootstrap` uploads the chosen account profile to the VPS as the active
   Polymarket config.
+- Use `vpsctl.sh` with `--vps-profile` for `run`, `status`, `stop`, and
+  `fetch`; the VPS password is loaded from the local profile.
 - `vpsctl.sh` no longer takes password as a command-line parameter; put the
   password source in the VPS profile.
 - In normal proxy-wallet usage, users usually only need to provide their

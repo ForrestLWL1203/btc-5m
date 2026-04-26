@@ -33,6 +33,7 @@ log = logging.getLogger(__name__)
 
 _PREOPEN_BUFFER = 10  # seconds before window start to wake up
 _STARTED_SKIP_THRESHOLD = 60  # allow attaching to a window within its first minute
+_SIGNAL_EVAL_LOG_INTERVAL_SEC = 5.0
 
 
 async def _noop_price_callback(update: PriceUpdate) -> None:
@@ -93,6 +94,66 @@ def _initial_price_hint(
     )
 
 
+def _depth_price_hint(
+    ws: PriceStream,
+    token_id: str,
+    amount: float,
+) -> Optional[float]:
+    """Return a fresh book price that can cover the requested BUY notional."""
+    depth = ws.get_ask_price_for_notional(
+        token_id,
+        amount,
+        max_age_sec=config.FAK_RETRY_MAX_BEST_ASK_AGE_SEC,
+    )
+    ask_age = ws.get_latest_best_ask_age(token_id, level=1)
+    if depth is None:
+        log_event(log, logging.INFO, SIGNAL, {
+            "action": "UNCAPPED_DEPTH_ABORT",
+            "amount": amount,
+            "best_ask_age_ms": round(ask_age * 1000) if ask_age is not None else None,
+            "reason": "fresh book depth cannot cover amount",
+        })
+        return None
+
+    depth_price, depth_levels_used, depth_notional = depth
+    tick = get_tick_size(token_id)
+    if tick <= 0:
+        tick = 0.001
+    hint = max(0.0, min(1.0, math.ceil(depth_price / tick) * tick))
+    best_ask_level_1 = ws.get_latest_best_ask(
+        token_id,
+        max_age_sec=config.FAK_RETRY_MAX_BEST_ASK_AGE_SEC,
+        level=1,
+    )
+    log_event(log, logging.INFO, SIGNAL, {
+        "action": "UNCAPPED_DEPTH_PRICE_HINT",
+        "price_hint": hint,
+        "depth_price": depth_price,
+        "depth_levels_used": depth_levels_used,
+        "depth_notional": round(depth_notional, 4),
+        "best_ask_level_1": best_ask_level_1,
+        "amount": amount,
+        "best_ask_age_ms": round(ask_age * 1000) if ask_age is not None else None,
+        "reason": "cap ignored after entry gate",
+    })
+    return hint
+
+
+def _entry_price_hint(
+    ws: PriceStream,
+    token_id: str,
+    best_ask: Optional[float],
+    strategy: Optional[Strategy],
+    trade_config: TradeConfig,
+    state: Optional[MonitorState],
+    amount: float,
+) -> Optional[float]:
+    """Return first-attempt BUY hint for normal or uncapped-depth mode."""
+    if trade_config.uncapped_depth_price_hint_enabled:
+        return _depth_price_hint(ws, token_id, amount)
+    return _initial_price_hint(token_id, best_ask, strategy, state)
+
+
 def _price_hint_refresher(
     ws: PriceStream,
     token_id: str,
@@ -105,6 +166,11 @@ def _price_hint_refresher(
     def refresh() -> Optional[float]:
         max_entry_price = _entry_price_cap(strategy, state)
         ask_level = _entry_ask_level(trade_config, state)
+        amount = trade_config.amount_for_signal_strength(
+            state.target_signal_strength if state is not None else None
+        )
+        if trade_config.uncapped_depth_price_hint_enabled:
+            return _depth_price_hint(ws, token_id, amount)
         latest_ask = ws.get_latest_best_ask(
             token_id,
             max_age_sec=config.FAK_RETRY_MAX_BEST_ASK_AGE_SEC,
@@ -167,18 +233,21 @@ def _log_signal_eval(
     entry_ask_level: int,
     max_entry_price: Optional[float],
 ) -> None:
+    now = time.monotonic()
     key = (
         side,
-        round(signal_price, 6),
-        round(best_ask_level_1, 6) if best_ask_level_1 is not None else None,
-        round(target_entry_ask, 6) if target_entry_ask is not None else None,
+        round(best_ask_level_1, 3) if best_ask_level_1 is not None else None,
+        round(target_entry_ask, 3) if target_entry_ask is not None else None,
         entry_ask_level,
         round(max_entry_price, 6) if max_entry_price is not None else None,
-        round(state.target_signal_strength, 6) if state.target_signal_strength is not None else None,
     )
-    if state.last_signal_eval_key == key:
+    if (
+        state.last_signal_eval_key == key
+        and now - state.last_signal_eval_logged_at < _SIGNAL_EVAL_LOG_INTERVAL_SEC
+    ):
         return
     state.last_signal_eval_key = key
+    state.last_signal_eval_logged_at = now
     log_event(log, logging.INFO, SIGNAL, {
         "action": "SIGNAL_EVAL",
         "side": side.upper(),
@@ -654,6 +723,7 @@ async def monitor_window(
     state.target_remaining_sec = None
     state.signal_reference_price = None
     state.last_signal_eval_key = None
+    state.last_signal_eval_logged_at = 0.0
     state.entry_amount = 0.0
     state.last_entry_check_side = None
     state.last_entry_check_best_ask = None
@@ -787,24 +857,33 @@ async def monitor_window(
                         state.target_entry_price = None
                     else:
                         _clear_entry_guard_skip_cache(state)
-                        buffered_hint = _initial_price_hint(
+                        trade_amount = trade_config.amount_for_signal_strength(
+                            state.target_signal_strength
+                        )
+                        buffered_hint = _entry_price_hint(
+                            ws,
                             buy_token_id,
                             opening_best_ask,
                             strategy,
+                            trade_config,
                             state,
+                            trade_amount,
                         )
-                        state.target_entry_price = opening_best_ask
-                        await _handle_opening_price(
-                            window, state, buy_token_id, opening_price, dry_run, trade_config, strategy, state.target_side or side,
-                            best_ask=buffered_hint,
-                            target_entry_ask=opening_best_ask,
-                            best_ask_level_1=best_ask_level_1,
-                            best_ask_age_sec=opening_best_ask_age,
-                            price_hint_refresher=_price_hint_refresher(ws, buy_token_id, strategy, trade_config, state),
-                        )
-                        # Re-resolve token if strategy set target_side during opening buy
-                        if state.target_side is not None:
-                            buy_token_id, price_token_id = _side_token(window, state.target_side)
+                        if buffered_hint is None:
+                            state.target_entry_price = None
+                        else:
+                            state.target_entry_price = opening_best_ask
+                            await _handle_opening_price(
+                                window, state, buy_token_id, opening_price, dry_run, trade_config, strategy, state.target_side or side,
+                                best_ask=buffered_hint,
+                                target_entry_ask=opening_best_ask,
+                                best_ask_level_1=best_ask_level_1,
+                                best_ask_age_sec=opening_best_ask_age,
+                                price_hint_refresher=_price_hint_refresher(ws, buy_token_id, strategy, trade_config, state),
+                            )
+                            # Re-resolve token if strategy set target_side during opening buy
+                            if state.target_side is not None:
+                                buy_token_id, price_token_id = _side_token(window, state.target_side)
     # Monitor until window expires or exit triggered (ws is NOT closed inside)
     next_win = await _monitor_single_window(
         window, state, ws, dry_run, trade_config, strategy, series, side,
@@ -988,12 +1067,21 @@ async def _on_price_update(
                     "entry_ask_level": ask_level,
                     "best_ask_age_ms": round(best_ask_age * 1000) if best_ask_age is not None else None,
                 })
-                buffered_hint = _initial_price_hint(
+                trade_amount = trade_config.amount_for_signal_strength(
+                    state.target_signal_strength
+                )
+                buffered_hint = _entry_price_hint(
+                    ws,
                     buy_token_id,
                     best_ask,
                     strategy,
+                    trade_config,
                     state,
+                    trade_amount,
                 )
+                if buffered_hint is None:
+                    state.target_entry_price = None
+                    return
                 await _handle_opening_price(
                     window, state, buy_token_id, price, dry_run, trade_config, strategy, effective_side,
                     best_ask=buffered_hint,

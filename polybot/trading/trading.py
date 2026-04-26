@@ -103,7 +103,7 @@ async def _post_fak_market(
             if refreshed_hint is None:
                 return OrderResult(
                     success=False,
-                    message="FAK retry aborted: refreshed best_ask unavailable or above cap",
+                    message="FAK retry aborted: refreshed price hint unavailable",
                 )
             if refreshed_hint != current_price_hint:
                 log_event(log, logging.INFO, TRADE, {
