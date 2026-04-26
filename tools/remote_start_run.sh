@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PRESET="${1:-enhanced}"
+ROUNDS="${2:-1}"
+MODE="${3:-live}"
+RUN_LABEL="${4:-}"
+
+ROOT_DIR="/opt/polybot/current"
+RUNS_DIR="/opt/polybot/log/runs"
+SHARED_CFG="/opt/polybot/shared/polymarket_config.json"
+LOCAL_CFG="/root/.config/polymarket/config.json"
+
+mkdir -p "$RUNS_DIR" /root/.config/polymarket
+
+if [ -f "$SHARED_CFG" ]; then
+  cp "$SHARED_CFG" "$LOCAL_CFG"
+fi
+
+STAMP="$(date -u '+%Y%m%dT%H%M%SZ')"
+if [ -n "$RUN_LABEL" ]; then
+  RUN_ID="${STAMP}_${RUN_LABEL}"
+else
+  RUN_ID="${STAMP}_${PRESET}_${MODE}_${ROUNDS}r"
+fi
+RUN_DIR="${RUNS_DIR}/${RUN_ID}"
+mkdir -p "$RUN_DIR"
+
+cd "$ROOT_DIR"
+
+GIT_HEAD="$(git rev-parse --short HEAD)"
+STARTED_AT="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+
+cat > "${RUN_DIR}/meta.env" <<EOF
+RUN_ID=${RUN_ID}
+RUN_DIR=${RUN_DIR}
+PRESET=${PRESET}
+ROUNDS=${ROUNDS}
+MODE=${MODE}
+GIT_HEAD=${GIT_HEAD}
+STARTED_AT=${STARTED_AT}
+ROOT_DIR=${ROOT_DIR}
+EOF
+
+cat > "${RUN_DIR}/run.sh" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+cd "${ROOT_DIR}"
+find log -maxdepth 1 -type f \( -name '*_trade.log' -o -name '*_trade.jsonl' \) -delete
+if [ "${MODE}" = "dry" ]; then
+  polybot-run --preset "${PRESET}" --rounds "${ROUNDS}" --dry
+else
+  polybot-run --preset "${PRESET}" --rounds "${ROUNDS}"
+fi
+EOF
+chmod +x "${RUN_DIR}/run.sh"
+
+nohup bash -lc "
+  set -euo pipefail
+  RC=0
+  if ! '${RUN_DIR}/run.sh' >'${RUN_DIR}/stdout.log' 2>&1; then
+    RC=\$?
+  fi
+  printf '%s\n' \"\${RC}\" > '${RUN_DIR}/exit_code'
+  date -u '+%Y-%m-%dT%H:%M:%SZ' > '${RUN_DIR}/finished_at'
+  find '${ROOT_DIR}/log' -maxdepth 1 -type f \\( -name '*_trade.log' -o -name '*_trade.jsonl' \\) -exec cp {} '${RUN_DIR}/' \\;
+" </dev/null >/dev/null 2>&1 &
+RUN_PID=$!
+
+echo "${RUN_PID}" > "${RUN_DIR}/pid"
+echo "PID=${RUN_PID}" >> "${RUN_DIR}/meta.env"
+
+ln -sfn "${RUN_DIR}" "${RUNS_DIR}/latest"
+
+printf 'RUN_ID=%s\nRUN_DIR=%s\nPID=%s\nGIT_HEAD=%s\n' "${RUN_ID}" "${RUN_DIR}" "${RUN_PID}" "${GIT_HEAD}"

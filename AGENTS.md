@@ -284,6 +284,36 @@ PYTHONPATH=/Users/forrestliao/workspace python3.11 tools/probe_post_order_latenc
   --token-id <TOKEN_ID> --side buy --price 0.01 --size 1 --repeats 3
 ```
 
+**Start unattended VPS run**
+
+```bash
+bash tools/vps_start_run.sh --host 70.34.207.45 --preset enhanced --rounds 6
+```
+
+**Fetch latest VPS logs**
+
+```bash
+bash tools/vps_fetch_run.sh --host 70.34.207.45 --run-id latest
+```
+
+**Unified VPS control**
+
+```bash
+bash tools/vpsctl.sh bootstrap --host 70.34.207.45 --ask-pass
+bash tools/vpsctl.sh run --host 70.34.207.45 --ask-pass --preset enhanced --rounds 6
+bash tools/vpsctl.sh fetch --host 70.34.207.45 --ask-pass --run-id latest
+```
+
+Prefer `tools/vpsctl.sh` when the VPS host may change. It accepts dynamic
+`host/user/password` and handles bootstrap, update, run, and log fetch.
+
+Profiles:
+
+- VPS profile file: `~/.polybot/vps/<name>.env`
+- account profile file: `~/.polybot/accounts/<name>.json`
+- bootstrap can use:
+  - `bash tools/vpsctl.sh bootstrap --vps-profile sweden --account-profile alice`
+
 **Run tests**
 
 ```bash

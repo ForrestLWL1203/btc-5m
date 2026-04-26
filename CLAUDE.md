@@ -296,13 +296,43 @@ PYTHONPATH=/Users/forrestliao/workspace python3.11 tools/probe_post_order_latenc
   --token-id <TOKEN_ID> --side buy --price 0.01 --size 1 --repeats 3
 ```
 
+Start an unattended VPS run:
+
+```bash
+bash tools/vps_start_run.sh --host 70.34.207.45 --preset enhanced --rounds 6
+```
+
+Fetch the latest VPS run logs:
+
+```bash
+bash tools/vps_fetch_run.sh --host 70.34.207.45 --run-id latest
+```
+
+Unified VPS control tool:
+
+```bash
+bash tools/vpsctl.sh bootstrap --host 70.34.207.45 --ask-pass
+bash tools/vpsctl.sh run --host 70.34.207.45 --ask-pass --preset enhanced --rounds 6
+bash tools/vpsctl.sh fetch --host 70.34.207.45 --ask-pass --run-id latest
+```
+
+Use `tools/vpsctl.sh` when the VPS may change. It handles dynamic
+`host/user/password` input plus bootstrap, update, run, and fetch.
+
+Profile support:
+
+- VPS profile: `~/.polybot/vps/<name>.env`
+- account profile: `~/.polybot/accounts/<name>.json`
+- example:
+  - `bash tools/vpsctl.sh bootstrap --vps-profile sweden --account-profile alice`
+
 Run tests:
 
 ```bash
 env -u ALL_PROXY -u all_proxy -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy pytest -q
 ```
 
-Current local status: `123 passed`.
+Current local status: `128 passed`.
 
 ## Working Guidance
 

@@ -313,13 +313,141 @@ PYTHONPATH=/Users/forrestliao/workspace python3.11 tools/probe_post_order_latenc
   --token-id <TOKEN_ID> --side buy --price 0.01 --size 1 --repeats 3
 ```
 
+Start an unattended VPS run:
+
+```bash
+bash tools/vps_start_run.sh --host 70.34.207.45 --preset enhanced --rounds 6
+```
+
+Fetch the latest VPS run logs:
+
+```bash
+bash tools/vps_fetch_run.sh --host 70.34.207.45 --run-id latest
+```
+
+Unified VPS control tool:
+
+```bash
+bash tools/vpsctl.sh bootstrap --host 70.34.207.45 --ask-pass
+bash tools/vpsctl.sh run --host 70.34.207.45 --ask-pass --preset enhanced --rounds 6
+bash tools/vpsctl.sh fetch --host 70.34.207.45 --ask-pass --run-id latest
+```
+
+`tools/vpsctl.sh` is the preferred path for dynamic VPS changes because it can
+take a new host/user/password and perform:
+
+- remote environment bootstrap
+- repo clone / pull
+- venv + dependency install
+- Polymarket config sync
+- unattended remote run launch
+- post-run log fetch
+
+Friend quick start:
+
+1. Create a VPS profile at `~/.polybot/vps/<name>.env`.
+2. Create an account profile at `~/.polybot/accounts/<name>.json`.
+3. Bootstrap the server once:
+
+```bash
+bash tools/vpsctl.sh bootstrap --vps-profile <vps_name> --account-profile <account_name>
+```
+
+4. Start a run:
+
+```bash
+bash tools/vpsctl.sh run --vps-profile <vps_name> --preset enhanced --rounds 12
+```
+
+5. After the run finishes, fetch logs:
+
+```bash
+bash tools/vpsctl.sh fetch --vps-profile <vps_name> --run-id latest
+```
+
+Profile-driven usage for other users:
+
+```bash
+bash tools/vpsctl.sh bootstrap --vps-profile sweden --account-profile alice
+bash tools/vpsctl.sh run --vps-profile sweden --preset enhanced --rounds 12
+bash tools/vpsctl.sh fetch --vps-profile sweden --run-id latest
+```
+
+VPS profile format:
+
+- location by name: `~/.polybot/vps/<name>.env`
+- or pass a direct file path to `--vps-profile`
+- shell-style `KEY=value` file
+
+Required / supported keys:
+
+- `HOST=70.34.207.45`
+- `USER_NAME=root`
+- one of:
+  - `PASSWORD=your_vps_password`
+  - `PASSWORD_ENV_VAR=MY_VPS_PASSWORD`
+  - `ASK_PASS=1`
+- optional:
+  - `REPO_URL=https://github.com/ForrestLWL1203/btc-5m.git`
+  - `BRANCH=main`
+
+Example `~/.polybot/vps/sweden.env`:
+
+```bash
+HOST=70.34.207.45
+USER_NAME=root
+PASSWORD_ENV_VAR=POLYBOT_SWEDEN_PASS
+REPO_URL=https://github.com/ForrestLWL1203/btc-5m.git
+BRANCH=main
+```
+
+Reference example file:
+[docs/examples/vps_profile.example.env](/Users/forrestliao/workspace/docs/examples/vps_profile.example.env)
+
+Account profile format:
+
+- location by name: `~/.polybot/accounts/<name>.json`
+- or pass a direct file path to `--account-profile`
+- JSON file with the same structure as Polymarket CLI config
+
+Required / supported keys:
+
+- `private_key`
+- `chain_id`
+- `signature_type`
+- usually one of:
+  - `proxy_address`
+  - `funder`
+
+Example `~/.polybot/accounts/alice.json`:
+
+```json
+{
+  "private_key": "0xYOUR_PRIVATE_KEY",
+  "chain_id": 137,
+  "signature_type": "proxy",
+  "proxy_address": "0xYOUR_PROXY_ADDRESS"
+}
+```
+
+Reference example file:
+[docs/examples/account_profile.example.json](/Users/forrestliao/workspace/docs/examples/account_profile.example.json)
+
+Notes:
+
+- `bootstrap` uploads the chosen account profile to the VPS as the active
+  Polymarket config.
+- If `--account-profile` is omitted, `vpsctl.sh` falls back to the local
+  `~/.config/polymarket/config.json`.
+- Do not store other users' account profiles inside the repo.
+
 Run tests:
 
 ```bash
 env -u ALL_PROXY -u all_proxy -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy pytest -q
 ```
 
-Current local status: `123 passed`.
+Current local status: `128 passed`.
 
 ## Notes For Future Changes
 
