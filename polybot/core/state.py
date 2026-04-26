@@ -29,6 +29,10 @@ class MonitorState:
     entry_amount: float = 0.0
     last_entry_check_side: Optional[str] = None  # target side for the last entry-band check
     last_entry_check_best_ask: Optional[float] = None  # target ask used by the last entry-band check
+    last_guard_skip_side: Optional[str] = None
+    last_guard_skip_best_ask: Optional[float] = None
+    last_guard_skip_max_entry_price: Optional[float] = None
+    last_guard_skip_reason: Optional[str] = None
     trade_lock: asyncio.Lock = None  # prevents concurrent buy/sell from WS callbacks
     started: bool = False  # set True when window officially starts — prevents pre-start trades
 

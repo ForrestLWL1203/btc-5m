@@ -21,6 +21,12 @@ strategy:
 
 params:
   amount: 1.0
+  entry_ask_level: 1
+  ask_level_tiers:
+    - threshold: 2.0
+      level: 2
+    - threshold: 3.5
+      level: 4
   amount_tiers:
     - threshold: 2.0
       amount: 1.5

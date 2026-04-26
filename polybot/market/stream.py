@@ -31,7 +31,7 @@ class PriceUpdate:
     best_ask: Optional[float]
     midpoint: Optional[float]
     spread: Optional[float]
-    source: str  # 'best_bid_ask' | 'price_change' | 'last_trade_price'
+    source: str  # 'best_bid_ask' | 'price_change' | 'last_trade_price' | 'book'
     received_at: float = 0.0  # local monotonic timestamp when this update was processed
     best_ask_received_at: float = 0.0  # local monotonic timestamp when best_ask was last updated
 
@@ -71,6 +71,8 @@ class PriceStream:
 
         # Price cache: token_id -> PriceUpdate
         self._prices: dict[str, PriceUpdate] = {}
+        # Order book cache: token_id -> {"bids": [(price, size)], "asks": [(price, size)], "received_at": mono}
+        self._books: dict[str, dict[str, object]] = {}
 
         # Background tasks
         self._ping_task: Optional[asyncio.Task] = None
@@ -81,8 +83,22 @@ class PriceStream:
         """Get the latest cached midpoint for a token (sync read)."""
         return self._prices.get(token_id, PriceUpdate("", None, None, None, None, "")).midpoint
 
-    def get_latest_best_ask(self, token_id: str, max_age_sec: Optional[float] = None) -> Optional[float]:
+    def get_latest_best_ask(
+        self,
+        token_id: str,
+        max_age_sec: Optional[float] = None,
+        level: int = 1,
+    ) -> Optional[float]:
         """Get the latest cached best ask for a token (sync read)."""
+        if level > 1:
+            asks = self.get_latest_ask_levels(token_id, max_age_sec=max_age_sec)
+            if len(asks) < level:
+                return None
+            return asks[level - 1]
+
+        asks = self.get_latest_ask_levels(token_id, max_age_sec=max_age_sec)
+        if asks:
+            return asks[0]
         update = self._prices.get(token_id)
         if update is None:
             return None
@@ -92,8 +108,14 @@ class PriceStream:
                 return None
         return update.best_ask
 
-    def get_latest_best_ask_age(self, token_id: str) -> Optional[float]:
+    def get_latest_best_ask_age(self, token_id: str, level: int = 1) -> Optional[float]:
         """Return age in seconds for the cached best ask, if known."""
+        if level >= 1:
+            book = self._books.get(token_id)
+            if book is not None:
+                book_received_at = float(book.get("received_at", 0.0) or 0.0)
+                if book_received_at > 0:
+                    return time.monotonic() - book_received_at
         update = self._prices.get(token_id)
         if update is None:
             return None
@@ -101,6 +123,22 @@ class PriceStream:
         if ask_received_at <= 0:
             return None
         return time.monotonic() - ask_received_at
+
+    def get_latest_ask_levels(
+        self,
+        token_id: str,
+        max_age_sec: Optional[float] = None,
+    ) -> list[float]:
+        """Return cached ask prices sorted best-to-worse, if fresh enough."""
+        book = self._books.get(token_id)
+        if book is None:
+            return []
+        book_received_at = float(book.get("received_at", 0.0) or 0.0)
+        if max_age_sec is not None and book_received_at > 0:
+            if time.monotonic() - book_received_at > max_age_sec:
+                return []
+        asks = book.get("asks", [])
+        return [price for price, _size in asks]
 
     def set_on_price(self, callback: Callable[[PriceUpdate], Awaitable[None]]) -> None:
         """Update the price callback (used when reusing WS for a new window)."""
@@ -128,6 +166,7 @@ class PriceStream:
 
         # Clear stale cached prices from previous window
         self._prices.clear()
+        self._books.clear()
 
         old_token_ids = list(self._connected_tokens)
         # Subscribe to new tokens
@@ -193,6 +232,7 @@ class PriceStream:
         self._ws = await websockets.connect(WS_URL)
         await self._subscribe(self._connected_tokens)
         self._prices.clear()
+        self._books.clear()
         if log_reconnect:
             log_event(log, logging.INFO, WS, {"action": "RECONNECTED"})
 
@@ -285,6 +325,8 @@ class PriceStream:
 
         if event_type == "best_bid_ask":
             self._handle_best_bid_ask(ev)
+        elif event_type == "book":
+            self._handle_book(ev)
         elif event_type == "price_change":
             self._handle_price_change(ev)
         elif event_type == "last_trade_price":
@@ -327,6 +369,38 @@ class PriceStream:
             "best_bid_ask %s: bid=%.3f ask=%.3f mid=%.3f",
             asset_id[:20], bid, ask, midpoint,
         )
+
+    def _handle_book(self, ev: dict) -> None:
+        """Handle book snapshot/update: cache full L2 depth and schedule callback."""
+        asset_id = ev.get("asset_id", "")
+        if not asset_id:
+            return
+
+        bids = self._parse_book_side(ev.get("bids", []), reverse=True)
+        asks = self._parse_book_side(ev.get("asks", []), reverse=False)
+        received_at = time.monotonic()
+        self._books[asset_id] = {
+            "bids": bids,
+            "asks": asks,
+            "received_at": received_at,
+        }
+
+        best_bid = bids[0][0] if bids else None
+        best_ask = asks[0][0] if asks else None
+        spread = (best_ask - best_bid) if best_ask is not None and best_bid is not None else None
+        midpoint = (best_bid + best_ask) / 2 if best_ask is not None and best_bid is not None else None
+        update = PriceUpdate(
+            token_id=asset_id,
+            best_bid=best_bid,
+            best_ask=best_ask,
+            midpoint=midpoint,
+            spread=spread,
+            source="book",
+            received_at=received_at,
+            best_ask_received_at=received_at if best_ask is not None else 0.0,
+        )
+        self._prices[asset_id] = update
+        self._schedule_callback(update)
 
     def _handle_price_change(self, ev: dict) -> None:
         """
@@ -393,6 +467,7 @@ class PriceStream:
                 best_ask_received_at=ask_received_at,
             )
             self._prices[asset_id] = update
+            self._apply_price_change_to_book(asset_id, side, price, change.get("size"))
             self._schedule_callback(update)
 
     def _handle_last_trade(self, ev: dict) -> None:
@@ -420,6 +495,54 @@ class PriceStream:
         )
         self._prices[asset_id] = update
         self._schedule_callback(update)
+
+    @staticmethod
+    def _parse_book_side(levels: list[dict], reverse: bool) -> list[tuple[float, float]]:
+        parsed: list[tuple[float, float]] = []
+        for level in levels:
+            try:
+                price = float(level.get("price"))
+                size = float(level.get("size", 0))
+            except (TypeError, ValueError, AttributeError):
+                continue
+            if size <= 0:
+                continue
+            parsed.append((price, size))
+        parsed.sort(key=lambda pair: pair[0], reverse=reverse)
+        return parsed
+
+    def _apply_price_change_to_book(
+        self,
+        asset_id: str,
+        side: str,
+        price: float,
+        size_raw,
+    ) -> None:
+        book = self._books.get(asset_id)
+        if book is None:
+            return
+        try:
+            size = float(size_raw)
+        except (TypeError, ValueError):
+            return
+        side_key = "bids" if side == "BUY" else "asks" if side == "SELL" else None
+        if side_key is None:
+            return
+        levels = list(book.get(side_key, []))
+        updated = False
+        kept: list[tuple[float, float]] = []
+        for level_price, level_size in levels:
+            if level_price == price:
+                updated = True
+                if size > 0:
+                    kept.append((price, size))
+            else:
+                kept.append((level_price, level_size))
+        if not updated and size > 0:
+            kept.append((price, size))
+        kept.sort(key=lambda pair: pair[0], reverse=(side_key == "bids"))
+        book[side_key] = kept
+        book["received_at"] = time.monotonic()
 
     def _schedule_callback(self, update: PriceUpdate) -> None:
         """Schedule the async callback on the running event loop."""

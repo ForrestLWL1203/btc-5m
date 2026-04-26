@@ -9,6 +9,8 @@ class TradeConfig:
     """Execution controls for the current runtime strategy."""
 
     amount: float = 5.0
+    entry_ask_level: int = 1
+    ask_level_tiers: list[tuple[float, int]] = field(default_factory=list)
     max_entries_per_window: Optional[int] = None
     rounds: Optional[int] = None  # None = infinite
     amount_tiers: list[tuple[float, float]] = field(default_factory=list)
@@ -29,6 +31,16 @@ class TradeConfig:
         for threshold, tier_amount in self.amount_tiers:
             if signal_strength >= threshold:
                 selected = max(selected, tier_amount)
+        return selected
+
+    def ask_level_for_signal_strength(self, signal_strength: Optional[float]) -> int:
+        """Return configured ask-book level for signal strength."""
+        selected = max(1, int(self.entry_ask_level))
+        if signal_strength is None:
+            return selected
+        for threshold, level in self.ask_level_tiers:
+            if signal_strength >= threshold:
+                selected = max(selected, int(level))
         return selected
 
     def normal_full_cap_guard_reason(

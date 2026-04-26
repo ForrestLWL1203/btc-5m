@@ -97,20 +97,24 @@ def _price_hint_refresher(
     ws: PriceStream,
     token_id: str,
     strategy: Optional[Strategy],
+    trade_config: TradeConfig,
     state: Optional[MonitorState] = None,
 ):
     """Return a callback that refreshes retry BUY hints from the latest WS ask."""
 
     def refresh() -> Optional[float]:
         max_entry_price = _entry_price_cap(strategy, state)
+        ask_level = _entry_ask_level(trade_config, state)
         latest_ask = ws.get_latest_best_ask(
             token_id,
             max_age_sec=config.FAK_RETRY_MAX_BEST_ASK_AGE_SEC,
+            level=ask_level,
         )
-        ask_age = ws.get_latest_best_ask_age(token_id)
+        ask_age = ws.get_latest_best_ask_age(token_id, level=ask_level)
         if latest_ask is None:
             log_event(log, logging.INFO, SIGNAL, {
                 "action": "BUY_RETRY_ABORT",
+                "entry_ask_level": ask_level,
                 "best_ask_age_sec": round(ask_age, 3) if ask_age is not None else None,
                 "reason": "target best_ask unavailable or stale",
             })
@@ -119,6 +123,7 @@ def _price_hint_refresher(
             log_event(log, logging.INFO, SIGNAL, {
                 "action": "BUY_RETRY_ABORT",
                 "price": latest_ask,
+                "entry_ask_level": ask_level,
                 "best_ask_age_sec": round(ask_age, 3) if ask_age is not None else None,
                 "reason": "target best_ask above cap",
             })
@@ -145,6 +150,19 @@ def _normal_full_cap_guard_reason(
         max_entry_price=max_entry_price,
         signal_strength=state.target_signal_strength,
         remaining_sec=state.target_remaining_sec,
+    )
+
+
+def _entry_ask_level(trade_config: TradeConfig, state: Optional[MonitorState]) -> int:
+    signal_strength = state.target_signal_strength if state is not None else None
+    return trade_config.ask_level_for_signal_strength(signal_strength)
+
+
+def _best_ask_level_1(ws: PriceStream, token_id: str) -> Optional[float]:
+    return ws.get_latest_best_ask(
+        token_id,
+        max_age_sec=config.FAK_RETRY_MAX_BEST_ASK_AGE_SEC,
+        level=1,
     )
 
 
@@ -175,6 +193,34 @@ def _log_entry_guard_skip(
             else None
         ),
     })
+
+
+def _should_log_entry_guard_skip(
+    state: MonitorState,
+    side: str,
+    best_ask: float,
+    max_entry_price: Optional[float],
+    reason: str,
+) -> bool:
+    if (
+        state.last_guard_skip_side == side
+        and state.last_guard_skip_best_ask == best_ask
+        and state.last_guard_skip_max_entry_price == max_entry_price
+        and state.last_guard_skip_reason == reason
+    ):
+        return False
+    state.last_guard_skip_side = side
+    state.last_guard_skip_best_ask = best_ask
+    state.last_guard_skip_max_entry_price = max_entry_price
+    state.last_guard_skip_reason = reason
+    return True
+
+
+def _clear_entry_guard_skip_cache(state: MonitorState) -> None:
+    state.last_guard_skip_side = None
+    state.last_guard_skip_best_ask = None
+    state.last_guard_skip_max_entry_price = None
+    state.last_guard_skip_reason = None
 
 
 def _entry_ask_changed(state: MonitorState, side: str, best_ask: Optional[float]) -> bool:
@@ -637,11 +683,17 @@ async def monitor_window(
             if strategy.should_buy(opening_price, state):
                 if state.target_side is not None:
                     buy_token_id, price_token_id = _side_token(window, state.target_side)
+                ask_level = _entry_ask_level(trade_config, state)
+                best_ask_level_1 = _best_ask_level_1(ws, buy_token_id)
                 opening_best_ask = ws.get_latest_best_ask(
                     buy_token_id,
                     max_age_sec=config.FAK_RETRY_MAX_BEST_ASK_AGE_SEC,
+                    level=ask_level,
                 )
-                opening_best_ask_age = ws.get_latest_best_ask_age(buy_token_id)
+                opening_best_ask_age = ws.get_latest_best_ask_age(
+                    buy_token_id,
+                    level=ask_level,
+                )
                 max_entry_price = _entry_price_cap(strategy, state)
                 if opening_best_ask is None:
                     state.target_entry_price = None
@@ -656,17 +708,25 @@ async def monitor_window(
                     )
                     if guard_reason is not None:
                         state.target_entry_price = None
-                        _log_entry_guard_skip(
-                            window,
+                        if _should_log_entry_guard_skip(
                             state,
                             state.target_side or side,
                             opening_best_ask,
                             max_entry_price,
                             guard_reason,
-                        )
+                        ):
+                            _log_entry_guard_skip(
+                                window,
+                                state,
+                                state.target_side or side,
+                                opening_best_ask,
+                                max_entry_price,
+                                guard_reason,
+                            )
                     elif not _entry_ask_changed(state, state.target_side or side, opening_best_ask):
                         state.target_entry_price = None
                     else:
+                        _clear_entry_guard_skip_cache(state)
                         buffered_hint = _initial_price_hint(
                             buy_token_id,
                             opening_best_ask,
@@ -677,8 +737,10 @@ async def monitor_window(
                         await _handle_opening_price(
                             window, state, buy_token_id, opening_price, dry_run, trade_config, strategy, state.target_side or side,
                             best_ask=buffered_hint,
+                            target_entry_ask=opening_best_ask,
+                            best_ask_level_1=best_ask_level_1,
                             best_ask_age_sec=opening_best_ask_age,
-                            price_hint_refresher=_price_hint_refresher(ws, buy_token_id, strategy, state),
+                            price_hint_refresher=_price_hint_refresher(ws, buy_token_id, strategy, trade_config, state),
                         )
                         # Re-resolve token if strategy set target_side during opening buy
                         if state.target_side is not None:
@@ -776,13 +838,19 @@ async def _on_price_update(
                 if state.target_side is not None:
                     effective_side = state.target_side
                     buy_token_id, _ = _side_token(window, effective_side)
+                ask_level = _entry_ask_level(trade_config, state)
+                best_ask_level_1 = _best_ask_level_1(ws, buy_token_id)
                 best_ask = ws.get_latest_best_ask(
                     buy_token_id,
                     max_age_sec=config.FAK_RETRY_MAX_BEST_ASK_AGE_SEC,
+                    level=ask_level,
                 )
-                best_ask_age = ws.get_latest_best_ask_age(buy_token_id)
+                best_ask_age = ws.get_latest_best_ask_age(
+                    buy_token_id,
+                    level=ask_level,
+                )
                 max_entry_price = _entry_price_cap(strategy, state)
-                if best_ask is None and update.token_id == buy_token_id:
+                if best_ask is None and ask_level == 1 and update.token_id == buy_token_id:
                     best_ask = update.best_ask
                     best_ask_age = 0.0 if update.best_ask is not None else None
                 if best_ask is None:
@@ -799,15 +867,23 @@ async def _on_price_update(
                 )
                 if guard_reason is not None:
                     state.target_entry_price = None
-                    _log_entry_guard_skip(
-                        window,
+                    if _should_log_entry_guard_skip(
                         state,
                         effective_side,
                         best_ask,
                         max_entry_price,
                         guard_reason,
-                    )
+                    ):
+                        _log_entry_guard_skip(
+                            window,
+                            state,
+                            effective_side,
+                            best_ask,
+                            max_entry_price,
+                            guard_reason,
+                        )
                     return
+                _clear_entry_guard_skip_cache(state)
                 if not _entry_ask_changed(state, effective_side, best_ask):
                     state.target_entry_price = None
                     return
@@ -815,6 +891,8 @@ async def _on_price_update(
                 log_event(log, logging.INFO, SIGNAL, {
                     "action": "BUY_SIGNAL",
                     "price": best_ask,
+                    "target_entry_ask": best_ask,
+                    "best_ask_level_1": best_ask_level_1,
                     "signal_price": price,
                     "side": effective_side.upper(),
                     "window": window.short_label,
@@ -838,6 +916,7 @@ async def _on_price_update(
                     "amount": trade_config.amount_for_signal_strength(
                         state.target_signal_strength
                     ),
+                    "entry_ask_level": ask_level,
                     "best_ask_age_ms": round(best_ask_age * 1000) if best_ask_age is not None else None,
                 })
                 buffered_hint = _initial_price_hint(
@@ -849,8 +928,10 @@ async def _on_price_update(
                 await _handle_opening_price(
                     window, state, buy_token_id, price, dry_run, trade_config, strategy, effective_side,
                     best_ask=buffered_hint,
+                    target_entry_ask=best_ask,
+                    best_ask_level_1=best_ask_level_1,
                     best_ask_age_sec=best_ask_age,
-                    price_hint_refresher=_price_hint_refresher(ws, buy_token_id, strategy, state),
+                    price_hint_refresher=_price_hint_refresher(ws, buy_token_id, strategy, trade_config, state),
                 )
             return
 
@@ -870,6 +951,8 @@ async def _handle_opening_price(
     strategy: Optional[Strategy] = None,
     side: str = "up",
     best_ask: Optional[float] = None,
+    target_entry_ask: Optional[float] = None,
+    best_ask_level_1: Optional[float] = None,
     best_ask_age_sec: Optional[float] = None,
     price_hint_refresher=None,
 ) -> None:
@@ -898,6 +981,8 @@ async def _handle_opening_price(
             "token": buy_token_id[:20],
             "signal_price": price,
             "target_price": buy_price,
+            "target_entry_ask": target_entry_ask,
+            "best_ask_level_1": best_ask_level_1,
             "price_hint": best_ask,
             "amount": trade_amount,
             "signal_strength": (
@@ -915,6 +1000,7 @@ async def _handle_opening_price(
                 if state.target_remaining_sec is not None
                 else None
             ),
+            "entry_ask_level": _entry_ask_level(trade_config, state),
             "best_ask_age_ms": round(best_ask_age_sec * 1000) if best_ask_age_sec is not None else None,
         })
         result = await buy_token(
@@ -977,6 +1063,8 @@ async def _handle_opening_price(
             "token": buy_token_id[:20],
             "signal_price": price,
             "target_price": buy_price,
+            "target_entry_ask": target_entry_ask,
+            "best_ask_level_1": best_ask_level_1,
             "price_hint": best_ask,
             "amount": trade_amount,
             "signal_strength": (
@@ -994,6 +1082,7 @@ async def _handle_opening_price(
                 if state.target_remaining_sec is not None
                 else None
             ),
+            "entry_ask_level": _entry_ask_level(trade_config, state),
             "best_ask_age_ms": round(best_ask_age_sec * 1000) if best_ask_age_sec is not None else None,
             "dry_run": True,
         })

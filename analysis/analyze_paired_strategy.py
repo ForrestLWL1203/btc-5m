@@ -855,6 +855,67 @@ def replay(
     print()
 
 
+def strength_bucket_analysis(
+    windows: list[Window],
+    theta_pct: float,
+    lo_rem: int,
+    hi_rem: int,
+    persistence_sec: int,
+    max_entry_price: float,
+    min_entry_price: float,
+    entry_delay_sec: float,
+    price_hint_buffer_ticks: float,
+    bucket_edges: list[float],
+) -> None:
+    """Print win rate / EV by signal-strength bucket for one entry config."""
+    trades = collect_trades(
+        windows,
+        theta_pct,
+        lo_rem,
+        hi_rem,
+        persistence_sec=persistence_sec,
+        max_entry_price=max_entry_price,
+        min_entry_price=min_entry_price,
+        entry_delay_sec=entry_delay_sec,
+        price_hint_buffer_ticks=price_hint_buffer_ticks,
+    )
+    if not trades:
+        print("\n=== Signal strength bucket analysis ===")
+        print("No trades for selected config.")
+        return
+
+    edges = sorted(bucket_edges)
+    if not edges:
+        edges = [1.0, 1.5, 2.0, 3.0]
+
+    print("\n=== Signal strength bucket analysis ===")
+    print(f"Config: theta={theta_pct:.3f}% band=[{lo_rem},{hi_rem}] "
+          f"persistence={persistence_sec}s cap=[{min_entry_price:.3f},{max_entry_price:.3f}] "
+          f"delay={entry_delay_sec:.1f}s")
+    print(f"Total trades: {len(trades)}")
+    print(f"{'bucket':>12} {'N':>4} {'winR':>6} {'avgP':>6} {'avgSig':>7} {'EV/trd':>8}")
+
+    bounds = [0.0] + edges + [float("inf")]
+    for lo_edge, hi_edge in zip(bounds, bounds[1:]):
+        sub = [
+            t for t in trades
+            if lo_edge <= t["signal_strength"] < hi_edge
+        ]
+        if not sub:
+            continue
+        n = len(sub)
+        wins = sum(1 for t in sub if t["win"])
+        avg_entry = sum(t["entry_price"] for t in sub) / n
+        avg_strength = sum(t["signal_strength"] for t in sub) / n
+        ev = sum(
+            ((1.0 - t["entry_price"]) if t["win"] else -t["entry_price"])
+            for t in sub
+        ) / n
+        hi_label = "inf" if hi_edge == float("inf") else f"{hi_edge:.2f}"
+        print(f"{f'[{lo_edge:.2f},{hi_label})':>12} {n:>4d} "
+              f"{wins/n:>6.1%} {avg_entry:>6.3f} {avg_strength:>7.2f} {ev:>+8.4f}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("path", nargs="+")
@@ -892,6 +953,10 @@ def main():
     ap.add_argument("--btc-invalidation-mode", default="reverse_theta",
                     choices=["reverse_theta", "signal_half", "near_open"],
                     help="BTC side of stop-loss confluence")
+    ap.add_argument("--strength-bucket-analysis", action="store_true",
+                    help="Show signal-strength buckets for selected single config")
+    ap.add_argument("--strength-buckets", default="1.0,1.25,1.5,2.0,3.0",
+                    help="Comma-separated signal-strength bucket edges")
     args = ap.parse_args()
 
     # Support multiple input files — concatenate windows in order
@@ -962,6 +1027,21 @@ def main():
             min_hold_secs=[float(v) for v in args.min_hold_secs.split(",")],
             sell_buffer_ticks=args.sell_buffer_ticks,
             btc_invalidation_mode=args.btc_invalidation_mode,            amount=args.amount,
+        )
+        return
+
+    if args.strength_bucket_analysis:
+        strength_bucket_analysis(
+            windows,
+            theta_pct=args.theta,
+            lo_rem=args.lo,
+            hi_rem=args.hi,
+            persistence_sec=args.persistence,
+            max_entry_price=args.max_entry_price,
+            min_entry_price=args.min_entry_price,
+            entry_delay_sec=float(args.delays.split(",")[-1]),
+            price_hint_buffer_ticks=args.price_hint_buffer_ticks,
+            bucket_edges=[float(v) for v in args.strength_buckets.split(",") if v],
         )
         return
 
@@ -1136,6 +1216,8 @@ def collect_trades(
             "direction_up": direction_up,
             "entry_price": fill_price,
             "signal_price": entry["sig_price"],
+            "signal_strength": entry.get("signal_strength"),
+            "past_signal_strength": entry.get("past_signal_strength"),
             "open_price": w.open_price,
             "win": win,
             "confidence": entry.get("confidence", "normal"),
@@ -1183,6 +1265,8 @@ def _find_window_entry(
             continue
         if abs(move_pct) < abs(past_move) * 0.7:
             continue
+        signal_strength = abs(move_pct) / theta_pct if theta_pct > 0 else 0.0
+        past_signal_strength = abs(past_move) / theta_pct if theta_pct > 0 else 0.0
 
         direction_up = move_pct > 0
         if committed_direction_up is not None and direction_up != committed_direction_up:
@@ -1229,6 +1313,8 @@ def _find_window_entry(
             "direction_up": direction_up,
             "sig_price": sig_price,
             "fill_price": buffered_fill_price,
+            "signal_strength": signal_strength,
+            "past_signal_strength": past_signal_strength,
             "effective_max_entry_price": max_entry_price,
             "skipped_no_quote": skipped_no_quote,
             "skipped_price_cap": skipped_price_cap,

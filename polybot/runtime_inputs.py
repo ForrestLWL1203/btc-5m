@@ -180,6 +180,17 @@ RUNTIME_INPUT_FIELDS: tuple[RuntimeInputField, ...] = (
         coerce=float,
     ),
     RuntimeInputField(
+        name="entry_ask_level",
+        config_path=("params", "entry_ask_level"),
+        value_type="int",
+        minimum=1,
+        maximum=20,
+        description="Use this ask-book level for entry pricing (1=best ask)",
+        ui_exposed=False,
+        cli_flag="--entry-ask-level",
+        coerce=int,
+    ),
+    RuntimeInputField(
         name="max_entries",
         config_path=("params", "max_entries_per_window"),
         value_type="int",

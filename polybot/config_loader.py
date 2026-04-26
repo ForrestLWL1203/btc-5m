@@ -101,6 +101,8 @@ def build_trade_config(cfg: dict) -> TradeConfig:
 
     return TradeConfig(
         amount=params.get("amount", 5.0),
+        entry_ask_level=max(1, int(params.get("entry_ask_level", 1))),
+        ask_level_tiers=_build_ask_level_tiers(params.get("ask_level_tiers")),
         max_entries_per_window=params.get("max_entries_per_window"),
         rounds=int(rounds_val) if rounds_val is not None else None,
         amount_tiers=_build_amount_tiers(params.get("amount_tiers")),
@@ -124,6 +126,23 @@ def _build_amount_tiers(raw: Optional[list[dict]]) -> list[tuple[float, float]]:
         if threshold is None or amount is None:
             continue
         tiers.append((float(threshold), float(amount)))
+    tiers.sort(key=lambda pair: pair[0])
+    return tiers
+
+
+def _build_ask_level_tiers(raw: Optional[list[dict]]) -> list[tuple[float, int]]:
+    """Build sorted signal-strength ask-level tiers from YAML."""
+    tiers: list[tuple[float, int]] = []
+    if not raw:
+        return tiers
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        threshold = item.get("threshold")
+        level = item.get("level")
+        if threshold is None or level is None:
+            continue
+        tiers.append((float(threshold), max(1, int(level))))
     tiers.sort(key=lambda pair: pair[0])
     return tiers
 

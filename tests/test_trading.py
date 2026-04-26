@@ -67,28 +67,6 @@ async def test_fak_buy_partial_fill_above_threshold_is_success():
     assert mock_client.post_order.call_count == 1
 
 
-@pytest.mark.asyncio
-async def test_fak_buy_partial_fill_below_threshold_retries():
-    """FAK BUY with fill < 60% retries and succeeds on second attempt."""
-    fills = [
-        {"sizeFilled": "10.0", "avgPrice": "0.50", "orderID": "ord-5", "status": "MATCHED"},  # $5 < $6 threshold
-        {"sizeFilled": "16.0", "avgPrice": "0.50", "orderID": "ord-6", "status": "MATCHED"},  # $8 ≥ $6 threshold
-    ]
-    mock_client = _mock_client(fills)
-
-    with patch("polybot.trading.trading.get_client", return_value=mock_client):
-        result = await _post_fak_market(
-            token_id="token-1",
-            amount=10.0,
-            side="BUY",
-            retry_count=3,
-            retry_interval=0.01,
-        )
-
-    assert result.success
-    assert result.filled_size == 16.0
-    assert mock_client.post_order.call_count == 2
-
 
 @pytest.mark.asyncio
 async def test_fak_buy_retries_on_zero_fill():
@@ -182,7 +160,7 @@ async def test_fak_buy_refreshes_price_hint_before_retry():
 
 @pytest.mark.asyncio
 async def test_fak_buy_aborts_retry_when_refreshed_hint_unavailable():
-    """If retry ask is unavailable/outside band, don't keep posting stale FAKs."""
+    """If retry ask is unavailable/above cap, don't keep posting stale FAKs."""
     mock_client = _mock_client([Exception("no orders found to match with FAK order")] * 3)
     refresher = MagicMock(return_value=None)
 

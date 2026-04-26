@@ -102,6 +102,68 @@ async def test_dispatch_price_change_array():
 
 
 @pytest.mark.asyncio
+async def test_dispatch_book_caches_full_ask_depth():
+    callback = AsyncMock()
+    stream = PriceStream(on_price=callback)
+
+    raw = '''{
+        "event_type": "book",
+        "asset_id": "token-book",
+        "bids": [
+            {"price": "0.48", "size": "30"},
+            {"price": "0.47", "size": "20"}
+        ],
+        "asks": [
+            {"price": "0.52", "size": "25"},
+            {"price": "0.53", "size": "60"},
+            {"price": "0.54", "size": "10"},
+            {"price": "0.55", "size": "5"}
+        ]
+    }'''
+    stream._dispatch(raw)
+
+    await asyncio.sleep(0.05)
+
+    assert stream.get_latest_best_ask("token-book") == pytest.approx(0.52)
+    assert stream.get_latest_best_ask("token-book", level=4) == pytest.approx(0.55)
+    assert stream.get_latest_best_ask("token-book", level=5) is None
+    assert stream.get_latest_ask_levels("token-book") == [0.52, 0.53, 0.54, 0.55]
+    callback.assert_called_once()
+    assert callback.call_args[0][0].source == "book"
+
+
+@pytest.mark.asyncio
+async def test_price_change_updates_cached_book_depth():
+    callback = AsyncMock()
+    stream = PriceStream(on_price=callback)
+
+    stream._dispatch('''{
+        "event_type": "book",
+        "asset_id": "token-book",
+        "bids": [{"price": "0.48", "size": "30"}],
+        "asks": [
+            {"price": "0.52", "size": "25"},
+            {"price": "0.53", "size": "60"},
+            {"price": "0.54", "size": "10"},
+            {"price": "0.55", "size": "5"}
+        ]
+    }''')
+    await asyncio.sleep(0.05)
+
+    stream._dispatch('''{
+        "event_type": "price_change",
+        "price_changes": [
+            {"asset_id": "token-book", "price": "0.53", "size": "0", "side": "SELL", "best_bid": "0.48", "best_ask": "0.52"},
+            {"asset_id": "token-book", "price": "0.56", "size": "7", "side": "SELL", "best_bid": "0.48", "best_ask": "0.52"}
+        ]
+    }''')
+    await asyncio.sleep(0.05)
+
+    assert stream.get_latest_ask_levels("token-book") == [0.52, 0.54, 0.55, 0.56]
+    assert stream.get_latest_best_ask("token-book", level=3) == pytest.approx(0.55)
+
+
+@pytest.mark.asyncio
 async def test_dispatch_invalid_json_ignored():
     """Invalid JSON is silently ignored."""
     callback = AsyncMock()
