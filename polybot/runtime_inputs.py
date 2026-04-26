@@ -185,7 +185,7 @@ RUNTIME_INPUT_FIELDS: tuple[RuntimeInputField, ...] = (
         value_type="int",
         minimum=1,
         maximum=20,
-        description="Use this ask-book level for entry pricing (1=best ask)",
+        description="Legacy ask-level hint; live entry now uses cap-limited WS book depth from level 2 onward",
         ui_exposed=False,
         cli_flag="--entry-ask-level",
         coerce=int,

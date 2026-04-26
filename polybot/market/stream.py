@@ -130,6 +130,14 @@ class PriceStream:
         max_age_sec: Optional[float] = None,
     ) -> list[float]:
         """Return cached ask prices sorted best-to-worse, if fresh enough."""
+        return [price for price, _size in self.get_latest_ask_levels_with_size(token_id, max_age_sec=max_age_sec)]
+
+    def get_latest_ask_levels_with_size(
+        self,
+        token_id: str,
+        max_age_sec: Optional[float] = None,
+    ) -> list[tuple[float, float]]:
+        """Return cached ask levels as ``(price, size)`` sorted best-to-worse."""
         book = self._books.get(token_id)
         if book is None:
             return []
@@ -138,7 +146,7 @@ class PriceStream:
             if time.monotonic() - book_received_at > max_age_sec:
                 return []
         asks = book.get("asks", [])
-        return [price for price, _size in asks]
+        return [(float(price), float(size)) for price, size in asks]
 
     def set_on_price(self, callback: Callable[[PriceUpdate], Awaitable[None]]) -> None:
         """Update the price callback (used when reusing WS for a new window)."""

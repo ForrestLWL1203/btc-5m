@@ -7,8 +7,8 @@ It trades Polymarket BTC 5-minute UP/DOWN markets by:
 1. anchoring BTC to the current 5-minute window open,
 2. waiting for a persistent move away from that open,
 3. locking the first valid direction for the window,
-4. buying only when the target leg's fresh executable ask from the configured
-   book level is at or below the active cap,
+4. buying only when target-leg WS book depth from level 2 onward has enough
+   notional inside the active cap,
 5. submitting a FAK BUY with a cap-aware price hint,
 6. holding to `window.end_epoch`.
 
@@ -48,7 +48,8 @@ params:
   max_entries_per_window: 1
 ```
 
-Execution is max-only by default: `target_best_ask <= 0.65`.
+Execution is max-only by default: enough level-2+ WS book depth must exist
+inside `max_entry_price=0.65`.
 
 ### Enhanced Test/Live
 
@@ -78,12 +79,6 @@ strategy:
 
 params:
   amount: 1.0
-  entry_ask_level: 1
-  ask_level_tiers:
-    - threshold: 2.0
-      level: 2
-    - threshold: 3.5
-      level: 4
   amount_tiers:
     - threshold: 2.0
       amount: 1.5
@@ -146,22 +141,28 @@ Execution:
 ### Entry Gating
 
 - Signal reference remains the UP-leg price stream.
-- Final execution permission always uses the target leg's fresh live ask from
-  the active book level chosen by signal strength.
+- Final execution permission uses the target leg's fresh WS order book depth,
+  not the `best_bid_ask` top quote.
 - UP trades use `up_best_ask`.
 - DOWN trades use `down_best_ask`.
 - Final gating never uses theoretical `1 - up_price`.
+- Level 1 ask is diagnostic only. Fillability starts from level 2 because the
+  top ask often disappears before the FAK reaches Polymarket.
+- The bot sums `price * size` only for ask levels `price <= active_cap`. It
+  sends a BUY only when that cap-limited notional covers the configured amount.
 
 ### Buy Execution
 
 - Order type: FAK.
-- Permission uses `target_entry_ask <= target_max_entry_price`.
+- Permission requires enough level-2+ WS book depth inside
+  `target_max_entry_price`.
 - There is no runtime `min_entry_price`; execution is max-only.
 - Enhanced config applies a normal full-cap guard before `BUY_SIGNAL`.
-- First price hint: active cap directly.
-- Retry refreshes target-leg ask using the same active book level.
-- Retry aborts if refreshed ask is stale or above cap.
-- Retry hint uses refreshed ask + small buffer, then clamps to cap.
+- First price hint is the level where cap-limited depth first covers `amount`,
+  plus a small tick buffer, clamped to cap.
+- Retry refreshes target-leg WS book depth with the same level-1 skip.
+- Retry aborts if refreshed cap-limited depth is stale or insufficient.
+- Retry hint is recalculated from fresh depth, then clamped to cap.
 - A 400 `no orders found to match with FAK order` can happen if the order book
   moves before `/order`; this is handled by refresh-and-abort logic.
 
@@ -186,11 +187,12 @@ Shared runtime state:
 
 - WS best-ask freshness is tracked separately from trade updates.
 - WS market-channel `book` snapshots and `price_change` deltas maintain local
-  ask depth, so entry pricing can use deeper ask levels without REST `/book`.
+  ask depth, so entry pricing uses deeper ask levels without REST `/book`.
 - `BUY_SIGNAL` and `BUY_PREP` log `best_ask_age_ms`.
 - `BUY_SIGNAL` / `BUY_PREP` also log `signal_strength`,
-  `past_signal_strength`, `remaining_sec`, `amount`, `entry_ask_level`,
-  `best_ask_level_1`, and `target_entry_ask`.
+  `past_signal_strength`, `remaining_sec`, `amount`, `best_ask_level_1`,
+  `target_entry_ask`, `price_hint`, `depth_levels_used`, `depth_notional`,
+  `depth_skipped_levels`, and a short `book_ask_preview`.
 - FAK execution logs include:
   - `create_market_order_ms`
   - `post_order_ms`
@@ -496,7 +498,7 @@ Run tests:
 env -u ALL_PROXY -u all_proxy -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy pytest -q
 ```
 
-Current local status: `128 passed`.
+Current local status: `129 passed`.
 
 ## Notes For Future Changes
 

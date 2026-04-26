@@ -114,7 +114,7 @@ async def test_on_price_buy_in_range():
          patch("polybot.trading.monitor._handle_opening_price", new_callable=AsyncMock) as mock_buy:
         await _on_price_update(update, window, state, ws=ws, dry_run=True, trade_config=_tc(), strategy=strategy, side="up")
         mock_buy.assert_called_once()
-        assert mock_buy.await_args.kwargs["best_ask"] == pytest.approx(0.65)
+        assert mock_buy.await_args.kwargs["best_ask"] == pytest.approx(0.60)
 
 
 @pytest.mark.asyncio
@@ -163,7 +163,7 @@ async def test_on_price_uses_target_token_best_ask_for_down_entry():
 
     mock_buy.assert_awaited_once()
     assert mock_buy.await_args.args[2] == "down-token-456"
-    assert mock_buy.await_args.kwargs["best_ask"] == pytest.approx(0.65)
+    assert mock_buy.await_args.kwargs["best_ask"] == pytest.approx(0.62)
 
 
 @pytest.mark.asyncio
@@ -225,7 +225,29 @@ async def test_on_price_allows_low_target_best_ask_below_legacy_min():
         await _on_price_update(update, window, state, ws=ws, dry_run=True, trade_config=_tc(amount=1.0), strategy=strategy, side="up")
 
     mock_buy.assert_awaited_once()
-    assert mock_buy.await_args.kwargs["best_ask"] == pytest.approx(0.65)
+    assert mock_buy.await_args.kwargs["best_ask"] == pytest.approx(0.43)
+
+
+@pytest.mark.asyncio
+async def test_on_price_excludes_first_book_level_from_depth():
+    window = _make_window()
+    state = _make_state()
+    strategy = _mock_strategy()
+    strategy.max_entry_price = 0.65
+    ws = MagicMock()
+    ws.get_latest_ask_levels_with_size.return_value = [
+        (0.60, 10.0),  # enough by itself, but intentionally ignored
+        (0.64, 0.1),
+    ]
+    ws.get_latest_best_ask.return_value = 0.60
+    strategy.should_buy.side_effect = lambda price, state_obj: setattr(state_obj, "target_side", "up") or True
+
+    update = _make_update("up-token-123", midpoint=0.58)
+
+    with patch("polybot.trading.monitor._handle_opening_price", new_callable=AsyncMock) as mock_buy:
+        await _on_price_update(update, window, state, ws=ws, dry_run=True, trade_config=_tc(amount=1.0), strategy=strategy, side="up")
+
+    mock_buy.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -351,12 +373,8 @@ async def test_on_price_uses_strength_based_entry_ask_level():
             side="up",
         )
 
-    ws.get_latest_best_ask.assert_called_with(
-        "up-token-123",
-        max_age_sec=pytest.approx(1.0),
-        level=2,
-    )
     mock_buy.assert_awaited_once()
+    assert mock_buy.await_args.kwargs["best_ask"] == pytest.approx(0.73)
 
 
 @pytest.mark.asyncio
@@ -397,11 +415,6 @@ async def test_on_price_does_not_fallback_to_top_ask_for_deeper_level():
             side="up",
         )
 
-    ws.get_latest_best_ask.assert_called_with(
-        "up-token-123",
-        max_age_sec=pytest.approx(1.0),
-        level=2,
-    )
     mock_buy.assert_not_called()
 
 
@@ -538,7 +551,7 @@ async def test_on_price_uses_dynamic_cap_as_initial_hint_for_strong_signal():
 
     mock_buy.assert_awaited_once()
     assert mock_buy.await_args.args[2] == "down-token-456"
-    assert mock_buy.await_args.kwargs["best_ask"] == pytest.approx(0.70)
+    assert mock_buy.await_args.kwargs["best_ask"] == pytest.approx(0.67)
 
 
 @pytest.mark.asyncio
@@ -549,7 +562,13 @@ async def test_rechecks_entry_band_only_when_target_best_ask_changes(caplog):
     strategy.max_entry_price = 0.65
     strategy.should_buy.side_effect = lambda price, state_obj: setattr(state_obj, "target_side", "up") or True
     ws = MagicMock()
-    ws.get_latest_best_ask.side_effect = [0.66, 0.66, 0.66, 0.66, 0.65, 0.65]
+    ws.get_latest_ask_levels_with_size.side_effect = [
+        [(0.64, 0.1), (0.66, 10.0)],
+        [(0.64, 0.1), (0.66, 10.0)],
+        [(0.64, 0.1), (0.64, 10.0)],
+    ]
+    ws.get_latest_best_ask.side_effect = [0.64, 0.64, 0.64]
+    ws.get_latest_best_ask_age.return_value = 0.001
     update = _make_update("up-token-123", midpoint=0.58)
 
     with patch("polybot.trading.monitor.get_tick_size", return_value=0.01), \

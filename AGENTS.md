@@ -8,7 +8,7 @@ Status: ✅ **LIVE CAPABLE**
 
 - Single active runtime strategy: `paired_window`
 - Reference dataset: 96-window / 8-hour capture
-- Current local tests: `128 passed`
+- Current local tests: `129 passed`
 - Risk management integrated
 - Conservative live YAML remains available
 - Latest enhanced YAML uses early entry + max-only strength-tier caps
@@ -19,8 +19,8 @@ Status: ✅ **LIVE CAPABLE**
 
 - `polybot/strategies/paired_window.py` — BTC window-open signal,
   persistence check, direction lock, optional early entry, strength-tier caps
-- `polybot/trading/monitor.py` — window lifecycle, target-leg best-ask gating,
-  buy path, FAK price hints, retry path, risk pauses, shutdown handling
+- `polybot/trading/monitor.py` — window lifecycle, target-leg book-depth
+  gating, buy path, FAK price hints, retry path, risk pauses, shutdown handling
 - `polybot/trading/trading.py` — FAK order execution via Polymarket CLOB
 - `polybot/core/state.py` — `MonitorState` with per-window and daily risk state
 - `polybot/config_loader.py` — YAML loading
@@ -57,7 +57,8 @@ params:
   max_entries_per_window: 1
 ```
 
-Execution is max-only by default: `target_best_ask <= 0.65`.
+Execution is max-only by default: enough level-2+ WS book depth must exist
+inside `max_entry_price=0.65`.
 
 ### Latest Enhanced Test/Live Config
 
@@ -86,12 +87,6 @@ strategy:
 
 params:
   amount: 1.0
-  entry_ask_level: 1
-  ask_level_tiers:
-    - threshold: 2.0
-      level: 2
-    - threshold: 3.5
-      level: 4
   amount_tiers:
     - threshold: 2.0
       amount: 1.5
@@ -133,8 +128,8 @@ Enhanced behavior:
 3. If early-entry fields are enabled, allow earlier persistent signals as early as 15s into
    the window.
 4. Lock the first valid direction for that window.
-5. Keep checking the chosen target leg until its fresh ask from the active
-   strength-selected book level is at or below the active cap.
+5. Keep checking the chosen target leg until WS order book depth from level 2
+   onward has enough notional inside the active cap.
 6. Send a FAK BUY.
 7. Hold to `window.end_epoch`.
 8. Let resolution / auto-redeem settle the outcome.
@@ -142,21 +137,26 @@ Enhanced behavior:
 ## Execution Gating
 
 - Signal reference uses the UP-leg stream.
-- Final execution gating always uses the target leg's fresh ask from the
-  active strength-selected book level.
+- Final execution gating uses target-leg WS order book depth, not the
+  `best_bid_ask` top quote.
+- Level 1 ask is diagnostic only. Fillability starts from level 2.
+- Sum `price * size` for ask levels `price <= active_cap`; buy only when that
+  cap-limited notional covers the order amount.
 - Do not use theoretical `1 - up_price` for execution permission.
-- `signal_price`, `target_best_ask`, `target_entry_ask`, and `price_hint` are distinct.
+- `signal_price`, `best_ask_level_1`, `target_entry_ask`, and `price_hint` are distinct.
 
 ## FAK Orders
 
 - Runtime uses FAK.
-- Entry permission requires `target_entry_ask <= target_max_entry_price`.
+- Entry permission requires enough level-2+ WS book depth inside
+  `target_max_entry_price`.
 - There is no runtime `min_entry_price`; execution is max-only.
 - Enhanced config applies a normal full-cap guard before `BUY_SIGNAL`.
-- First-attempt hint: active cap directly.
-- Retry refreshes target-leg ask from the same active book level.
-- Retry aborts if refreshed ask is stale or above cap.
-- Retry hint uses refreshed ask + small buffer, then clamps to cap.
+- First-attempt hint is the depth-covering ask level plus a small tick buffer,
+  clamped to cap.
+- Retry refreshes target-leg WS book depth with the same level-1 skip.
+- Retry aborts if refreshed cap-limited depth is stale or insufficient.
+- Retry hint is recalculated from fresh depth, then clamped to cap.
 - `MATCHED` + `success=true` is treated as filled even if some fill fields are
   omitted.
 - A 400 `no orders found to match with FAK order` can happen when the book moves
@@ -180,9 +180,13 @@ Current runtime logs include:
 - `BUY_SIGNAL.past_signal_strength`
 - `BUY_SIGNAL.remaining_sec`
 - `BUY_SIGNAL.amount`
-- `BUY_SIGNAL.entry_ask_level`
 - `BUY_SIGNAL.best_ask_level_1`
 - `BUY_SIGNAL.target_entry_ask`
+- `BUY_SIGNAL.price_hint`
+- `BUY_SIGNAL.depth_levels_used`
+- `BUY_SIGNAL.depth_notional`
+- `BUY_SIGNAL.depth_skipped_levels`
+- `BUY_SIGNAL.book_ask_preview`
 - WS `book` snapshots plus `price_change` deltas maintain local ask depth
 - `FAK_FILLED.create_market_order_ms`
 - `FAK_FILLED.post_order_ms`
@@ -340,7 +344,7 @@ env -u ALL_PROXY -u all_proxy -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u http
 - Runtime execution is max-only. Do not reintroduce a lower price floor unless
   explicitly requested.
 - Validate parameter changes on the 96-window dataset before live testing.
-- Distinguish `signal_price`, `target_best_ask`, `price_hint`, and
+- Distinguish `signal_price`, `best_ask_level_1`, `target_entry_ask`, `price_hint`, and
   `FAK_FILLED.avg_price`.
 
 **DON'T**
