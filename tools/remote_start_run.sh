@@ -29,6 +29,7 @@ else
   RUN_ID="${STAMP}_${PRESET}_${MODE}_${ROUNDS}r"
 fi
 RUN_DIR="${RUNS_DIR}/${RUN_ID}"
+find "$RUNS_DIR" -mindepth 1 -maxdepth 1 ! -name "$(basename "$RUN_DIR")" -exec rm -rf {} +
 mkdir -p "$RUN_DIR"
 
 cd "$ROOT_DIR"
@@ -59,6 +60,8 @@ set -euo pipefail
 cd "${ROOT_DIR}"
 mkdir -p log
 find log -maxdepth 1 -type f \( -name '*_trade.log*' -o -name '*_trade.jsonl*' \) -delete
+export POLYBOT_RUN_ID="${RUN_ID}"
+export POLYBOT_RUN_DIR="${RUN_DIR}"
 if [ "${MODE}" = "dry" ]; then
   polybot-run --preset "${PRESET}" --rounds "${ROUNDS}" --dry${EXTRA_ARGS_TEXT}
 else
@@ -76,7 +79,6 @@ nohup setsid bash -lc "
   fi
   printf '%s\n' \"\${RC}\" > '${RUN_DIR}/exit_code'
   date -u '+%Y-%m-%dT%H:%M:%SZ' > '${RUN_DIR}/finished_at'
-  find '${ROOT_DIR}/log' -maxdepth 1 -type f -name '*_trade.jsonl*' -exec cp {} '${RUN_DIR}/' \\;
 " </dev/null >/dev/null 2>&1 &
 RUN_PID=$!
 

@@ -191,7 +191,8 @@ artifacts and should stay out of git.
 
 ## Logging Notes
 
-Runtime writes one persistent analysis log per market: `log/<market>_trade.jsonl`.
+Each runtime execution writes one structured analysis log under
+`log/runs/<run_id>/<market>_trade.jsonl`.
 Human-readable logs are stdout/stderr only and are captured in remote
 `stdout.log`; do not reintroduce persistent `*_trade.log` files.
 

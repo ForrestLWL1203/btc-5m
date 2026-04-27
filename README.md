@@ -247,9 +247,10 @@ Fetch logs:
 bash tools/vpsctl.sh fetch --vps-profile sweden --run-id latest
 ```
 
-Runs persist one structured analysis log: `<market>_trade.jsonl`. Human-readable
-logs are stdout/stderr only; remote runs capture them in `stdout.log`. Fetched
-logs are copied to `remote_runs/<host_ip_with_underscores>/<RUN_ID>/`.
+Runs persist one structured analysis log:
+`log/runs/<RUN_ID>/<market>_trade.jsonl`. Human-readable logs are stdout/stderr
+only; remote runs capture them in `stdout.log`. Fetched logs are copied to
+`remote_runs/<host_ip_with_underscores>/<RUN_ID>/`.
 
 Probe latency remotely:
 

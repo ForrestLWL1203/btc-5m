@@ -11,7 +11,8 @@ import argparse
 import asyncio
 import datetime
 import logging
-import logging.handlers
+import os
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -43,30 +44,36 @@ root_log.addHandler(console)
 log = logging.getLogger(__name__)
 _LAST_DRY_RUN = False
 
-# JSONL handlers — initialized lazily once we know the market series
-_jsonl_handler = None
+# JSONL handler — initialized lazily once we know the market series
 _run_jsonl_handler = None
 
 
+def _remove_historical_logs(run_dir: Path) -> None:
+    """Remove previous runtime logs before creating the current run log."""
+    run_dir_resolved = run_dir.resolve()
+    if LOG_DIR.exists():
+        for path in LOG_DIR.iterdir():
+            try:
+                path_resolved = path.resolve()
+            except FileNotFoundError:
+                continue
+            if path_resolved == run_dir_resolved:
+                continue
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+
+
 def _setup_file_logging(slug_prefix: str, run_id: str) -> None:
-    """Set up structured JSONL logging with market-specific filenames."""
-    global _jsonl_handler, _run_jsonl_handler
-    if _jsonl_handler is not None:
+    """Set up the per-run structured JSONL log."""
+    global _run_jsonl_handler
+    if _run_jsonl_handler is not None:
         return  # Already set up
 
-    jsonl_file = LOG_DIR / f"{slug_prefix}_trade.jsonl"
-
-    # Structured JSON Lines for analysis and future UI consumption.
-    _jsonl_handler = logging.handlers.RotatingFileHandler(
-        jsonl_file,
-        maxBytes=10 * 1024 * 1024,
-        backupCount=5,
-        encoding="utf-8",
-    )
-    _jsonl_handler.setFormatter(JsonFormatter())
-    root_log.addHandler(_jsonl_handler)
-
-    run_dir = LOG_DIR / "runs" / run_id
+    run_dir_override = os.environ.get("POLYBOT_RUN_DIR")
+    run_dir = Path(run_dir_override) if run_dir_override else LOG_DIR / "runs" / run_id
+    _remove_historical_logs(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
 
     _run_jsonl_handler = logging.FileHandler(
@@ -106,7 +113,8 @@ Examples:
 
     dry_run = args.dry
     _LAST_DRY_RUN = dry_run
-    run_id = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    run_id = os.environ.get("POLYBOT_RUN_ID") or datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    log_dir = Path(os.environ.get("POLYBOT_RUN_DIR") or LOG_DIR / "runs" / run_id)
 
     # Set up file logging with market-specific names
     _setup_file_logging(series.slug_prefix, run_id)
@@ -124,7 +132,7 @@ Examples:
         display_side.upper(),
         trade_config.amount,
         rounds_desc,
-        LOG_DIR / "runs" / run_id,
+        log_dir,
     )
 
     # Print key strategy parameters for verification
