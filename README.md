@@ -18,9 +18,9 @@ The filename contains `dry`, but live/dry behavior is controlled only by
 ```yaml
 strategy:
   type: paired_window
-  theta_pct: 0.03
-  theta_start_pct: 0.025
-  theta_end_pct: 0.04
+  theta_pct: 0.036
+  theta_start_pct: 0.03
+  theta_end_pct: 0.048
   persistence_sec: 10
   entry_start_remaining_sec: 255
   entry_end_remaining_sec: 180
@@ -53,8 +53,8 @@ Behavior:
   `--timeframe` only accepts `5m`.
 - BTC baseline is the current 5-minute window open.
 - Entry band is `remaining=[255s,180s]`, i.e. 45s to 120s after window start.
-- Signal threshold is dynamic: `theta_start_pct=0.025%` at 45s after open,
-  linearly rising to `theta_end_pct=0.04%` at 120s after open. `theta_pct=0.03%`
+- Signal threshold is dynamic: `theta_start_pct=0.03%` at 45s after open,
+  linearly rising to `theta_end_pct=0.048%` at 120s after open. `theta_pct=0.036%`
   remains the fixed-threshold fallback if dynamic fields are absent.
 - Signal also requires same-direction persistence `persistence_sec` ago and
   current move at least `min_move_ratio * past_move`.

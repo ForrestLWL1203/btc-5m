@@ -52,8 +52,8 @@ def _args(**overrides) -> argparse.Namespace:
 def test_preset_config_loads_enhanced_yaml():
     cfg = preset_config("enhanced")
     assert cfg["market"]["asset"] == "btc"
-    assert cfg["strategy"]["theta_start_pct"] == pytest.approx(0.025)
-    assert cfg["strategy"]["theta_end_pct"] == pytest.approx(0.04)
+    assert cfg["strategy"]["theta_start_pct"] == pytest.approx(0.03)
+    assert cfg["strategy"]["theta_end_pct"] == pytest.approx(0.048)
     assert cfg["strategy"]["max_entry_price"] == pytest.approx(0.75)
     assert cfg["params"]["entry_ask_level"] == 9
     assert cfg["params"]["low_price_threshold"] == pytest.approx(0.60)

@@ -75,16 +75,16 @@ class TestBuildStrategy:
         cfg = {
             "strategy": {
                 "type": "paired_window",
-                "theta_pct": 0.03,
-                "theta_start_pct": 0.025,
-                "theta_end_pct": 0.04,
+                "theta_pct": 0.036,
+                "theta_start_pct": 0.03,
+                "theta_end_pct": 0.048,
             }
         }
         strat = build_strategy(cfg, series)
         assert isinstance(strat, PairedWindowStrategy)
-        assert strat._theta_pct == pytest.approx(0.03)
-        assert strat._theta_start_pct == pytest.approx(0.025)
-        assert strat._theta_end_pct == pytest.approx(0.04)
+        assert strat._theta_pct == pytest.approx(0.036)
+        assert strat._theta_start_pct == pytest.approx(0.03)
+        assert strat._theta_end_pct == pytest.approx(0.048)
 
     def test_build_paired_window_strategy_with_current_entry_band(self):
         series = MarketSeries.from_known("btc-updown-5m")

@@ -4,9 +4,9 @@ market:
 
 strategy:
   type: paired_window
-  theta_pct: 0.03
-  theta_start_pct: 0.025
-  theta_end_pct: 0.04
+  theta_pct: 0.036
+  theta_start_pct: 0.03
+  theta_end_pct: 0.048
   persistence_sec: 10
   entry_start_remaining_sec: 255
   entry_end_remaining_sec: 180
