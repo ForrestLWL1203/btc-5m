@@ -374,11 +374,11 @@ chmod +x "\${RUN_DIR}/run.sh"
 nohup setsid bash -lc "
   set -euo pipefail
   RC=0
-  echo \\"\\$\\$\\" > '\${RUN_DIR}/pgid'
+  echo \"\$\$\" > '\${RUN_DIR}/pgid'
   if ! '\${RUN_DIR}/run.sh' >'\${RUN_DIR}/stdout.log' 2>&1; then
-    RC=\\$?
+    RC=\$?
   fi
-  printf '%s\\n' \\"\\${RC}\\" > '\${RUN_DIR}/exit_code'
+  printf '%s\n' \"\$RC\" > '\${RUN_DIR}/exit_code'
   date -u '+%Y-%m-%dT%H:%M:%SZ' > '\${RUN_DIR}/finished_at'
 " </dev/null >/dev/null 2>&1 &
 RUN_PID=\$!
