@@ -31,6 +31,13 @@ def _args(**overrides) -> argparse.Namespace:
         "low_price_threshold": None,
         "low_price_entry_ask_level": None,
         "max_entries": None,
+        "stop_loss_enabled": None,
+        "stop_loss_multiplier": None,
+        "stop_loss_start_remaining": None,
+        "stop_loss_end_remaining": None,
+        "stop_loss_sell_bid_level": None,
+        "stop_loss_retry_count": None,
+        "stop_loss_min_sell_price": None,
         "consecutive_loss_amount": None,
         "daily_loss_amount": None,
         "dry": False,
@@ -46,6 +53,7 @@ def test_preset_config_loads_enhanced_yaml():
     assert cfg["params"]["entry_ask_level"] == 7
     assert cfg["params"]["low_price_threshold"] == pytest.approx(0.60)
     assert cfg["params"]["low_price_entry_ask_level"] == 9
+    assert cfg["params"]["stop_loss"]["enabled"] is False
 
 
 def test_build_runtime_config_requires_exactly_one_source():
@@ -68,6 +76,13 @@ def test_build_runtime_config_from_preset_applies_common_overrides():
         max_entry_price=0.69,
         entry_start=250,
         entry_end=175,
+        stop_loss_enabled=True,
+        stop_loss_multiplier=1.15,
+        stop_loss_start_remaining=110,
+        stop_loss_end_remaining=20,
+        stop_loss_sell_bid_level=8,
+        stop_loss_retry_count=2,
+        stop_loss_min_sell_price=0.22,
     ))
     assert cfg["market"]["asset"] == "eth"
     assert cfg["rounds"] == 24
@@ -78,6 +93,14 @@ def test_build_runtime_config_from_preset_applies_common_overrides():
     assert cfg["strategy"]["max_entry_price"] == pytest.approx(0.69)
     assert cfg["strategy"]["entry_start_remaining_sec"] == pytest.approx(250)
     assert cfg["strategy"]["entry_end_remaining_sec"] == pytest.approx(175)
+    stop = cfg["params"]["stop_loss"]
+    assert stop["enabled"] is True
+    assert stop["multiplier"] == pytest.approx(1.15)
+    assert stop["start_remaining_sec"] == pytest.approx(110)
+    assert stop["end_remaining_sec"] == pytest.approx(20)
+    assert stop["sell_bid_level"] == 8
+    assert stop["retry_count"] == 2
+    assert stop["min_sell_price"] == pytest.approx(0.22)
 
 
 def test_public_runtime_input_schema_only_exposes_frontend_safe_fields():
@@ -94,6 +117,7 @@ def test_advanced_runtime_input_schema_includes_engineering_fields():
     assert "theta" in names
     assert "entry_ask_level" in names
     assert "low_price_entry_ask_level" in names
+    assert "stop_loss_enabled" in names
 
 
 def test_validate_runtime_inputs_rejects_bad_ranges_and_relationships():
@@ -102,6 +126,9 @@ def test_validate_runtime_inputs_rejects_bad_ranges_and_relationships():
 
     with pytest.raises(ValueError, match="entry_start must be greater than entry_end"):
         validate_runtime_inputs({"entry_start": 180, "entry_end": 210})
+
+    with pytest.raises(ValueError, match="stop_loss_start_remaining must be greater"):
+        validate_runtime_inputs({"stop_loss_start_remaining": 10, "stop_loss_end_remaining": 20})
 
 
 def test_validate_runtime_inputs_rejects_unknown_public_field():

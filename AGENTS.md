@@ -5,7 +5,7 @@
 Polymarket BTC 5-minute UP/DOWN bot. Status: live-capable.
 
 Current rule: `paired_window` is the only active runtime strategy. Do not
-restore historical strategies, conservative configs, TP/SL, reversal, re-entry,
+restore historical strategies, conservative configs, TP, reversal, re-entry,
 dynamic strength caps, early-entry bypass, or theoretical `1 - up_price`
 execution gating unless the user explicitly asks and fresh tests are added.
 
@@ -34,6 +34,14 @@ params:
     - threshold: 2.0
       amount: 1.5
   max_entries_per_window: 1
+  stop_loss:
+    enabled: false
+    multiplier: 1.2
+    start_remaining_sec: 120
+    end_remaining_sec: 15
+    sell_bid_level: 9
+    retry_count: 3
+    min_sell_price: 0.20
 ```
 
 Runtime behavior:
@@ -49,7 +57,16 @@ Runtime behavior:
 - First FAK hint uses ask level 7, or ask level 9 when top ask is `<0.60`.
 - All hints are clamped to cap.
 - `signal_strength >= 2.0` uses amount `1.5`; timing does not change.
+- Optional stop-loss exists but is disabled by default.
 - Hold to `window.end_epoch`; no exit logic before resolution.
+
+Stop-loss behavior when enabled:
+
+- Trigger price: `max(min_sell_price, (1 - entry_avg_price) * multiplier)`.
+- Only active while `start_remaining_sec >= remaining >= end_remaining_sec`.
+- Uses held-leg bid book, skips level 1, and defaults to bid level 9.
+- SELL FAK retry count defaults to 3.
+- On fill, record realized PnL and exit that window.
 
 ## Core Files
 

@@ -35,6 +35,21 @@ def add_runtime_config_args(parser: argparse.ArgumentParser) -> None:
         help="Named runtime preset; use instead of --config for UI/API-friendly startup",
     )
     for field in RUNTIME_INPUT_FIELDS:
+        if field.value_type == "bool":
+            parser.add_argument(
+                field.cli_flag,
+                dest=field.name,
+                action="store_true",
+                help=field.description,
+            )
+            parser.add_argument(
+                f"--no-{field.cli_flag[2:]}",
+                dest=field.name,
+                action="store_false",
+                help=f"Disable: {field.description}",
+            )
+            parser.set_defaults(**{field.name: None})
+            continue
         if field.value_type == "int":
             arg_type = int
         elif field.value_type == "float":

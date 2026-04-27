@@ -20,6 +20,14 @@ params:
     - threshold: 2.0
       amount: 1.5
   max_entries_per_window: 1
+  stop_loss:
+    enabled: false
+    multiplier: 1.2
+    start_remaining_sec: 120
+    end_remaining_sec: 15
+    sell_bid_level: 9
+    retry_count: 3
+    min_sell_price: 0.20
 
 risk:
   consecutive_loss_amount: 3.0

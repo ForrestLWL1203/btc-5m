@@ -27,6 +27,14 @@ params:
     - threshold: 2.0
       amount: 1.5
   max_entries_per_window: 1
+  stop_loss:
+    enabled: false
+    multiplier: 1.2
+    start_remaining_sec: 120
+    end_remaining_sec: 15
+    sell_bid_level: 9
+    retry_count: 3
+    min_sell_price: 0.20
 ```
 
 Rules:
@@ -39,7 +47,17 @@ Rules:
 - WS order-book depth drives execution; level 1 is skipped for fillability.
 - Initial FAK hint uses level 7, or level 9 if top ask `<0.60`.
 - `signal_strength >= 2.0` increases amount to `1.5` only.
-- Hold to `window.end_epoch`; no TP/SL/reversal/re-entry.
+- Optional stop-loss exists but is disabled by default.
+- Hold to `window.end_epoch` unless optional stop-loss is enabled and fills.
+- No TP, reversal, or re-entry.
+
+Stop-loss when enabled:
+
+- Trigger price is `max(min_sell_price, (1 - entry_avg_price) * multiplier)`.
+- Active only while `start_remaining_sec >= remaining >= end_remaining_sec`.
+- Uses held-leg bid book, skips level 1, and defaults to bid level 9.
+- SELL FAK retries up to 3 times.
+- A filled stop records realized PnL and exits the window.
 
 ## Core Files
 
@@ -125,7 +143,7 @@ Price fields:
 ## Guardrails
 
 - Do not restore conservative config, analysis experiments, early-entry bypass,
-  strength caps, normal full-cap guard, reversal, TP/SL, or re-entry.
+  strength caps, normal full-cap guard, reversal, TP, or re-entry.
 - Do not use theoretical `1 - up_price` for final execution permission.
 - Do not commit logs, `data/`, `remote_runs/`, profiles, or secrets.
 - Keep docs and tests aligned with the current single strategy.

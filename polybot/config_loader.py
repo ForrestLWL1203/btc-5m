@@ -109,6 +109,7 @@ def build_trade_config(cfg: dict) -> TradeConfig:
         max_entries_per_window=params.get("max_entries_per_window"),
         rounds=int(rounds_val) if rounds_val is not None else None,
         amount_tiers=_build_amount_tiers(params.get("amount_tiers")),
+        **_build_stop_loss(params.get("stop_loss")),
         consecutive_loss_amount_limit=risk.get("consecutive_loss_amount"),
         daily_loss_amount_limit=risk.get("daily_loss_amount"),
         consecutive_loss_pause_windows=int(risk.get("consecutive_loss_pause_windows", 2)),
@@ -131,3 +132,17 @@ def _build_amount_tiers(raw: Optional[list[dict]]) -> list[tuple[float, float]]:
     tiers.sort(key=lambda pair: pair[0])
     return tiers
 
+
+def _build_stop_loss(raw: Optional[dict]) -> dict:
+    """Build optional stop-loss config."""
+    if not raw:
+        return {}
+    return {
+        "stop_loss_enabled": bool(raw.get("enabled", False)),
+        "stop_loss_multiplier": float(raw.get("multiplier", 1.2)),
+        "stop_loss_start_remaining_sec": float(raw.get("start_remaining_sec", 120.0)),
+        "stop_loss_end_remaining_sec": float(raw.get("end_remaining_sec", 15.0)),
+        "stop_loss_sell_bid_level": max(1, int(raw.get("sell_bid_level", 9))),
+        "stop_loss_retry_count": max(1, int(raw.get("retry_count", 3))),
+        "stop_loss_min_sell_price": float(raw.get("min_sell_price", 0.20)),
+    }

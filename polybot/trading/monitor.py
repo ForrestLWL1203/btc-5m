@@ -28,7 +28,7 @@ from polybot.core.state import MonitorState
 from polybot.market.stream import PriceStream, PriceUpdate
 from polybot.strategies.base import Strategy
 from polybot.trade_config import TradeConfig
-from .trading import buy_token
+from .trading import buy_token, sell_token
 
 log = logging.getLogger(__name__)
 
@@ -52,6 +52,23 @@ class CapDepthQuote:
     entry_ask_level: int
     best_ask_level_1: Optional[float]
     ask_age_sec: Optional[float]
+    preview: list[tuple[float, float]]
+    enough: bool
+
+
+@dataclass(frozen=True)
+class BidDepthQuote:
+    """Bid-book depth quote for stop-loss SELL execution."""
+
+    price: Optional[float]
+    price_hint: Optional[float]
+    shares_available: float
+    levels_used: int
+    total_levels: int
+    skipped_levels: int
+    sell_bid_level: int
+    best_bid_level_1: Optional[float]
+    bid_age_sec: Optional[float]
     preview: list[tuple[float, float]]
     enough: bool
 
@@ -93,6 +110,26 @@ def _buffer_price_hint(
     if max_price is not None:
         buffered = min(buffered, max_price)
     return max(0.0, min(1.0, math.ceil(buffered / tick) * tick))
+
+
+def _buffer_sell_price_hint(
+    token_id: str,
+    bid_price: Optional[float],
+    *,
+    buffer_ticks: Optional[float] = None,
+    min_price: Optional[float] = None,
+) -> Optional[float]:
+    """Move a SELL hint below the selected bid to improve FAK fill odds."""
+    if bid_price is None:
+        return None
+    tick = get_tick_size(token_id)
+    if tick <= 0:
+        tick = 0.001
+    ticks = config.FAK_RETRY_PRICE_HINT_BUFFER_TICKS if buffer_ticks is None else buffer_ticks
+    buffered = bid_price - tick * ticks
+    if min_price is not None:
+        buffered = max(buffered, min_price)
+    return max(0.0, min(1.0, math.floor(buffered / tick) * tick))
 
 
 def _initial_price_hint(
@@ -211,6 +248,96 @@ def _cap_limited_depth_quote(
     )
 
 
+def _stop_loss_bid_quote(
+    ws: PriceStream,
+    token_id: str,
+    shares: float,
+    *,
+    max_age_sec: Optional[float],
+    skip_levels: int = _DEPTH_ENTRY_SKIP_LEVELS,
+    min_sell_level: int = 9,
+    min_sell_price: float = 0.20,
+    buffer_ticks: Optional[float] = None,
+) -> BidDepthQuote:
+    """Return the bid level where enough stop-loss sell depth exists."""
+    bid_age = None
+    if hasattr(ws, "get_latest_best_bid_age"):
+        bid_age = ws.get_latest_best_bid_age(token_id, level=1)
+    try:
+        raw_levels = ws.get_latest_bid_levels_with_size(token_id, max_age_sec=max_age_sec)
+    except AttributeError:
+        raw_levels = None
+    if not isinstance(raw_levels, list):
+        fallback_bid = (
+            ws.get_latest_best_bid(token_id, max_age_sec=max_age_sec, level=1)
+            if hasattr(ws, "get_latest_best_bid")
+            else None
+        )
+        raw_levels = (
+            [(fallback_bid, shares), (fallback_bid, shares)]
+            if fallback_bid is not None
+            else []
+        )
+
+    levels = [(float(price), float(size)) for price, size in raw_levels if float(size) > 0]
+    best_bid_level_1 = levels[0][0] if levels else (
+        ws.get_latest_best_bid(token_id, max_age_sec=max_age_sec, level=1)
+        if hasattr(ws, "get_latest_best_bid")
+        else None
+    )
+    preview = levels[:_DEPTH_PREVIEW_LEVELS]
+    min_sell_level = max(1, int(min_sell_level))
+    min_sell_index = min_sell_level - 1
+    if not levels or shares <= 0:
+        return BidDepthQuote(
+            price=None,
+            price_hint=None,
+            shares_available=0.0,
+            levels_used=0,
+            total_levels=len(levels),
+            skipped_levels=min(skip_levels, len(levels)),
+            sell_bid_level=min_sell_level,
+            best_bid_level_1=best_bid_level_1,
+            bid_age_sec=bid_age,
+            preview=preview,
+            enough=False,
+        )
+
+    shares_available = 0.0
+    levels_used = 0
+    selected_price = None
+    for index, (bid_price, bid_size) in enumerate(levels):
+        if bid_price < min_sell_price:
+            break
+        if index < skip_levels:
+            continue
+        levels_used += 1
+        shares_available += bid_size
+        if shares_available >= shares and index >= min_sell_index:
+            selected_price = bid_price
+            break
+
+    price_hint = _buffer_sell_price_hint(
+        token_id,
+        selected_price,
+        buffer_ticks=buffer_ticks,
+        min_price=min_sell_price,
+    ) if selected_price is not None else None
+    return BidDepthQuote(
+        price=selected_price,
+        price_hint=price_hint,
+        shares_available=shares_available,
+        levels_used=levels_used,
+        total_levels=len(levels),
+        skipped_levels=min(skip_levels, len(levels)),
+        sell_bid_level=min_sell_level,
+        best_bid_level_1=best_bid_level_1,
+        bid_age_sec=bid_age,
+        preview=preview,
+        enough=selected_price is not None and price_hint is not None,
+    )
+
+
 def _log_depth_skip(
     state: MonitorState,
     side: str,
@@ -319,6 +446,46 @@ def _price_hint_refresher(
                 "max_entry_price": max_entry_price,
                 "best_ask_age_ms": round(quote.ask_age_sec * 1000) if quote.ask_age_sec is not None else None,
                 "reason": "cap-limited book depth insufficient or stale",
+            })
+            return None
+        return quote.price_hint
+
+    return refresh
+
+
+def _stop_loss_price_hint_refresher(
+    ws: PriceStream,
+    token_id: str,
+    trade_config: TradeConfig,
+    state: MonitorState,
+):
+    """Return a callback that refreshes stop-loss SELL hints from fresh WS bids."""
+
+    def refresh() -> Optional[float]:
+        quote = _stop_loss_bid_quote(
+            ws,
+            token_id,
+            state.holding_size,
+            max_age_sec=config.FAK_RETRY_MAX_BEST_ASK_AGE_SEC,
+            min_sell_level=trade_config.stop_loss_bid_level(),
+            min_sell_price=trade_config.stop_loss_min_sell_price,
+            buffer_ticks=config.FAK_RETRY_PRICE_HINT_BUFFER_TICKS,
+        )
+        if not quote.enough:
+            log_event(log, logging.INFO, SIGNAL, {
+                "action": "STOP_LOSS_RETRY_ABORT",
+                "price": quote.price,
+                "price_hint": quote.price_hint,
+                "best_bid_level_1": quote.best_bid_level_1,
+                "bid_levels_used": quote.levels_used,
+                "bid_shares_available": round(quote.shares_available, 4),
+                "bid_total_levels": quote.total_levels,
+                "bid_skipped_levels": quote.skipped_levels,
+                "sell_bid_level": quote.sell_bid_level,
+                "book_bid_preview": quote.preview,
+                "shares": state.holding_size,
+                "best_bid_age_ms": round(quote.bid_age_sec * 1000) if quote.bid_age_sec is not None else None,
+                "reason": "stop-loss bid depth insufficient or stale",
             })
             return None
         return quote.price_hint
@@ -511,6 +678,134 @@ def _process_trade_result(
             "limit": trade_config.daily_loss_amount_limit,
             "window_pause": trade_config.daily_loss_pause_windows,
         })
+
+
+async def _maybe_handle_stop_loss(
+    window: MarketWindow,
+    state: MonitorState,
+    ws: PriceStream,
+    token_id: str,
+    dry_run: bool,
+    trade_config: TradeConfig,
+    side: str,
+) -> None:
+    """Evaluate and execute optional stop-loss while holding a position."""
+    if not trade_config.stop_loss_enabled:
+        return
+    if not state.bought or state.exit_triggered or state.stop_loss_attempted:
+        return
+    if state.holding_size <= 0:
+        return
+
+    remaining = window.end_epoch - time.time()
+    if remaining > trade_config.stop_loss_start_remaining_sec:
+        return
+    if remaining < trade_config.stop_loss_end_remaining_sec:
+        return
+
+    entry_price = state.entry_avg_price or state.entry_price
+    if entry_price <= 0:
+        return
+    stop_price = max(
+        trade_config.stop_loss_min_sell_price,
+        (1.0 - entry_price) * trade_config.stop_loss_multiplier,
+    )
+    state.stop_loss_price = stop_price
+
+    quote = _stop_loss_bid_quote(
+        ws,
+        token_id,
+        state.holding_size,
+        max_age_sec=config.FAK_RETRY_MAX_BEST_ASK_AGE_SEC,
+        min_sell_level=trade_config.stop_loss_bid_level(),
+        min_sell_price=trade_config.stop_loss_min_sell_price,
+    )
+    if not quote.enough or quote.price is None or quote.price > stop_price:
+        return
+
+    state.stop_loss_attempted = True
+    log_event(log, logging.WARNING, TRADE, {
+        "action": "STOP_LOSS_TRIGGERED",
+        "side": side.upper(),
+        "window": window.short_label,
+        "entry_price": entry_price,
+        "stop_price": round(stop_price, 4),
+        "sell_price": quote.price,
+        "price_hint": quote.price_hint,
+        "shares": state.holding_size,
+        "remaining_sec": round(remaining),
+        "best_bid_level_1": quote.best_bid_level_1,
+        "bid_levels_used": quote.levels_used,
+        "bid_shares_available": round(quote.shares_available, 4),
+        "bid_total_levels": quote.total_levels,
+        "bid_skipped_levels": quote.skipped_levels,
+        "sell_bid_level": quote.sell_bid_level,
+        "book_bid_preview": quote.preview,
+        "best_bid_age_ms": round(quote.bid_age_sec * 1000) if quote.bid_age_sec is not None else None,
+        "dry_run": dry_run,
+    })
+
+    if dry_run:
+        sell_price = quote.price_hint or quote.price
+        realized_pnl = state.holding_size * sell_price - state.entry_amount
+        _process_trade_result(state, realized_pnl >= 0, realized_pnl, trade_config)
+        log_event(log, logging.WARNING, TRADE, {
+            "action": "STOP_LOSS_FILLED",
+            "side": side.upper(),
+            "window": window.short_label,
+            "avg_price": sell_price,
+            "shares": state.holding_size,
+            "realized_pnl": round(realized_pnl, 4),
+            "daily_realized_pnl": round(state.daily_realized_pnl, 4),
+            "dry_run": True,
+        })
+        state.holding_size = 0.0
+        state.bought = False
+        state.exit_triggered = True
+        state.stop_loss_triggered = True
+        return
+
+    result = await sell_token(
+        token_id,
+        state.holding_size,
+        price_hint=quote.price_hint,
+        price_hint_refresher=_stop_loss_price_hint_refresher(ws, token_id, trade_config, state),
+        retry_count=trade_config.stop_loss_retry_count,
+    )
+    if not result.success:
+        log_event(log, logging.WARNING, TRADE, {
+            "action": "STOP_LOSS_FAILED",
+            "side": side.upper(),
+            "window": window.short_label,
+            "shares": state.holding_size,
+            "price_hint": quote.price_hint,
+            "message": result.message,
+        })
+        return
+
+    sold_size = min(result.filled_size or state.holding_size, state.holding_size)
+    sell_price = result.avg_price or quote.price_hint or quote.price or 0.0
+    cost_basis = state.entry_amount * (sold_size / state.holding_size) if state.holding_size > 0 else 0.0
+    realized_pnl = sold_size * sell_price - cost_basis
+    _process_trade_result(state, realized_pnl >= 0, realized_pnl, trade_config)
+    log_event(log, logging.WARNING, TRADE, {
+        "action": "STOP_LOSS_FILLED",
+        "side": side.upper(),
+        "window": window.short_label,
+        "avg_price": sell_price,
+        "shares": sold_size,
+        "requested_shares": state.holding_size,
+        "realized_pnl": round(realized_pnl, 4),
+        "daily_realized_pnl": round(state.daily_realized_pnl, 4),
+        "order_id": result.order_id,
+    })
+    state.holding_size = max(0.0, state.holding_size - sold_size)
+    state.entry_amount = max(0.0, state.entry_amount - cost_basis)
+    state.stop_loss_triggered = True
+    if state.holding_size <= 1e-9:
+        state.holding_size = 0.0
+        state.bought = False
+        state.exit_triggered = True
 
 
 def _strategy_attach_skip_threshold(
@@ -781,6 +1076,10 @@ async def monitor_window(
     state.target_past_signal_strength = None
     state.target_remaining_sec = None
     state.signal_reference_price = None
+    state.entry_avg_price = 0.0
+    state.stop_loss_triggered = False
+    state.stop_loss_attempted = False
+    state.stop_loss_price = None
     state.last_signal_eval_key = None
     state.last_signal_eval_logged_at = 0.0
     state.last_depth_skip_key = None
@@ -1113,6 +1412,15 @@ async def _on_price_update(
         is_held_token_update = update.token_id == buy_token_id
         if is_held_token_update:
             state.latest_midpoint = price
+            await _maybe_handle_stop_loss(
+                window,
+                state,
+                ws,
+                buy_token_id,
+                dry_run,
+                trade_config,
+                effective_side,
+            )
         return
 
 
@@ -1202,7 +1510,8 @@ async def _handle_opening_price(
                 state.holding_size = trade_amount / result.avg_price
             else:
                 state.holding_size = trade_amount / buy_price if buy_price > 0 else trade_amount
-            state.entry_price = buy_price
+            state.entry_avg_price = result.avg_price if result.avg_price > 0 else buy_price
+            state.entry_price = state.entry_avg_price
             log_event(log, logging.INFO, TRADE, {
                 "action": "BUY_FILLED",
                 "side": side.upper(),
@@ -1240,6 +1549,7 @@ async def _handle_opening_price(
         state.entry_timestamps.append(time.time())
         state.holding_size = trade_amount / buy_price if buy_price > 0 else trade_amount
         state.entry_price = buy_price
+        state.entry_avg_price = buy_price
         log_event(log, logging.INFO, TRADE, {
             "action": "BUY_PREP",
             "side": side.upper(),

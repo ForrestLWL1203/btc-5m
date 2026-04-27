@@ -33,6 +33,14 @@ params:
     - threshold: 2.0
       amount: 1.5
   max_entries_per_window: 1
+  stop_loss:
+    enabled: false
+    multiplier: 1.2
+    start_remaining_sec: 120
+    end_remaining_sec: 15
+    sell_bid_level: 9
+    retry_count: 3
+    min_sell_price: 0.20
 ```
 
 Behavior:
@@ -48,7 +56,8 @@ Behavior:
 - First FAK hint uses ask level 7 by default, or level 9 when top ask is `<0.60`.
 - Strong signals only increase amount to `1.5` at `signal_strength >= 2.0`; they
   do not bypass the 45s timing gate.
-- No TP, SL, reversal, re-entry, or lower entry-price floor.
+- No TP, reversal, re-entry, or lower entry-price floor.
+- Stop-loss support exists but is disabled by default.
 
 ## Core Files
 
@@ -102,6 +111,26 @@ Probe `/order` latency with an intentionally unfillable price:
 PYTHONPATH=/Users/forrestliao/workspace python3.11 tools/probe_post_order_latency.py \
   --token-id <TOKEN_ID> --side buy --price 0.01 --size 1 --repeats 3
 ```
+
+## Optional Stop Loss
+
+Stop loss is off unless `params.stop_loss.enabled=true`.
+
+Trigger:
+
+```text
+stop_price = max(min_sell_price, (1 - entry_avg_price) * multiplier)
+```
+
+Execution constraints:
+
+- Only active while holding and `start_remaining_sec >= remaining >= end_remaining_sec`.
+- Default range: `120s >= remaining >= 15s`.
+- Uses held-leg bid book, not ask book.
+- Level 1 bid is skipped; sell depth targets `sell_bid_level=9` by default.
+- SELL FAK price hint is placed below the selected bid level and retried up to
+  `retry_count=3`.
+- If stop-loss fills, the bot records realized PnL and exits the window.
 
 ## VPS Profiles
 

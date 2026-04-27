@@ -227,7 +227,9 @@ async def _post_fak_market(
                         filled = making_amount
                 else:
                     filled = amount
-                    if price <= 0 and taking_amount > 0 and amount > 0:
+                    if price <= 0 and current_price_hint:
+                        price = current_price_hint
+                    elif price <= 0 and taking_amount > 0 and amount > 0:
                         price = taking_amount / amount
 
             if filled > 0:
@@ -333,4 +335,24 @@ async def buy_token(
     if result.success:
         return result
 
+    return result
+
+
+async def sell_token(
+    token_id: str,
+    shares: float,
+    price_hint: Optional[float] = None,
+    price_hint_refresher: Optional[Callable[[], Optional[float]]] = None,
+    retry_count: Optional[int] = None,
+) -> OrderResult:
+    """Sell token shares using FAK market order with retry."""
+    result = await _post_fak_market(
+        token_id=token_id,
+        amount=shares,
+        side=SELL,
+        retry_count=retry_count or config.FAK_RETRY_COUNT,
+        retry_interval=config.FAK_RETRY_INTERVAL,
+        price_hint=price_hint,
+        price_hint_refresher=price_hint_refresher,
+    )
     return result

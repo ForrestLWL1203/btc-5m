@@ -124,6 +124,44 @@ class PriceStream:
             return None
         return time.monotonic() - ask_received_at
 
+    def get_latest_best_bid(
+        self,
+        token_id: str,
+        max_age_sec: Optional[float] = None,
+        level: int = 1,
+    ) -> Optional[float]:
+        """Get the latest cached best bid for a token (sync read)."""
+        if level > 1:
+            bids = self.get_latest_bid_levels(token_id, max_age_sec=max_age_sec)
+            if len(bids) < level:
+                return None
+            return bids[level - 1]
+
+        bids = self.get_latest_bid_levels(token_id, max_age_sec=max_age_sec)
+        if bids:
+            return bids[0]
+        update = self._prices.get(token_id)
+        if update is None:
+            return None
+        received_at = update.received_at
+        if max_age_sec is not None and received_at > 0:
+            if time.monotonic() - received_at > max_age_sec:
+                return None
+        return update.best_bid
+
+    def get_latest_best_bid_age(self, token_id: str, level: int = 1) -> Optional[float]:
+        """Return age in seconds for the cached best bid, if known."""
+        if level >= 1:
+            book = self._books.get(token_id)
+            if book is not None:
+                book_received_at = float(book.get("received_at", 0.0) or 0.0)
+                if book_received_at > 0:
+                    return time.monotonic() - book_received_at
+        update = self._prices.get(token_id)
+        if update is None or update.received_at <= 0:
+            return None
+        return time.monotonic() - update.received_at
+
     def get_latest_ask_levels(
         self,
         token_id: str,
@@ -147,6 +185,30 @@ class PriceStream:
                 return []
         asks = book.get("asks", [])
         return [(float(price), float(size)) for price, size in asks]
+
+    def get_latest_bid_levels(
+        self,
+        token_id: str,
+        max_age_sec: Optional[float] = None,
+    ) -> list[float]:
+        """Return cached bid prices sorted best-to-worse, if fresh enough."""
+        return [price for price, _size in self.get_latest_bid_levels_with_size(token_id, max_age_sec=max_age_sec)]
+
+    def get_latest_bid_levels_with_size(
+        self,
+        token_id: str,
+        max_age_sec: Optional[float] = None,
+    ) -> list[tuple[float, float]]:
+        """Return cached bid levels as ``(price, size)`` sorted best-to-worse."""
+        book = self._books.get(token_id)
+        if book is None:
+            return []
+        book_received_at = float(book.get("received_at", 0.0) or 0.0)
+        if max_age_sec is not None and book_received_at > 0:
+            if time.monotonic() - book_received_at > max_age_sec:
+                return []
+        bids = book.get("bids", [])
+        return [(float(price), float(size)) for price, size in bids]
 
     def set_on_price(self, callback: Callable[[PriceUpdate], Awaitable[None]]) -> None:
         """Update the price callback (used when reusing WS for a new window)."""

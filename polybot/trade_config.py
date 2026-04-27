@@ -19,6 +19,13 @@ class TradeConfig:
     daily_loss_amount_limit: Optional[float] = None
     consecutive_loss_pause_windows: int = 2
     daily_loss_pause_windows: int = 5
+    stop_loss_enabled: bool = False
+    stop_loss_multiplier: float = 1.2
+    stop_loss_start_remaining_sec: float = 120.0
+    stop_loss_end_remaining_sec: float = 15.0
+    stop_loss_sell_bid_level: int = 9
+    stop_loss_retry_count: int = 3
+    stop_loss_min_sell_price: float = 0.20
 
     def amount_for_signal_strength(self, signal_strength: Optional[float]) -> float:
         """Return configured stake size for signal strength."""
@@ -33,3 +40,7 @@ class TradeConfig:
     def base_entry_ask_level(self) -> int:
         """Return the configured minimum ask-book level for FAK hints."""
         return max(1, int(self.entry_ask_level))
+
+    def stop_loss_bid_level(self) -> int:
+        """Return the configured bid-book level for stop-loss SELL hints."""
+        return max(1, int(self.stop_loss_sell_bid_level))

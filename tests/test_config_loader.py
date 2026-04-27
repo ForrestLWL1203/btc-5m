@@ -132,6 +132,15 @@ class TestBuildTradeConfig:
                 "amount_tiers": [
                     {"threshold": 2.0, "amount": 15.0},
                 ],
+                "stop_loss": {
+                    "enabled": True,
+                    "multiplier": 1.2,
+                    "start_remaining_sec": 120,
+                    "end_remaining_sec": 15,
+                    "sell_bid_level": 9,
+                    "retry_count": 3,
+                    "min_sell_price": 0.20,
+                },
                 "max_entries_per_window": 5,
             },
             "risk": {
@@ -150,6 +159,13 @@ class TestBuildTradeConfig:
         assert tc.amount_tiers == [(2.0, 15.0)]
         assert tc.amount_for_signal_strength(1.9) == pytest.approx(10.0)
         assert tc.amount_for_signal_strength(2.0) == pytest.approx(15.0)
+        assert tc.stop_loss_enabled is True
+        assert tc.stop_loss_multiplier == pytest.approx(1.2)
+        assert tc.stop_loss_start_remaining_sec == pytest.approx(120)
+        assert tc.stop_loss_end_remaining_sec == pytest.approx(15)
+        assert tc.stop_loss_bid_level() == 9
+        assert tc.stop_loss_retry_count == 3
+        assert tc.stop_loss_min_sell_price == pytest.approx(0.20)
         assert tc.max_entries_per_window == 5
         assert tc.rounds == 3
         assert tc.consecutive_loss_amount_limit == pytest.approx(30.0)

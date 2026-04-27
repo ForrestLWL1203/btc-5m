@@ -28,6 +28,10 @@ class MonitorState:
     target_past_signal_strength: Optional[float] = None
     target_remaining_sec: Optional[float] = None
     entry_amount: float = 0.0
+    entry_avg_price: float = 0.0
+    stop_loss_triggered: bool = False
+    stop_loss_attempted: bool = False
+    stop_loss_price: Optional[float] = None
     last_entry_check_side: Optional[str] = None  # target side for the last entry-band check
     last_entry_check_best_ask: Optional[float] = None  # target ask used by the last entry-band check
     last_signal_eval_key: Optional[tuple] = None

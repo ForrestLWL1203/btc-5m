@@ -14,12 +14,14 @@ from polybot.trade_config import TradeConfig
 from polybot.trading.monitor import (
     _handle_opening_price,
     _log_window_summary,
+    _maybe_handle_stop_loss,
     _monitor_single_window,
     _on_price_update,
     _process_trade_result,
     _sanitize_next_window,
     monitor_window,
 )
+from polybot.trading.trading import OrderResult
 
 
 def _make_state(**kwargs) -> MonitorState:
@@ -68,6 +70,10 @@ def _mock_strategy() -> MagicMock:
     return strategy
 
 
+def _bid_book(start: float = 0.41, count: int = 12) -> list[tuple[float, float]]:
+    return [(round(start - i * 0.01, 2), 100.0) for i in range(count)]
+
+
 def test_sanitize_next_window_rejects_same_window():
     window = _make_window()
     assert _sanitize_next_window(window, window) is None
@@ -99,6 +105,93 @@ def test_process_trade_result_triggers_dollar_loss_pause():
     )
     assert state.windows_to_skip == 2
     assert state.consecutive_loss_amount == pytest.approx(0.0)
+
+
+@pytest.mark.asyncio
+async def test_stop_loss_sells_with_bid_depth_inside_time_band():
+    now = time.time()
+    window = _make_window(start_epoch=int(now) - 240, end_epoch=int(now) + 60)
+    state = _make_state(
+        bought=True,
+        holding_size=1.3889,
+        entry_amount=1.0,
+        entry_price=0.72,
+        entry_avg_price=0.72,
+    )
+    ws = MagicMock()
+    ws.get_latest_bid_levels_with_size.return_value = _bid_book(0.41, 12)
+    ws.get_latest_best_bid_age.return_value = 0.01
+    trade_config = _tc(
+        stop_loss_enabled=True,
+        stop_loss_multiplier=1.2,
+        stop_loss_start_remaining_sec=120,
+        stop_loss_end_remaining_sec=15,
+        stop_loss_sell_bid_level=9,
+        stop_loss_retry_count=3,
+        stop_loss_min_sell_price=0.20,
+    )
+
+    with patch("polybot.trading.monitor.get_tick_size", return_value=0.01), \
+         patch("polybot.trading.monitor.sell_token", new_callable=AsyncMock) as mock_sell:
+        mock_sell.return_value = OrderResult(
+            success=True,
+            order_id="sell-1",
+            filled_size=1.3889,
+            avg_price=0.33,
+        )
+        await _maybe_handle_stop_loss(
+            window,
+            state,
+            ws,
+            "up-token-123",
+            False,
+            trade_config,
+            "up",
+        )
+
+    mock_sell.assert_awaited_once()
+    assert mock_sell.await_args.args[:2] == ("up-token-123", pytest.approx(1.3889))
+    assert mock_sell.await_args.kwargs["price_hint"] == pytest.approx(0.31)
+    assert mock_sell.await_args.kwargs["retry_count"] == 3
+    assert state.stop_loss_triggered is True
+    assert state.exit_triggered is True
+    assert state.bought is False
+    assert state.holding_size == pytest.approx(0.0)
+    assert state.daily_realized_pnl == pytest.approx(1.3889 * 0.33 - 1.0)
+
+
+@pytest.mark.asyncio
+async def test_stop_loss_ignores_early_window():
+    now = time.time()
+    window = _make_window(start_epoch=int(now) - 100, end_epoch=int(now) + 200)
+    state = _make_state(
+        bought=True,
+        holding_size=1.3889,
+        entry_amount=1.0,
+        entry_price=0.72,
+        entry_avg_price=0.72,
+    )
+    ws = MagicMock()
+    ws.get_latest_bid_levels_with_size.return_value = _bid_book(0.41, 12)
+    trade_config = _tc(
+        stop_loss_enabled=True,
+        stop_loss_start_remaining_sec=120,
+        stop_loss_end_remaining_sec=15,
+    )
+
+    with patch("polybot.trading.monitor.sell_token", new_callable=AsyncMock) as mock_sell:
+        await _maybe_handle_stop_loss(
+            window,
+            state,
+            ws,
+            "up-token-123",
+            False,
+            trade_config,
+            "up",
+        )
+
+    mock_sell.assert_not_called()
+    assert state.stop_loss_triggered is False
 
 
 @pytest.mark.asyncio

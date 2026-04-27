@@ -133,6 +133,8 @@ Tick size determines minimum price increment. Varies by price range:
 3. **Buy**: FAK market order with a book-depth price hint clamped to the hard
    cap.
 4. **Retry**: Refresh WS book depth before retry; abort if stale or insufficient.
-5. **Exit**: Hold to window end and let resolution / auto-redeem settle.
-6. **Fill accounting**: Prefer `FAK_FILLED.avg_price` from execution result;
+5. **Optional stop loss**: When enabled, use held-leg bid-book depth and SELL
+   FAK inside the configured late-window time band.
+6. **Default exit**: Hold to window end and let resolution / auto-redeem settle.
+7. **Fill accounting**: Prefer `FAK_FILLED.avg_price` from execution result;
    balance queries remain useful for reconciliation.
