@@ -38,7 +38,7 @@ class TradeConfig:
         return selected
 
     def base_entry_ask_level(self) -> int:
-        """Return the configured minimum ask-book level for FAK hints."""
+        """Return the deepest ask-book level allowed for FAK hints."""
         return max(1, int(self.entry_ask_level))
 
     def stop_loss_bid_level(self) -> int:

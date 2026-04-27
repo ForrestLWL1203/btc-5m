@@ -132,11 +132,12 @@ async def test_stop_loss_sells_with_bid_depth_inside_time_band():
     )
 
     with patch("polybot.trading.monitor.get_tick_size", return_value=0.01), \
+         patch("polybot.trading.monitor.get_token_balance", return_value=1.522), \
          patch("polybot.trading.monitor.sell_token", new_callable=AsyncMock) as mock_sell:
         mock_sell.return_value = OrderResult(
             success=True,
             order_id="sell-1",
-            filled_size=1.3889,
+            filled_size=1.522,
             avg_price=0.33,
         )
         await _maybe_handle_stop_loss(
@@ -150,14 +151,14 @@ async def test_stop_loss_sells_with_bid_depth_inside_time_band():
         )
 
     mock_sell.assert_awaited_once()
-    assert mock_sell.await_args.args[:2] == ("up-token-123", pytest.approx(1.3889))
+    assert mock_sell.await_args.args[:2] == ("up-token-123", pytest.approx(1.522))
     assert mock_sell.await_args.kwargs["price_hint"] == pytest.approx(0.31)
     assert mock_sell.await_args.kwargs["retry_count"] == 3
     assert state.stop_loss_triggered is True
     assert state.exit_triggered is True
     assert state.bought is False
     assert state.holding_size == pytest.approx(0.0)
-    assert state.daily_realized_pnl == pytest.approx(1.3889 * 0.33 - 1.0)
+    assert state.daily_realized_pnl == pytest.approx(1.522 * 0.33 - 1.0)
 
 
 @pytest.mark.asyncio
@@ -345,7 +346,7 @@ async def test_on_price_excludes_first_book_level_from_depth():
 
 
 @pytest.mark.asyncio
-async def test_on_price_entry_ask_level_sets_minimum_price_hint_level():
+async def test_on_price_entry_ask_level_caps_deepest_price_hint_level():
     window = _make_window()
     state = _make_state()
     strategy = _mock_strategy()
@@ -353,7 +354,7 @@ async def test_on_price_entry_ask_level_sets_minimum_price_hint_level():
     ws = MagicMock()
     ws.get_latest_ask_levels_with_size.return_value = [
         (0.60, 0.1),   # level 1 ignored for fillability
-        (0.61, 10.0),  # already covers amount, but configured hint level is 4
+        (0.61, 10.0),  # already covers amount within configured max level
         (0.62, 10.0),
         (0.63, 10.0),
     ]
@@ -377,13 +378,13 @@ async def test_on_price_entry_ask_level_sets_minimum_price_hint_level():
         )
 
     mock_buy.assert_awaited_once()
-    assert mock_buy.await_args.kwargs["target_entry_ask"] == pytest.approx(0.63)
-    assert mock_buy.await_args.kwargs["best_ask"] == pytest.approx(0.64)
+    assert mock_buy.await_args.kwargs["target_entry_ask"] == pytest.approx(0.61)
+    assert mock_buy.await_args.kwargs["best_ask"] == pytest.approx(0.62)
     assert mock_buy.await_args.kwargs["entry_ask_level"] == 4
 
 
 @pytest.mark.asyncio
-async def test_on_price_low_top_ask_uses_deeper_price_hint_level():
+async def test_on_price_low_top_ask_allows_deeper_max_price_hint_level():
     window = _make_window()
     state = _make_state()
     strategy = _mock_strategy()
@@ -391,7 +392,7 @@ async def test_on_price_low_top_ask_uses_deeper_price_hint_level():
     ws = MagicMock()
     ws.get_latest_ask_levels_with_size.return_value = [
         (0.58, 1.0),
-        (0.59, 10.0),
+        (0.59, 0.1),
         (0.60, 10.0),
         (0.61, 10.0),
         (0.62, 10.0),
@@ -426,8 +427,8 @@ async def test_on_price_low_top_ask_uses_deeper_price_hint_level():
         )
 
     mock_buy.assert_awaited_once()
-    assert mock_buy.await_args.kwargs["target_entry_ask"] == pytest.approx(0.66)
-    assert mock_buy.await_args.kwargs["best_ask"] == pytest.approx(0.67)
+    assert mock_buy.await_args.kwargs["target_entry_ask"] == pytest.approx(0.60)
+    assert mock_buy.await_args.kwargs["best_ask"] == pytest.approx(0.61)
     assert mock_buy.await_args.kwargs["entry_ask_level"] == 9
 
 
@@ -475,8 +476,8 @@ async def test_on_price_non_low_top_ask_uses_base_price_hint_level():
         )
 
     mock_buy.assert_awaited_once()
-    assert mock_buy.await_args.kwargs["target_entry_ask"] == pytest.approx(0.66)
-    assert mock_buy.await_args.kwargs["best_ask"] == pytest.approx(0.67)
+    assert mock_buy.await_args.kwargs["target_entry_ask"] == pytest.approx(0.61)
+    assert mock_buy.await_args.kwargs["best_ask"] == pytest.approx(0.62)
     assert mock_buy.await_args.kwargs["entry_ask_level"] == 7
 
 

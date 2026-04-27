@@ -54,7 +54,9 @@ Runtime behavior:
 - Hard cap is `0.75`; no dynamic cap tiers.
 - Execution uses target-leg WS order-book depth.
 - Level 1 ask is diagnostic only; fillability starts from level 2.
-- First FAK hint uses ask level 9, or ask level 11 when top ask is `<0.60`.
+- First FAK hint scans from ask level 2 up to level 9 by default, or up to
+  level 11 when top ask is `<0.60`; if cumulative depth covers the order
+  earlier, it uses that earlier level.
 - All hints are clamped to cap.
 - `signal_strength >= 2.0` uses amount `1.5`; timing does not change.
 - Optional stop-loss exists but is disabled by default.
@@ -65,6 +67,8 @@ Stop-loss behavior when enabled:
 - Trigger price: `max(min_sell_price, (1 - entry_avg_price) * multiplier)`.
 - Only active while `start_remaining_sec >= remaining >= end_remaining_sec`.
 - Uses held-leg bid book, skips level 1, and defaults to bid level 9.
+- Live SELL size comes from the actual CLOB token balance before exit; estimated
+  runtime shares are only a fallback if balance lookup fails.
 - SELL FAK retry count defaults to 3.
 - On fill, record realized PnL and exit that window.
 

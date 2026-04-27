@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from polybot.core import config
-from polybot.core.client import get_midpoint_async, get_tick_size
+from polybot.core.client import get_midpoint_async, get_tick_size, get_token_balance
 from polybot.core.log_formatter import (
     MARKET,
     SIGNAL,
@@ -167,7 +167,9 @@ def _cap_limited_depth_quote(
     """Return the first ask level where cap-limited depth can cover amount.
 
     Level 1 is deliberately excluded from fillability calculations because it
-    often disappears before the FAK reaches Polymarket.
+    often disappears before the FAK reaches Polymarket. ``min_entry_level`` is
+    legacy naming: it is treated as the deepest ask level we may scan for the
+    first FAK hint, not a mandatory minimum level.
     """
     ask_age = ws.get_latest_best_ask_age(token_id, level=1)
     try:
@@ -189,15 +191,15 @@ def _cap_limited_depth_quote(
     levels = [(float(price), float(size)) for price, size in raw_levels if float(size) > 0]
     best_ask_level_1 = levels[0][0] if levels else _best_ask_level_1(ws, token_id)
     preview = levels[:_DEPTH_PREVIEW_LEVELS]
-    min_entry_level = max(1, int(min_entry_level))
+    max_entry_level = max(1, int(min_entry_level))
     if (
         best_ask_level_1 is not None
         and low_price_threshold is not None
         and low_price_entry_level is not None
         and best_ask_level_1 < low_price_threshold
     ):
-        min_entry_level = max(min_entry_level, int(low_price_entry_level))
-    min_entry_index = min_entry_level - 1
+        max_entry_level = max(max_entry_level, int(low_price_entry_level))
+    max_entry_index = max(max_entry_level - 1, int(skip_levels))
     if not levels or max_entry_price is None:
         return CapDepthQuote(
             price=None,
@@ -206,7 +208,7 @@ def _cap_limited_depth_quote(
             levels_used=0,
             total_levels=len(levels),
             skipped_levels=min(skip_levels, len(levels)),
-            entry_ask_level=min_entry_level,
+            entry_ask_level=max_entry_level,
             best_ask_level_1=best_ask_level_1,
             ask_age_sec=ask_age,
             preview=preview,
@@ -217,13 +219,15 @@ def _cap_limited_depth_quote(
     levels_used = 0
     selected_price = None
     for index, (ask_price, ask_size) in enumerate(levels):
+        if index > max_entry_index:
+            break
         if ask_price > max_entry_price:
             break
         if index < skip_levels:
             continue
         levels_used += 1
         cap_notional += ask_price * ask_size
-        if cap_notional >= amount and index >= min_entry_index:
+        if cap_notional >= amount:
             selected_price = ask_price
             break
 
@@ -240,7 +244,7 @@ def _cap_limited_depth_quote(
         levels_used=levels_used,
         total_levels=len(levels),
         skipped_levels=min(skip_levels, len(levels)),
-        entry_ask_level=min_entry_level,
+        entry_ask_level=max_entry_level,
         best_ask_level_1=best_ask_level_1,
         ask_age_sec=ask_age,
         preview=preview,
@@ -712,16 +716,65 @@ async def _maybe_handle_stop_loss(
     )
     state.stop_loss_price = stop_price
 
+    shares_to_sell = state.holding_size
+    balance_source = "state"
     quote = _stop_loss_bid_quote(
         ws,
         token_id,
-        state.holding_size,
+        shares_to_sell,
         max_age_sec=config.FAK_RETRY_MAX_BEST_ASK_AGE_SEC,
         min_sell_level=trade_config.stop_loss_bid_level(),
         min_sell_price=trade_config.stop_loss_min_sell_price,
     )
     if not quote.enough or quote.price is None or quote.price > stop_price:
         return
+
+    if not dry_run:
+        live_balance = await asyncio.to_thread(get_token_balance, token_id, False)
+        if live_balance is not None:
+            balance_source = "clob_balance"
+            shares_to_sell = max(0.0, live_balance)
+            if shares_to_sell <= 1e-9:
+                log_event(log, logging.WARNING, TRADE, {
+                    "action": "STOP_LOSS_NO_POSITION",
+                    "side": side.upper(),
+                    "window": window.short_label,
+                    "state_shares": state.holding_size,
+                    "balance_shares": live_balance,
+                })
+                state.holding_size = 0.0
+                state.bought = False
+                state.exit_triggered = True
+                return
+            if abs(shares_to_sell - state.holding_size) > 1e-6:
+                log_event(log, logging.INFO, TRADE, {
+                    "action": "STOP_LOSS_BALANCE_SYNC",
+                    "side": side.upper(),
+                    "window": window.short_label,
+                    "state_shares": state.holding_size,
+                    "balance_shares": shares_to_sell,
+                })
+                state.holding_size = shares_to_sell
+                quote = _stop_loss_bid_quote(
+                    ws,
+                    token_id,
+                    shares_to_sell,
+                    max_age_sec=config.FAK_RETRY_MAX_BEST_ASK_AGE_SEC,
+                    min_sell_level=trade_config.stop_loss_bid_level(),
+                    min_sell_price=trade_config.stop_loss_min_sell_price,
+                )
+                if not quote.enough or quote.price is None or quote.price > stop_price:
+                    log_event(log, logging.INFO, TRADE, {
+                        "action": "STOP_LOSS_BALANCE_RECHECK_ABORT",
+                        "side": side.upper(),
+                        "window": window.short_label,
+                        "shares": shares_to_sell,
+                        "stop_price": round(stop_price, 4),
+                        "sell_price": quote.price,
+                        "price_hint": quote.price_hint,
+                        "bid_shares_available": round(quote.shares_available, 4),
+                    })
+                    return
 
     state.stop_loss_attempted = True
     log_event(log, logging.WARNING, TRADE, {
@@ -732,7 +785,8 @@ async def _maybe_handle_stop_loss(
         "stop_price": round(stop_price, 4),
         "sell_price": quote.price,
         "price_hint": quote.price_hint,
-        "shares": state.holding_size,
+        "shares": shares_to_sell,
+        "shares_source": balance_source,
         "remaining_sec": round(remaining),
         "best_bid_level_1": quote.best_bid_level_1,
         "bid_levels_used": quote.levels_used,
@@ -767,7 +821,7 @@ async def _maybe_handle_stop_loss(
 
     result = await sell_token(
         token_id,
-        state.holding_size,
+        shares_to_sell,
         price_hint=quote.price_hint,
         price_hint_refresher=_stop_loss_price_hint_refresher(ws, token_id, trade_config, state),
         retry_count=trade_config.stop_loss_retry_count,
@@ -777,15 +831,16 @@ async def _maybe_handle_stop_loss(
             "action": "STOP_LOSS_FAILED",
             "side": side.upper(),
             "window": window.short_label,
-            "shares": state.holding_size,
+            "shares": shares_to_sell,
+            "shares_source": balance_source,
             "price_hint": quote.price_hint,
             "message": result.message,
         })
         return
 
-    sold_size = min(result.filled_size or state.holding_size, state.holding_size)
+    sold_size = min(result.filled_size or shares_to_sell, shares_to_sell)
     sell_price = result.avg_price or quote.price_hint or quote.price or 0.0
-    cost_basis = state.entry_amount * (sold_size / state.holding_size) if state.holding_size > 0 else 0.0
+    cost_basis = state.entry_amount * (sold_size / shares_to_sell) if shares_to_sell > 0 else 0.0
     realized_pnl = sold_size * sell_price - cost_basis
     _process_trade_result(state, realized_pnl >= 0, realized_pnl, trade_config)
     log_event(log, logging.WARNING, TRADE, {
@@ -794,12 +849,13 @@ async def _maybe_handle_stop_loss(
         "window": window.short_label,
         "avg_price": sell_price,
         "shares": sold_size,
-        "requested_shares": state.holding_size,
+        "requested_shares": shares_to_sell,
+        "shares_source": balance_source,
         "realized_pnl": round(realized_pnl, 4),
         "daily_realized_pnl": round(state.daily_realized_pnl, 4),
         "order_id": result.order_id,
     })
-    state.holding_size = max(0.0, state.holding_size - sold_size)
+    state.holding_size = max(0.0, shares_to_sell - sold_size)
     state.entry_amount = max(0.0, state.entry_amount - cost_basis)
     state.stop_loss_triggered = True
     if state.holding_size <= 1e-9:

@@ -53,11 +53,16 @@ Behavior:
 - Hard max entry cap is `0.75`; there are no dynamic strength caps.
 - Execution uses target-leg WS order-book depth, not theoretical `1 - up_price`.
 - Level 1 ask is diagnostic only; fillability starts from level 2.
-- First FAK hint uses ask level 9 by default, or level 11 when top ask is `<0.60`.
+- First FAK hint scans from ask level 2 up to level 9 by default, or up to
+  level 11 when top ask is `<0.60`; if cumulative depth covers the order
+  earlier, it uses that earlier level.
 - Strong signals only increase amount to `1.5` at `signal_strength >= 2.0`; they
   do not bypass the 45s timing gate.
 - No TP, reversal, re-entry, or lower entry-price floor.
 - Stop-loss support exists but is disabled by default.
+- When live stop-loss is enabled, SELL size is read from the actual CLOB token
+  balance before exit; estimated runtime shares are only a fallback if balance
+  lookup fails.
 
 ## Core Files
 

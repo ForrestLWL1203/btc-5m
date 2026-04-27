@@ -45,9 +45,13 @@ Rules:
 - Direction locks once per window.
 - Hard cap is `0.75`; no strength cap tiers and no early-entry bypass.
 - WS order-book depth drives execution; level 1 is skipped for fillability.
-- Initial FAK hint uses level 9, or level 11 if top ask `<0.60`.
+- Initial FAK hint scans from level 2 up to level 9 by default, or up to level
+  11 if top ask `<0.60`; if cumulative depth covers the order earlier, it uses
+  that earlier level.
 - `signal_strength >= 2.0` increases amount to `1.5` only.
 - Optional stop-loss exists but is disabled by default.
+- Live stop-loss sells the actual CLOB token balance, not the estimated runtime
+  share count; estimated shares are only a fallback if balance lookup fails.
 - Hold to `window.end_epoch` unless optional stop-loss is enabled and fills.
 - No TP, reversal, or re-entry.
 
