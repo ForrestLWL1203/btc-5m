@@ -2,8 +2,9 @@
 
 Polymarket BTC 5-minute UP/DOWN trading bot.
 
-Current repo policy: one runtime strategy only, `paired_window`. Historical
-strategy configs, old backtest scripts, and retired VPS wrappers have been
+Current repo policy: BTC 5-minute only, one runtime strategy only:
+`paired_window`. Historical strategies, extra market/timeframe support,
+conservative configs, old backtest scripts, and retired VPS wrappers have been
 removed.
 
 ## Active Strategy
@@ -48,6 +49,8 @@ params:
 
 Behavior:
 
+- Runtime market is fixed to `btc-updown-5m`. `--market` only accepts `btc` and
+  `--timeframe` only accepts `5m`.
 - BTC baseline is the current 5-minute window open.
 - Entry band is `remaining=[255s,180s]`, i.e. 45s to 120s after window start.
 - Signal threshold is dynamic: `theta_start_pct=0.025%` at 45s after open,
@@ -69,6 +72,8 @@ Behavior:
 - When live stop-loss is enabled, SELL size is read from the actual CLOB token
   balance before exit; estimated runtime shares are only a fallback if balance
   lookup fails.
+- Removed legacy stop-loss multiplier/config compatibility path; stop-loss uses
+  fixed trigger fields only.
 
 ## Core Files
 
@@ -108,6 +113,8 @@ Run tests:
 ```bash
 env -u ALL_PROXY -u all_proxy -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy pytest -q
 ```
+
+Current expected test suite size: 123 tests.
 
 Collect data:
 

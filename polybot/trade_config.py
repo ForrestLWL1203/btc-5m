@@ -20,7 +20,6 @@ class TradeConfig:
     consecutive_loss_pause_windows: int = 2
     daily_loss_pause_windows: int = 5
     stop_loss_enabled: bool = False
-    stop_loss_multiplier: float = 1.2
     stop_loss_trigger_price: float = 0.38
     stop_loss_disable_below_entry_price: float = 0.45
     stop_loss_start_remaining_sec: float = 120.0

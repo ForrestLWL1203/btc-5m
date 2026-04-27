@@ -23,7 +23,6 @@ class MonitorState:
     target_entry_price: Optional[float] = None  # strategy-computed token price to use for fills/logging
     signal_reference_price: Optional[float] = None  # theoretical target-leg price derived from the UP-leg signal
     target_max_entry_price: Optional[float] = None  # strategy-adjusted cap for the active signal
-    target_signal_confidence: Optional[str] = None  # "normal" or "high"
     target_signal_strength: Optional[float] = None
     target_past_signal_strength: Optional[float] = None
     target_active_theta_pct: Optional[float] = None

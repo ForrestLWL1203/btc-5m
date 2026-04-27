@@ -30,7 +30,6 @@ def test_should_buy_uses_fixed_cap():
 
     assert strat.should_buy(0.60, state) is True
     assert state.target_max_entry_price == pytest.approx(0.65)
-    assert state.target_signal_confidence == "normal"
     assert state.target_signal_strength == pytest.approx(100.0)
     assert state.target_past_signal_strength == pytest.approx(83.3333333333)
     assert state.target_active_theta_pct == pytest.approx(0.03)

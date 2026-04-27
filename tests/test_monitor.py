@@ -124,7 +124,6 @@ async def test_stop_loss_sells_with_bid_depth_inside_time_band():
     ws.get_latest_best_bid_age.return_value = 0.01
     trade_config = _tc(
         stop_loss_enabled=True,
-        stop_loss_multiplier=1.2,
         stop_loss_start_remaining_sec=120,
         stop_loss_end_remaining_sec=15,
         stop_loss_sell_bid_level=9,
@@ -380,7 +379,7 @@ async def test_on_price_skips_when_target_best_ask_outside_band():
 
 
 @pytest.mark.asyncio
-async def test_on_price_allows_low_target_best_ask_below_legacy_min():
+async def test_on_price_allows_low_target_best_ask():
     window = _make_window()
     state = _make_state()
     strategy = _mock_strategy()
@@ -649,7 +648,6 @@ async def test_on_price_uses_configured_entry_ask_level():
 
     def _normal_ok_signal(price, state_obj):
         state_obj.target_side = "up"
-        state_obj.target_signal_confidence = "normal"
         state_obj.target_signal_strength = 2.1
         state_obj.target_remaining_sec = 240
         return True
@@ -688,14 +686,13 @@ async def test_on_price_does_not_fallback_to_top_ask_for_deeper_level():
     ws.get_latest_best_ask.return_value = None
     ws.get_latest_best_ask_age.return_value = None
 
-    def _strong_up_signal(price, state_obj):
+    def _up_signal(price, state_obj):
         state_obj.target_side = "up"
-        state_obj.target_signal_confidence = "strong"
         state_obj.target_signal_strength = 2.1
         state_obj.target_remaining_sec = 240
         return True
 
-    strategy.should_buy.side_effect = _strong_up_signal
+    strategy.should_buy.side_effect = _up_signal
     update = _make_update("up-token-123", midpoint=0.68)
     update.best_ask = 0.60
     trade_config = _tc(
@@ -826,7 +823,7 @@ async def test_monitor_window_reuses_existing_ws():
     import datetime
 
     utc = datetime.timezone.utc
-    past_start = int(asyncio.get_event_loop().time()) - 100
+    past_start = int(time.time()) - 100
     window = MarketWindow(
         question="Test Window",
         up_token="up-tok",
@@ -841,7 +838,9 @@ async def test_monitor_window_reuses_existing_ws():
     mock_ws.switch_tokens = AsyncMock()
     mock_ws.get_latest_price = MagicMock(return_value=None)
 
-    with patch("polybot.trading.monitor.find_next_window", return_value=None):
+    with patch("polybot.trading.monitor.prefetch_order_params", create=True, new=MagicMock()), \
+         patch("polybot.trading.monitor._monitor_single_window", new_callable=AsyncMock, return_value=None), \
+         patch("polybot.trading.monitor.find_next_window", return_value=None):
         _, returned_ws, _ = await monitor_window(
             window, dry_run=True, preopened=True, existing_ws=mock_ws,
             strategy=_mock_strategy(),
@@ -872,7 +871,6 @@ async def test_monitor_window_resets_started_before_preopen_switch():
     state.target_side = "down"
     state.target_entry_price = 0.64
     state.target_max_entry_price = 0.75
-    state.target_signal_confidence = "strong"
     state.last_entry_check_side = "down"
     state.last_entry_check_best_ask = 0.64
     state.latest_midpoint = 0.9
@@ -886,7 +884,6 @@ async def test_monitor_window_resets_started_before_preopen_switch():
         assert state.target_side is None
         assert state.target_entry_price is None
         assert state.target_max_entry_price is None
-        assert state.target_signal_confidence is None
         assert state.last_entry_check_side is None
         assert state.last_entry_check_best_ask is None
         assert state.latest_midpoint is None

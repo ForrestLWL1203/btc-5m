@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import Optional
 
-from polybot.market.series import MarketSeries, KNOWN_SERIES, TIMEFRAME_SECONDS, _default_buffer
+from polybot.market.series import ACTIVE_SERIES_KEY, MarketSeries
 from polybot.strategies.paired_window import PairedWindowStrategy
 from .trade_config import TradeConfig
 
@@ -27,29 +27,14 @@ def load_config(config_path: Optional[str] = None) -> dict:
 
 
 def build_series(cfg: dict) -> MarketSeries:
-    """Build MarketSeries from config dict."""
+    """Build the active BTC 5-minute MarketSeries from config dict."""
     market = cfg.get("market", {})
     asset = market.get("asset", "btc")
     timeframe = market.get("timeframe", "5m")
     key = f"{asset}-updown-{timeframe}"
-
-    if key in KNOWN_SERIES:
-        return MarketSeries.from_known(key)
-
-    slug_prefix = market.get("slug_prefix", key)
-    slug_step = market.get("slug_step", TIMEFRAME_SECONDS.get(timeframe, 300))
-    window_end_buffer = market.get("window_end_buffer", _default_buffer(slug_step))
-    return MarketSeries(
-        asset=asset,
-        timeframe=timeframe,
-        slug_prefix=slug_prefix,
-        slug_step=slug_step,
-        window_end_buffer=window_end_buffer,
-    )
-
-STRATEGY_REGISTRY: dict[str, type] = {
-    "paired_window": PairedWindowStrategy,
-}
+    if key != ACTIVE_SERIES_KEY:
+        raise ValueError(f"Only {ACTIVE_SERIES_KEY} is supported")
+    return MarketSeries.from_known(ACTIVE_SERIES_KEY)
 
 
 def build_strategy(cfg: dict, series: Optional[MarketSeries] = None):
@@ -83,15 +68,9 @@ def build_strategy(cfg: dict, series: Optional[MarketSeries] = None):
             open_price_max_wait_sec=strat_cfg.get("open_price_max_wait_sec", 30.0),
         )
 
-    available = ", ".join(sorted(STRATEGY_REGISTRY)) or "none"
     if strat_type:
-        raise ValueError(
-            f"Unknown strategy type: {strat_type}. "
-            f"Available: {available}"
-        )
-    raise ValueError(
-        f"Strategy type is required. Available strategies: {available}"
-    )
+        raise ValueError(f"Unknown strategy type: {strat_type}. Available: paired_window")
+    raise ValueError("Strategy type is required. Available strategies: paired_window")
 
 
 def build_trade_config(cfg: dict) -> TradeConfig:
@@ -149,7 +128,6 @@ def _build_stop_loss(raw: Optional[dict]) -> dict:
         return {}
     return {
         "stop_loss_enabled": bool(raw.get("enabled", False)),
-        "stop_loss_multiplier": float(raw.get("multiplier", 1.2)),
         "stop_loss_trigger_price": float(raw.get("trigger_price", 0.38)),
         "stop_loss_disable_below_entry_price": float(raw.get("disable_below_entry_price", 0.45)),
         "stop_loss_start_remaining_sec": float(raw.get("start_remaining_sec", 120.0)),

@@ -49,8 +49,7 @@ class PairedWindowStrategy(Strategy):
         self._min_move_ratio = min_move_ratio
         self._open_price_max_wait_sec = open_price_max_wait_sec
 
-        symbol = "btcusdt" if series.asset == "btc" else "ethusdt"
-        self._feed = BinancePriceFeed(symbol=symbol)
+        self._feed = BinancePriceFeed(symbol="btcusdt")
         self._window_start_epoch: float = 0.0
         self._window_open_btc: Optional[float] = None
         self._committed_direction: Optional[str] = None
@@ -161,7 +160,6 @@ class PairedWindowStrategy(Strategy):
             price if direction == "up" else max(0.0, min(1.0, 1.0 - price))
         )
         state.target_max_entry_price = self._max_entry_price
-        state.target_signal_confidence = "normal"
         state.target_signal_strength = signal_strength
         state.target_past_signal_strength = past_signal_strength
         state.target_active_theta_pct = active_theta_pct

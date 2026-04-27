@@ -4,10 +4,12 @@
 
 Polymarket BTC 5-minute UP/DOWN bot. Status: live-capable.
 
-Current rule: `paired_window` is the only active runtime strategy. Do not
-restore historical strategies, conservative configs, TP, reversal, re-entry,
-dynamic strength caps, early-entry bypass, or theoretical `1 - up_price`
-execution gating unless the user explicitly asks and fresh tests are added.
+Current rule: BTC 5-minute only and `paired_window` is the only active runtime
+strategy. Do not restore historical strategies, ETH/multi-timeframe support,
+conservative configs, TP, reversal, re-entry, dynamic strength caps,
+early-entry bypass, stop-loss multiplier compatibility, or theoretical
+`1 - up_price` execution gating unless the user explicitly asks and fresh tests
+are added.
 
 ## Current Strategy
 
@@ -49,6 +51,8 @@ params:
 
 Runtime behavior:
 
+- Runtime market is fixed to `btc-updown-5m`; `--market` only accepts `btc` and
+  `--timeframe` only accepts `5m`.
 - BTC baseline is the current 5-minute window open.
 - Entry band is `remaining=[255s,180s]`, i.e. 45s to 120s after open.
 - Dynamic theta is active: `0.025%` at 45s after open, linearly rising to
@@ -66,6 +70,7 @@ Runtime behavior:
 - All hints are clamped to cap.
 - `signal_strength >= 2.0` uses amount `1.5`; timing does not change.
 - Optional stop-loss exists but is disabled by default.
+- Stop-loss multiplier is removed; use fixed trigger fields only.
 - Hold to `window.end_epoch`; no exit logic before resolution.
 
 Stop-loss behavior when enabled:
@@ -116,6 +121,8 @@ Tests:
 ```bash
 env -u ALL_PROXY -u all_proxy -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy pytest -q
 ```
+
+Expected suite size after cleanup: 123 tests.
 
 VPS bootstrap:
 
@@ -203,5 +210,7 @@ Important fields:
 - Keep docs, config, strategy, monitor, runtime schema, and tests aligned.
 - Do not add new runtime strategy branches for experiments; use a separate
   branch or ask first.
+- Do not re-add non-BTC/non-5m market series or legacy runtime fields unless
+  requested with tests.
 - Do not commit logs, `data/`, remote run folders, local profiles, or secrets.
 - Do not change exit timing away from `window.end_epoch`.

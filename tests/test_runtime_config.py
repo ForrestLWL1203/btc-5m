@@ -34,7 +34,6 @@ def _args(**overrides) -> argparse.Namespace:
         "low_price_entry_ask_level": None,
         "max_entries": None,
         "stop_loss_enabled": None,
-        "stop_loss_multiplier": None,
         "stop_loss_trigger_price": None,
         "stop_loss_disable_below_entry_price": None,
         "stop_loss_start_remaining": None,
@@ -73,7 +72,7 @@ def test_build_runtime_config_requires_exactly_one_source():
 def test_build_runtime_config_from_preset_applies_common_overrides():
     cfg = build_runtime_config(_args(
         preset="enhanced",
-        market="eth",
+        market="btc",
         rounds=24,
         amount=2.0,
         theta_start=0.021,
@@ -85,7 +84,6 @@ def test_build_runtime_config_from_preset_applies_common_overrides():
         entry_start=250,
         entry_end=175,
         stop_loss_enabled=True,
-        stop_loss_multiplier=1.15,
         stop_loss_trigger_price=0.34,
         stop_loss_disable_below_entry_price=0.46,
         stop_loss_start_remaining=110,
@@ -94,7 +92,7 @@ def test_build_runtime_config_from_preset_applies_common_overrides():
         stop_loss_retry_count=2,
         stop_loss_min_sell_price=0.22,
     ))
-    assert cfg["market"]["asset"] == "eth"
+    assert cfg["market"]["asset"] == "btc"
     assert cfg["rounds"] == 24
     assert cfg["params"]["amount"] == pytest.approx(2.0)
     assert cfg["params"]["entry_ask_level"] == 4
@@ -107,7 +105,6 @@ def test_build_runtime_config_from_preset_applies_common_overrides():
     assert cfg["strategy"]["entry_end_remaining_sec"] == pytest.approx(175)
     stop = cfg["params"]["stop_loss"]
     assert stop["enabled"] is True
-    assert stop["multiplier"] == pytest.approx(1.15)
     assert stop["trigger_price"] == pytest.approx(0.34)
     assert stop["disable_below_entry_price"] == pytest.approx(0.46)
     assert stop["start_remaining_sec"] == pytest.approx(110)

@@ -245,9 +245,8 @@ class DataCollector:
         log.info(f"\nData saved to {filename}")
 
     async def _connect_btc_feeds(self) -> None:
-        symbol = "btcusdt" if self.series.asset == "btc" else "ethusdt"
         self._btc_feed = BinanceTradeStream(
-            symbol=symbol,
+            symbol="btcusdt",
             on_trade=lambda local_ts, exchange_ts, price, qty, is_seller: (
                 self._on_btc_trade(local_ts, exchange_ts, price, qty, is_seller)
             ),
@@ -509,7 +508,6 @@ class DataCollector:
 
         if not open_price or not close_price:
             import requests as req
-            symbol = "BTCUSDT" if self.series.asset == "btc" else "ETHUSDT"
 
             def fetch():
                 o, c = None, None
@@ -517,7 +515,7 @@ class DataCollector:
                     r = req.get(
                         BINANCE_KLINES_TEMPLATE,
                         params={
-                            "symbol": symbol,
+                            "symbol": "BTCUSDT",
                             "interval": "1m",
                             "startTime": int(window.start_epoch) * 1000,
                             "endTime": (int(window.start_epoch) + 60) * 1000,
@@ -601,7 +599,7 @@ class DataCollector:
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
-    p.add_argument("--market", default="btc-updown-5m")
+    p.add_argument("--market", default="btc-updown-5m", choices=("btc-updown-5m",))
     p.add_argument("--windows", type=int, default=5)
     p.add_argument("--slim", action="store_true",
                    help="Deduplicate poly writes (only when best quote changes)")

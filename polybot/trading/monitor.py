@@ -132,25 +132,6 @@ def _buffer_sell_price_hint(
     return max(0.0, min(1.0, math.floor(buffered / tick) * tick))
 
 
-def _initial_price_hint(
-    token_id: str,
-    best_ask: Optional[float],
-    strategy: Optional[Strategy],
-    state: Optional[MonitorState],
-) -> Optional[float]:
-    """Return first-attempt BUY hint using the dynamic strength cap directly."""
-    if best_ask is None:
-        return None
-    max_entry_price = _entry_price_cap(strategy, state)
-    if max_entry_price is not None and best_ask <= max_entry_price:
-        return max(0.0, min(1.0, max_entry_price))
-    return _buffer_price_hint(
-        token_id,
-        best_ask,
-        max_price=max_entry_price,
-    )
-
-
 def _cap_limited_depth_quote(
     ws: PriceStream,
     token_id: str,
@@ -168,8 +149,8 @@ def _cap_limited_depth_quote(
 
     Level 1 is deliberately excluded from fillability calculations because it
     often disappears before the FAK reaches Polymarket. ``min_entry_level`` is
-    legacy naming: it is treated as the deepest ask level we may scan for the
-    first FAK hint, not a mandatory minimum level.
+    the deepest ask level scanned for the first FAK hint, not a mandatory
+    minimum level.
     """
     ask_age = ws.get_latest_best_ask_age(token_id, level=1)
     try:
@@ -178,9 +159,8 @@ def _cap_limited_depth_quote(
         raw_levels = None
     if not isinstance(raw_levels, list):
         fallback_ask = ws.get_latest_best_ask(token_id, max_age_sec=max_age_sec, level=1)
-        # Test doubles and legacy stream shims may not expose L2 sizes. Real
-        # PriceStream returns [] when the book is unavailable, which still
-        # blocks live entry.
+        # Test doubles may not expose L2 sizes. Real PriceStream returns []
+        # when the book is unavailable, which still blocks live entry.
         fallback_size = (amount / fallback_ask * 1.01) if fallback_ask and fallback_ask > 0 else amount
         raw_levels = (
             [(fallback_ask, fallback_size), (fallback_ask, fallback_size)]
@@ -591,7 +571,6 @@ def _log_signal_eval(
         "depth_notional": round(depth_notional, 4) if depth_notional is not None else None,
         "depth_levels_used": depth_levels_used,
         "max_entry_price": max_entry_price,
-        "confidence": state.target_signal_confidence,
         "signal_strength": (
             round(state.target_signal_strength, 3)
             if state.target_signal_strength is not None
@@ -938,8 +917,8 @@ def _strategy_attach_skip_threshold(
 ) -> tuple[float, str]:
     """Return the latest elapsed-start threshold for a fresh attach.
 
-    Strategies with an explicit entry window should be attachable until the
-    end of that entry band. Generic strategies keep the legacy 60s fallback.
+    Active strategy windows should be attachable until the end of the configured
+    entry band. Missing strategy uses the base 60s fallback.
     """
     if strategy is None:
         return float(_STARTED_SKIP_THRESHOLD), f"started >{_STARTED_SKIP_THRESHOLD}s ago"
@@ -1195,7 +1174,6 @@ async def monitor_window(
     state.target_side = None
     state.target_entry_price = None
     state.target_max_entry_price = None
-    state.target_signal_confidence = None
     state.target_signal_strength = None
     state.target_past_signal_strength = None
     state.target_active_theta_pct = None
@@ -1499,7 +1477,6 @@ async def _on_price_update(
                     "signal_price": price,
                     "side": effective_side.upper(),
                     "window": window.short_label,
-                    "confidence": state.target_signal_confidence,
                     "max_entry_price": max_entry_price,
                     "signal_strength": (
                         round(state.target_signal_strength, 3)

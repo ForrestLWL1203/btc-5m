@@ -37,7 +37,7 @@ class PriceUpdate:
 
     @property
     def is_trade(self) -> bool:
-        """True if this update reflects an actual trade (more timely for SL/TP)."""
+        """True if this update reflects an actual trade."""
         return self.source == "last_trade_price"
 
 

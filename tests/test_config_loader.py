@@ -3,7 +3,7 @@
 import pytest
 import yaml
 
-from polybot.config_loader import load_config, build_series, build_strategy, build_trade_config, STRATEGY_REGISTRY
+from polybot.config_loader import load_config, build_series, build_strategy, build_trade_config
 from polybot.market.series import MarketSeries
 from polybot.strategies.paired_window import PairedWindowStrategy
 
@@ -16,11 +16,11 @@ class TestLoadConfig:
         cfg_file = tmp_path / "test.yaml"
         cfg_file.write_text(yaml.dump({
             "market": {"asset": "btc", "timeframe": "5m"},
-            "strategy": {"type": "retired_strategy"},
+            "strategy": {"type": "paired_window"},
         }))
         cfg = load_config(str(cfg_file))
         assert cfg["market"]["asset"] == "btc"
-        assert cfg["strategy"]["type"] == "retired_strategy"
+        assert cfg["strategy"]["type"] == "paired_window"
 
     def test_load_empty_yaml(self, tmp_path):
         cfg_file = tmp_path / "empty.yaml"
@@ -54,19 +54,9 @@ class TestBuildSeries:
         assert series.asset == "btc"
         assert series.timeframe == "5m"
 
-    def test_custom_series_with_slug_prefix(self):
-        cfg = {
-            "market": {
-                "asset": "eth",
-                "timeframe": "1d",
-                "slug_prefix": "eth-updown-1d",
-            },
-        }
-        series = build_series(cfg)
-        assert series.asset == "eth"
-        assert series.timeframe == "1d"
-        assert series.slug_step == 86400
-        assert series.slug_prefix == "eth-updown-1d"
+    def test_non_active_series_raises(self):
+        with pytest.raises(ValueError, match="Only btc-updown-5m is supported"):
+            build_series({"market": {"asset": "other", "timeframe": "5m"}})
 
 
 # ── build_strategy ───────────────────────────────────────────────────────────
@@ -123,10 +113,6 @@ class TestBuildStrategy:
         with pytest.raises(ValueError, match="Unknown strategy type"):
             build_strategy({"strategy": {"type": "nope"}}, series)
 
-    def test_registry_has_paired_window(self):
-        assert "paired_window" in STRATEGY_REGISTRY
-
-
 # ── build_trade_config ───────────────────────────────────────────────────────
 
 
@@ -150,7 +136,6 @@ class TestBuildTradeConfig:
                 ],
                 "stop_loss": {
                     "enabled": True,
-                    "multiplier": 1.2,
                     "trigger_price": 0.38,
                     "disable_below_entry_price": 0.45,
                     "start_remaining_sec": 120,
@@ -178,7 +163,6 @@ class TestBuildTradeConfig:
         assert tc.amount_for_signal_strength(1.9) == pytest.approx(10.0)
         assert tc.amount_for_signal_strength(2.0) == pytest.approx(15.0)
         assert tc.stop_loss_enabled is True
-        assert tc.stop_loss_multiplier == pytest.approx(1.2)
         assert tc.stop_loss_trigger_price == pytest.approx(0.38)
         assert tc.stop_loss_disable_below_entry_price == pytest.approx(0.45)
         assert tc.stop_loss_start_remaining_sec == pytest.approx(120)

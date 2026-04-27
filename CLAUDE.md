@@ -1,10 +1,11 @@
 # CLAUDE.md - Current Runtime State
 
-One active runtime strategy: `paired_window`.
+One active runtime strategy: `paired_window`. One active market: BTC 5-minute.
 
-Historical strategy configs/scripts/tests have been removed. Treat
-`paired_window_early_entry_dry.yaml` as the only maintained runtime config. The
-filename contains `dry`, but `--dry` controls dry/live mode.
+Historical strategy configs/scripts/tests, non-BTC/non-5m series support, and
+legacy stop-loss multiplier compatibility have been removed. Treat
+`paired_window_early_entry_dry.yaml` as the only maintained runtime config.
+The filename contains `dry`, but `--dry` controls dry/live mode.
 
 ## Strategy
 
@@ -42,6 +43,8 @@ params:
 
 Rules:
 
+- Runtime market is fixed to `btc-updown-5m`; `--market=btc` and
+  `--timeframe=5m` are the only accepted runtime values.
 - BTC baseline is current window open.
 - Entry band is 45s to 120s after window start.
 - Dynamic theta is active: 0.025% at 45s after open, linearly rising to 0.04%
@@ -55,6 +58,7 @@ Rules:
   that earlier level.
 - `signal_strength >= 2.0` increases amount to `1.5` only.
 - Optional stop-loss exists but is disabled by default.
+- Stop-loss multiplier is removed; stop-loss uses fixed trigger fields only.
 - Live stop-loss sells the actual CLOB token balance, not the estimated runtime
   share count; estimated shares are only a fallback if balance lookup fails.
 - Hold to `window.end_epoch` unless optional stop-loss is enabled and fills.
@@ -94,6 +98,8 @@ python3.11 run.py --preset enhanced --dry --rounds 3
 python3.11 run.py --preset enhanced --rounds 3
 env -u ALL_PROXY -u all_proxy -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy pytest -q
 ```
+
+Expected suite size after cleanup: 123 tests.
 
 VPS:
 
@@ -176,7 +182,8 @@ Price fields:
 ## Guardrails
 
 - Do not restore conservative config, analysis experiments, early-entry bypass,
-  strength caps, normal full-cap guard, reversal, TP, or re-entry.
+  strength caps, normal full-cap guard, reversal, TP, re-entry, ETH/multi-
+  timeframe support, or stop-loss multiplier compatibility.
 - Do not use theoretical `1 - up_price` for final execution permission.
 - Do not commit logs, `data/`, `remote_runs/`, profiles, or secrets.
 - Keep docs and tests aligned with the current single strategy.
