@@ -7,6 +7,7 @@ import pytest
 
 from polybot.trading.trading import (
     OrderResult,
+    _derive_fill_from_amounts,
     _post_fak_market,
     _signed_order_diagnostics,
 )
@@ -55,6 +56,32 @@ def test_signed_order_diagnostics_derives_sell_limit_price():
     diag = _signed_order_diagnostics(signed, "SELL")
 
     assert diag["signed_limit_price"] == pytest.approx(0.45)
+
+
+def test_derive_buy_fill_from_taking_and_making_amounts():
+    filled, price = _derive_fill_from_amounts(
+        "BUY",
+        requested_amount=1.0,
+        taking_amount=1.42857,
+        making_amount=1.0,
+        fallback_price=0.72,
+    )
+
+    assert filled == pytest.approx(1.42857)
+    assert price == pytest.approx(1.0 / 1.42857)
+
+
+def test_derive_sell_fill_from_taking_and_making_amounts():
+    filled, price = _derive_fill_from_amounts(
+        "SELL",
+        requested_amount=1.7,
+        taking_amount=0.918,
+        making_amount=1.7,
+        fallback_price=0.32,
+    )
+
+    assert filled == pytest.approx(1.7)
+    assert price == pytest.approx(0.54)
 
 
 # ─── FAK BUY ────────────────────────────────────────────────────────────────
@@ -134,8 +161,8 @@ async def test_fak_buy_matched_without_sizefilled_is_treated_as_success():
             "orderID": "ord-matched",
             "status": "MATCHED",
             "success": True,
-            "takingAmount": "1.0",
-            "makingAmount": "1.6667",
+            "takingAmount": "1.6667",
+            "makingAmount": "1.0",
             "transactionsHashes": ["0xabc"],
         },
     ]
@@ -152,8 +179,8 @@ async def test_fak_buy_matched_without_sizefilled_is_treated_as_success():
         )
 
     assert result.success
-    assert result.avg_price == pytest.approx(0.60)
-    assert result.filled_size == pytest.approx(1.0 / 0.60)
+    assert result.avg_price == pytest.approx(1.0 / 1.6667)
+    assert result.filled_size == pytest.approx(1.6667)
     assert mock_client.post_order.call_count == 1
 
 
@@ -166,8 +193,8 @@ async def test_fak_buy_refreshes_price_hint_before_retry():
             "orderID": "ord-matched",
             "status": "MATCHED",
             "success": True,
-            "takingAmount": "1.0",
-            "makingAmount": "1.6129",
+            "takingAmount": "1.6129",
+            "makingAmount": "1.0",
         },
     ]
     mock_client = _mock_client(fills)
@@ -185,7 +212,7 @@ async def test_fak_buy_refreshes_price_hint_before_retry():
         )
 
     assert result.success
-    assert result.avg_price == pytest.approx(0.62)
+    assert result.avg_price == pytest.approx(1.0 / 1.6129)
     assert refresher.call_count == 1
     prices = [
         call.args[0].price
@@ -255,3 +282,32 @@ async def test_fak_sell_success():
 
     assert result.success
     assert result.filled_size == 10.0
+
+
+@pytest.mark.asyncio
+async def test_fak_sell_matched_without_sizefilled_uses_response_amounts():
+    """SELL fallback price must use proceeds/shares, not the FAK price hint."""
+    fills = [
+        {
+            "orderID": "sell-matched",
+            "status": "MATCHED",
+            "success": True,
+            "takingAmount": "0.918",
+            "makingAmount": "1.7",
+        },
+    ]
+    mock_client = _mock_client(fills)
+
+    with patch("polybot.trading.trading.get_client", return_value=mock_client):
+        result = await _post_fak_market(
+            token_id="token-1",
+            amount=1.7,
+            side="SELL",
+            retry_count=3,
+            retry_interval=0.01,
+            price_hint=0.32,
+        )
+
+    assert result.success
+    assert result.filled_size == pytest.approx(1.7)
+    assert result.avg_price == pytest.approx(0.54)

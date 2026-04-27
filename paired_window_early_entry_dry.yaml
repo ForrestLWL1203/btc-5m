@@ -5,7 +5,7 @@ market:
 strategy:
   type: paired_window
   theta_pct: 0.03
-  theta_start_pct: 0.02
+  theta_start_pct: 0.025
   theta_end_pct: 0.04
   persistence_sec: 10
   entry_start_remaining_sec: 255
@@ -24,11 +24,11 @@ params:
   max_entries_per_window: 1
   stop_loss:
     enabled: false
-    trigger_price: 0.35
+    trigger_price: 0.38
     disable_below_entry_price: 0.45
     start_remaining_sec: 120
     end_remaining_sec: 15
-    sell_bid_level: 20
+    sell_bid_level: 10
     retry_count: 3
     min_sell_price: 0.20
 

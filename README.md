@@ -18,7 +18,7 @@ The filename contains `dry`, but live/dry behavior is controlled only by
 strategy:
   type: paired_window
   theta_pct: 0.03
-  theta_start_pct: 0.02
+  theta_start_pct: 0.025
   theta_end_pct: 0.04
   persistence_sec: 10
   entry_start_remaining_sec: 255
@@ -37,11 +37,11 @@ params:
   max_entries_per_window: 1
   stop_loss:
     enabled: false
-    trigger_price: 0.35
+    trigger_price: 0.38
     disable_below_entry_price: 0.45
     start_remaining_sec: 120
     end_remaining_sec: 15
-    sell_bid_level: 20
+    sell_bid_level: 10
     retry_count: 3
     min_sell_price: 0.20
 ```
@@ -50,7 +50,7 @@ Behavior:
 
 - BTC baseline is the current 5-minute window open.
 - Entry band is `remaining=[255s,180s]`, i.e. 45s to 120s after window start.
-- Signal threshold is dynamic: `theta_start_pct=0.02%` at 45s after open,
+- Signal threshold is dynamic: `theta_start_pct=0.025%` at 45s after open,
   linearly rising to `theta_end_pct=0.04%` at 120s after open. `theta_pct=0.03%`
   remains the fixed-threshold fallback if dynamic fields are absent.
 - Signal also requires same-direction persistence `persistence_sec` ago and
@@ -140,9 +140,9 @@ Execution constraints:
 
 - Only active while holding and `start_remaining_sec >= remaining >= end_remaining_sec`.
 - Default range: `120s >= remaining >= 15s`.
-- Default trigger is around `0.35`; entries below `0.45` do not use stop-loss.
+- Default trigger is around `0.38`; entries below `0.45` do not use stop-loss.
 - Uses held-leg bid book, not ask book.
-- Level 1 bid is skipped; sell depth scans up to `sell_bid_level=20` by default.
+- Level 1 bid is skipped; sell depth scans up to `sell_bid_level=10` by default.
 - Live runs sync actual CLOB token balance about 8 seconds after BUY fill, and
   check balance again before stop-loss SELL.
 - SELL FAK price hint is placed below the selected bid level and retried up to
@@ -151,7 +151,8 @@ Execution constraints:
 
 ## VPS Profiles
 
-Profiles do not need to live beside `vpsctl.sh`. Default locations:
+Remote usage is driven by local profile files. Profiles do not need to live
+beside `vpsctl.sh`. Default locations:
 
 - VPS profile: `~/.polybot/vps/<name>.env`
 - Account profile: `~/.polybot/accounts/<name>.json`
@@ -160,9 +161,10 @@ Create directories manually if needed:
 
 ```bash
 mkdir -p ~/.polybot/vps ~/.polybot/accounts
+chmod 700 ~/.polybot ~/.polybot/vps ~/.polybot/accounts
 ```
 
-VPS profile example:
+VPS profile example, e.g. `~/.polybot/vps/sweden.env`:
 
 ```bash
 HOST=70.34.207.45
@@ -175,7 +177,7 @@ BRANCH=main
 Instead of `PASSWORD`, you may use `PASSWORD_ENV_VAR=MY_VPS_PASSWORD` and set
 that environment variable before running `vpsctl.sh`.
 
-Account profile example:
+Account profile example, e.g. `~/.polybot/accounts/main.json`:
 
 ```json
 {
@@ -189,18 +191,35 @@ Account profile example:
 Required: `private_key`, `proxy_address`. Defaults: `chain_id=137`,
 `signature_type=1`.
 
+Do not commit either profile. They contain server credentials and Polymarket
+account secrets.
+
 ## VPS Commands
 
-Bootstrap a new VPS:
+Bootstrap a new VPS or refresh dependencies and account config:
 
 ```bash
 bash tools/vpsctl.sh bootstrap --vps-profile sweden --account-profile main
 ```
 
+What bootstrap does: installs git/python/venv dependencies, clones or updates
+`REPO_URL` into `/opt/polybot/current`, installs requirements, copies the
+account profile to `/opt/polybot/shared/polymarket_config.json` and
+`/root/.config/polymarket/config.json`, and installs remote helpers:
+`polybot-update`, `polybot-run`, `polybot-probe`, `polybot-remote-start`.
+
 Start a remote run:
 
 ```bash
 bash tools/vpsctl.sh run --vps-profile sweden --preset enhanced --rounds 6 --label test6
+```
+
+Live is the default. Add `--dry` before `--label` for a remote dry run. Extra
+`run.py` args are passed after `--`; for example enable stop-loss:
+
+```bash
+bash tools/vpsctl.sh run --vps-profile sweden --preset enhanced --rounds 5 \
+  --label live5_stoploss -- --stop-loss-enabled
 ```
 
 Check status:
@@ -222,7 +241,8 @@ bash tools/vpsctl.sh fetch --vps-profile sweden --run-id latest
 ```
 
 Runs persist one structured analysis log: `<market>_trade.jsonl`. Human-readable
-logs are stdout/stderr only; remote runs capture them in `stdout.log`.
+logs are stdout/stderr only; remote runs capture them in `stdout.log`. Fetched
+logs are copied to `remote_runs/<host_ip_with_underscores>/<RUN_ID>/`.
 
 Probe latency remotely:
 
@@ -232,6 +252,10 @@ bash tools/vpsctl.sh probe --vps-profile sweden --token-id <TOKEN_ID> --side buy
 
 Use `--vps-profile` for `run/status/stop/fetch`; the password is read from the
 profile so commands do not fail and retry interactively.
+
+Avoid raw `ssh`/`scp` unless you also load the VPS profile password. In Codex,
+prefer `bash tools/vpsctl.sh ... --vps-profile <name-or-path>` for all remote
+actions.
 
 ## Logging
 

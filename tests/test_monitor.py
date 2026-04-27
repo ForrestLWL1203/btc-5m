@@ -120,7 +120,7 @@ async def test_stop_loss_sells_with_bid_depth_inside_time_band():
         entry_avg_price=0.72,
     )
     ws = MagicMock()
-    ws.get_latest_bid_levels_with_size.return_value = _bid_book(0.41, 12)
+    ws.get_latest_bid_levels_with_size.return_value = _bid_book(0.38, 12)
     ws.get_latest_best_bid_age.return_value = 0.01
     trade_config = _tc(
         stop_loss_enabled=True,
@@ -153,13 +153,53 @@ async def test_stop_loss_sells_with_bid_depth_inside_time_band():
 
     mock_sell.assert_awaited_once()
     assert mock_sell.await_args.args[:2] == ("up-token-123", pytest.approx(1.522))
-    assert mock_sell.await_args.kwargs["price_hint"] == pytest.approx(0.31)
+    assert mock_sell.await_args.kwargs["price_hint"] == pytest.approx(0.27)
     assert mock_sell.await_args.kwargs["retry_count"] == 3
     assert state.stop_loss_triggered is True
     assert state.exit_triggered is True
     assert state.bought is False
     assert state.holding_size == pytest.approx(0.0)
     assert state.daily_realized_pnl == pytest.approx(1.522 * 0.33 - 1.0)
+
+
+@pytest.mark.asyncio
+async def test_stop_loss_does_not_trigger_from_deep_book_price_only():
+    now = time.time()
+    window = _make_window(start_epoch=int(now) - 240, end_epoch=int(now) + 60)
+    state = _make_state(
+        bought=True,
+        holding_size=1.7,
+        entry_amount=1.0,
+        entry_price=0.66,
+        entry_avg_price=0.66,
+    )
+    ws = MagicMock()
+    # Level 1 is well above the 0.38 trigger, but deeper levels cross below it.
+    # This must not trigger stop-loss; deep levels are only for execution once
+    # the top bid has actually reached the stop area.
+    ws.get_latest_bid_levels_with_size.return_value = _bid_book(0.56, 20)
+    ws.get_latest_best_bid_age.return_value = 0.01
+    trade_config = _tc(
+        stop_loss_enabled=True,
+        stop_loss_start_remaining_sec=120,
+        stop_loss_end_remaining_sec=15,
+        stop_loss_sell_bid_level=10,
+        stop_loss_trigger_price=0.38,
+    )
+
+    with patch("polybot.trading.monitor.sell_token", new_callable=AsyncMock) as mock_sell:
+        await _maybe_handle_stop_loss(
+            window,
+            state,
+            ws,
+            "down-token-123",
+            False,
+            trade_config,
+            "down",
+        )
+
+    mock_sell.assert_not_called()
+    assert state.stop_loss_triggered is False
 
 
 @pytest.mark.asyncio

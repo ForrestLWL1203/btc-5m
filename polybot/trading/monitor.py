@@ -791,7 +791,9 @@ async def _maybe_handle_stop_loss(
         min_sell_level=trade_config.stop_loss_bid_level(),
         min_sell_price=trade_config.stop_loss_min_sell_price,
     )
-    if not quote.enough or quote.price is None or quote.price > stop_price:
+    if quote.best_bid_level_1 is None or quote.best_bid_level_1 > stop_price:
+        return
+    if not quote.enough or quote.price is None:
         return
 
     if not dry_run:
@@ -828,7 +830,7 @@ async def _maybe_handle_stop_loss(
                     min_sell_level=trade_config.stop_loss_bid_level(),
                     min_sell_price=trade_config.stop_loss_min_sell_price,
                 )
-                if not quote.enough or quote.price is None or quote.price > stop_price:
+                if quote.best_bid_level_1 is None or quote.best_bid_level_1 > stop_price or not quote.enough or quote.price is None:
                     log_event(log, logging.INFO, TRADE, {
                         "action": "STOP_LOSS_BALANCE_RECHECK_ABORT",
                         "side": side.upper(),
@@ -836,6 +838,7 @@ async def _maybe_handle_stop_loss(
                         "shares": shares_to_sell,
                         "stop_price": round(stop_price, 4),
                         "sell_price": quote.price,
+                        "best_bid_level_1": quote.best_bid_level_1,
                         "price_hint": quote.price_hint,
                         "bid_shares_available": round(quote.shares_available, 4),
                     })

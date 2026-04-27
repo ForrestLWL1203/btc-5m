@@ -123,6 +123,34 @@ def _signed_order_diagnostics(signed_order, requested_side: str) -> dict:
     return diagnostics
 
 
+def _derive_fill_from_amounts(
+    side: str,
+    requested_amount: float,
+    taking_amount: float,
+    making_amount: float,
+    fallback_price: float,
+) -> tuple[float, float]:
+    """Derive filled shares and avg price from CLOB FAK response amounts."""
+    if side == BUY or str(side).upper() == "BUY":
+        filled = taking_amount if taking_amount > 0 else 0.0
+        price = (
+            making_amount / taking_amount
+            if making_amount > 0 and taking_amount > 0
+            else fallback_price
+        )
+        if filled <= 0 and price > 0:
+            filled = requested_amount / price
+        return filled, price
+
+    filled = making_amount if making_amount > 0 else requested_amount
+    price = (
+        taking_amount / making_amount
+        if taking_amount > 0 and making_amount > 0
+        else fallback_price
+    )
+    return filled, price
+
+
 async def _post_fak_market(
     token_id: str, amount: float, side: str, retry_count: int, retry_interval: float,
     price_hint: Optional[float] = None,
@@ -217,20 +245,18 @@ async def _post_fak_market(
             # Some Polymarket FAK responses omit sizeFilled/avgPrice entirely even
             # when the order matched. When that happens, trust MATCHED/success and
             # derive a reasonable filled-size fallback so we don't retry and double-buy.
-            if filled <= 0 and success and status == "MATCHED":
-                if side == BUY:
-                    derived_price = current_price_hint or price
-                    if derived_price > 0:
-                        filled = amount / derived_price
-                        price = derived_price
-                    elif making_amount > 0:
-                        filled = making_amount
-                else:
-                    filled = amount
-                    if price <= 0 and current_price_hint:
-                        price = current_price_hint
-                    elif price <= 0 and taking_amount > 0 and amount > 0:
-                        price = taking_amount / amount
+            if success and status == "MATCHED" and (filled <= 0 or price <= 0):
+                derived_filled, derived_price = _derive_fill_from_amounts(
+                    side_const,
+                    amount,
+                    taking_amount,
+                    making_amount,
+                    current_price_hint or price,
+                )
+                if filled <= 0:
+                    filled = derived_filled
+                if price <= 0:
+                    price = derived_price
 
             if filled > 0:
                 avg_price = price if price > 0 else 0.0

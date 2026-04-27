@@ -19,7 +19,7 @@ The filename contains `dry`, but live/dry is controlled only by `--dry`.
 strategy:
   type: paired_window
   theta_pct: 0.03
-  theta_start_pct: 0.02
+  theta_start_pct: 0.025
   theta_end_pct: 0.04
   persistence_sec: 10
   entry_start_remaining_sec: 255
@@ -38,11 +38,11 @@ params:
   max_entries_per_window: 1
   stop_loss:
     enabled: false
-    trigger_price: 0.35
+    trigger_price: 0.38
     disable_below_entry_price: 0.45
     start_remaining_sec: 120
     end_remaining_sec: 15
-    sell_bid_level: 20
+    sell_bid_level: 10
     retry_count: 3
     min_sell_price: 0.20
 ```
@@ -51,7 +51,7 @@ Runtime behavior:
 
 - BTC baseline is the current 5-minute window open.
 - Entry band is `remaining=[255s,180s]`, i.e. 45s to 120s after open.
-- Dynamic theta is active: `0.02%` at 45s after open, linearly rising to
+- Dynamic theta is active: `0.025%` at 45s after open, linearly rising to
   `0.04%` at 120s after open. `theta_pct=0.03%` is fallback only if dynamic
   fields are absent.
 - Require same-direction persistence `persistence_sec` ago and current move >=
@@ -71,10 +71,10 @@ Runtime behavior:
 Stop-loss behavior when enabled:
 
 - Entries below `disable_below_entry_price=0.45` do not use stop-loss.
-- Trigger price: `max(min_sell_price, trigger_price=0.35)`.
+- Trigger price: `max(min_sell_price, trigger_price=0.38)`.
 - Only active while `start_remaining_sec >= remaining >= end_remaining_sec`.
 - Uses held-leg bid book, skips level 1, and defaults to scanning up to bid
-  level 20.
+  level 10.
 - Live runs sync actual CLOB token balance about 8 seconds after BUY fill, then
   check balance again before stop-loss SELL.
 - Live SELL size comes from the actual CLOB token balance before exit; estimated
@@ -127,6 +127,7 @@ VPS run/status/stop/fetch:
 
 ```bash
 bash tools/vpsctl.sh run --vps-profile <vps_name> --preset enhanced --rounds 6 --label test6
+bash tools/vpsctl.sh run --vps-profile <vps_name> --preset enhanced --rounds 5 --label live5_stoploss -- --stop-loss-enabled
 bash tools/vpsctl.sh status --vps-profile <vps_name> --run-id latest
 bash tools/vpsctl.sh stop --vps-profile <vps_name> --run-id latest
 bash tools/vpsctl.sh fetch --vps-profile <vps_name> --run-id latest
@@ -136,12 +137,23 @@ Always use `--vps-profile` for VPS commands so host/user/password are loaded
 from profile. Do not run raw `ssh`/`scp` for stop/status unless profile password
 is also loaded.
 
+`run` defaults to live mode. Add `--dry` for remote dry-run. Extra `run.py`
+arguments go after `--`; this is how `--stop-loss-enabled` is passed.
+
+Bootstrap installs/updates `/opt/polybot/current`, `/opt/polybot/venv`, the
+Polymarket account config, and helper commands `polybot-update`, `polybot-run`,
+`polybot-probe`, `polybot-remote-start`.
+
 ## Profiles
 
 Default paths:
 
 - VPS profile: `~/.polybot/vps/<name>.env`
 - Account profile: `~/.polybot/accounts/<name>.json`
+
+Create dirs with `mkdir -p ~/.polybot/vps ~/.polybot/accounts` and `chmod 700`
+them. Profiles may also be passed by full path, e.g.
+`--vps-profile /tmp/polybot_vps_sweden.env`.
 
 VPS profile fields:
 
@@ -166,6 +178,9 @@ Account profile required fields:
 
 `private_key` and `proxy_address` are required. `chain_id=137` and
 `signature_type=1` are defaults.
+
+Never commit profiles. `remote_runs/`, `log/`, and `data/` are analysis/runtime
+artifacts and should stay out of git.
 
 ## Logging Notes
 

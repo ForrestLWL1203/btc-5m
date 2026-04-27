@@ -86,14 +86,14 @@ class TestBuildStrategy:
             "strategy": {
                 "type": "paired_window",
                 "theta_pct": 0.03,
-                "theta_start_pct": 0.02,
+                "theta_start_pct": 0.025,
                 "theta_end_pct": 0.04,
             }
         }
         strat = build_strategy(cfg, series)
         assert isinstance(strat, PairedWindowStrategy)
         assert strat._theta_pct == pytest.approx(0.03)
-        assert strat._theta_start_pct == pytest.approx(0.02)
+        assert strat._theta_start_pct == pytest.approx(0.025)
         assert strat._theta_end_pct == pytest.approx(0.04)
 
     def test_build_paired_window_strategy_with_current_entry_band(self):
@@ -151,11 +151,11 @@ class TestBuildTradeConfig:
                 "stop_loss": {
                     "enabled": True,
                     "multiplier": 1.2,
-                    "trigger_price": 0.35,
+                    "trigger_price": 0.38,
                     "disable_below_entry_price": 0.45,
                     "start_remaining_sec": 120,
                     "end_remaining_sec": 15,
-                    "sell_bid_level": 20,
+                    "sell_bid_level": 10,
                     "retry_count": 3,
                     "min_sell_price": 0.20,
                 },
@@ -179,11 +179,11 @@ class TestBuildTradeConfig:
         assert tc.amount_for_signal_strength(2.0) == pytest.approx(15.0)
         assert tc.stop_loss_enabled is True
         assert tc.stop_loss_multiplier == pytest.approx(1.2)
-        assert tc.stop_loss_trigger_price == pytest.approx(0.35)
+        assert tc.stop_loss_trigger_price == pytest.approx(0.38)
         assert tc.stop_loss_disable_below_entry_price == pytest.approx(0.45)
         assert tc.stop_loss_start_remaining_sec == pytest.approx(120)
         assert tc.stop_loss_end_remaining_sec == pytest.approx(15)
-        assert tc.stop_loss_bid_level() == 20
+        assert tc.stop_loss_bid_level() == 10
         assert tc.stop_loss_retry_count == 3
         assert tc.stop_loss_min_sell_price == pytest.approx(0.20)
         assert tc.max_entries_per_window == 5
