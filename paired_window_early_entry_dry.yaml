@@ -8,14 +8,14 @@ strategy:
   persistence_sec: 10
   entry_start_remaining_sec: 255
   entry_end_remaining_sec: 180
-  max_entry_price: 0.72
+  max_entry_price: 0.75
   min_move_ratio: 0.7
 
 params:
   amount: 1.0
-  entry_ask_level: 7
+  entry_ask_level: 9
   low_price_threshold: 0.60
-  low_price_entry_ask_level: 9
+  low_price_entry_ask_level: 11
   amount_tiers:
     - threshold: 2.0
       amount: 1.5

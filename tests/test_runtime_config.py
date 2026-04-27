@@ -49,10 +49,10 @@ def _args(**overrides) -> argparse.Namespace:
 def test_preset_config_loads_enhanced_yaml():
     cfg = preset_config("enhanced")
     assert cfg["market"]["asset"] == "btc"
-    assert cfg["strategy"]["max_entry_price"] == pytest.approx(0.72)
-    assert cfg["params"]["entry_ask_level"] == 7
+    assert cfg["strategy"]["max_entry_price"] == pytest.approx(0.75)
+    assert cfg["params"]["entry_ask_level"] == 9
     assert cfg["params"]["low_price_threshold"] == pytest.approx(0.60)
-    assert cfg["params"]["low_price_entry_ask_level"] == 9
+    assert cfg["params"]["low_price_entry_ask_level"] == 11
     assert cfg["params"]["stop_loss"]["enabled"] is False
 
 

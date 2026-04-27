@@ -22,14 +22,14 @@ strategy:
   persistence_sec: 10
   entry_start_remaining_sec: 255
   entry_end_remaining_sec: 180
-  max_entry_price: 0.72
+  max_entry_price: 0.75
   min_move_ratio: 0.7
 
 params:
   amount: 1.0
-  entry_ask_level: 7
+  entry_ask_level: 9
   low_price_threshold: 0.60
-  low_price_entry_ask_level: 9
+  low_price_entry_ask_level: 11
   amount_tiers:
     - threshold: 2.0
       amount: 1.5
@@ -51,10 +51,10 @@ Runtime behavior:
 - Require `abs(move_pct) >= theta_pct`, same-direction persistence
   `persistence_sec` ago, and current move >= `min_move_ratio * past_move`.
 - Lock the first valid direction per window.
-- Hard cap is `0.72`; no dynamic cap tiers.
+- Hard cap is `0.75`; no dynamic cap tiers.
 - Execution uses target-leg WS order-book depth.
 - Level 1 ask is diagnostic only; fillability starts from level 2.
-- First FAK hint uses ask level 7, or ask level 9 when top ask is `<0.60`.
+- First FAK hint uses ask level 9, or ask level 11 when top ask is `<0.60`.
 - All hints are clamped to cap.
 - `signal_strength >= 2.0` uses amount `1.5`; timing does not change.
 - Optional stop-loss exists but is disabled by default.

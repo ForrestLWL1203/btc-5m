@@ -32,7 +32,7 @@ class PairedWindowStrategy(Strategy):
         entry_start_remaining_sec: float = 255.0,
         entry_end_remaining_sec: float = 120.0,
         persistence_sec: float = 10.0,
-        max_entry_price: float = 0.72,
+        max_entry_price: float = 0.75,
         min_move_ratio: float = 0.7,
         open_price_max_wait_sec: float = 30.0,
     ):

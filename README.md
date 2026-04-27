@@ -21,14 +21,14 @@ strategy:
   persistence_sec: 10
   entry_start_remaining_sec: 255
   entry_end_remaining_sec: 180
-  max_entry_price: 0.72
+  max_entry_price: 0.75
   min_move_ratio: 0.7
 
 params:
   amount: 1.0
-  entry_ask_level: 7
+  entry_ask_level: 9
   low_price_threshold: 0.60
-  low_price_entry_ask_level: 9
+  low_price_entry_ask_level: 11
   amount_tiers:
     - threshold: 2.0
       amount: 1.5
@@ -50,10 +50,10 @@ Behavior:
 - Signal requires `abs(move_pct) >= theta_pct`, same-direction persistence
   `persistence_sec` ago, and current move at least `min_move_ratio * past_move`.
 - First valid direction is locked for the window.
-- Hard max entry cap is `0.72`; there are no dynamic strength caps.
+- Hard max entry cap is `0.75`; there are no dynamic strength caps.
 - Execution uses target-leg WS order-book depth, not theoretical `1 - up_price`.
 - Level 1 ask is diagnostic only; fillability starts from level 2.
-- First FAK hint uses ask level 7 by default, or level 9 when top ask is `<0.60`.
+- First FAK hint uses ask level 9 by default, or level 11 when top ask is `<0.60`.
 - Strong signals only increase amount to `1.5` at `signal_strength >= 2.0`; they
   do not bypass the 45s timing gate.
 - No TP, reversal, re-entry, or lower entry-price floor.

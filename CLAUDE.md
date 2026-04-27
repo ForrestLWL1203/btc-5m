@@ -15,14 +15,14 @@ strategy:
   persistence_sec: 10
   entry_start_remaining_sec: 255
   entry_end_remaining_sec: 180
-  max_entry_price: 0.72
+  max_entry_price: 0.75
   min_move_ratio: 0.7
 
 params:
   amount: 1.0
-  entry_ask_level: 7
+  entry_ask_level: 9
   low_price_threshold: 0.60
-  low_price_entry_ask_level: 9
+  low_price_entry_ask_level: 11
   amount_tiers:
     - threshold: 2.0
       amount: 1.5
@@ -43,9 +43,9 @@ Rules:
 - Entry band is 45s to 120s after window start.
 - Need theta, persistence, same direction, and non-fading move.
 - Direction locks once per window.
-- Hard cap is `0.72`; no strength cap tiers and no early-entry bypass.
+- Hard cap is `0.75`; no strength cap tiers and no early-entry bypass.
 - WS order-book depth drives execution; level 1 is skipped for fillability.
-- Initial FAK hint uses level 7, or level 9 if top ask `<0.60`.
+- Initial FAK hint uses level 9, or level 11 if top ask `<0.60`.
 - `signal_strength >= 2.0` increases amount to `1.5` only.
 - Optional stop-loss exists but is disabled by default.
 - Hold to `window.end_epoch` unless optional stop-loss is enabled and fills.
