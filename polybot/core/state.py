@@ -36,6 +36,8 @@ class MonitorState:
     last_guard_skip_reason: Optional[str] = None
     last_signal_eval_key: Optional[tuple] = None
     last_signal_eval_logged_at: float = 0.0
+    last_depth_skip_key: Optional[tuple] = None
+    last_depth_skip_logged_at: float = 0.0
     trade_lock: asyncio.Lock = None  # prevents concurrent buy/sell from WS callbacks
     started: bool = False  # set True when window officially starts — prevents pre-start trades
 

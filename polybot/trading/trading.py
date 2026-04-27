@@ -75,6 +75,54 @@ def _safe_float(value) -> float:
         return 0.0
 
 
+def _as_plain_mapping(value) -> dict:
+    """Best-effort conversion for SDK objects/dicts used in diagnostics."""
+    if isinstance(value, dict):
+        return value
+    if hasattr(value, "model_dump"):
+        dumped = value.model_dump()
+        return dumped if isinstance(dumped, dict) else {}
+    if hasattr(value, "dict"):
+        dumped = value.dict()
+        return dumped if isinstance(dumped, dict) else {}
+    if hasattr(value, "__dict__"):
+        return dict(vars(value))
+    return {}
+
+
+def _signed_order_diagnostics(signed_order, requested_side: str) -> dict:
+    """
+    Extract non-secret fields from a signed order.
+
+    This is used to compare our SDK-generated FAK order with Polymarket web UI
+    requests. Signature/private-key material is intentionally not logged.
+    """
+    payload = _as_plain_mapping(signed_order)
+    order = _as_plain_mapping(payload.get("order", payload))
+
+    maker_amount = order.get("makerAmount") or order.get("maker_amount")
+    taker_amount = order.get("takerAmount") or order.get("taker_amount")
+    signed_side = order.get("side") or requested_side
+
+    maker = _safe_float(maker_amount)
+    taker = _safe_float(taker_amount)
+    signed_limit_price = 0.0
+    if maker > 0 and taker > 0:
+        if str(signed_side).upper() == BUY:
+            signed_limit_price = maker / taker
+        else:
+            signed_limit_price = taker / maker
+
+    diagnostics = {
+        "signed_side": signed_side,
+        "maker_amount": maker_amount,
+        "taker_amount": taker_amount,
+    }
+    if signed_limit_price > 0:
+        diagnostics["signed_limit_price"] = signed_limit_price
+    return diagnostics
+
+
 async def _post_fak_market(
     token_id: str, amount: float, side: str, retry_count: int, retry_interval: float,
     price_hint: Optional[float] = None,
@@ -127,6 +175,16 @@ async def _post_fak_market(
             t_create = time.monotonic()
             signed = client.create_market_order(args, options=options)
             create_ms = round((time.monotonic() - t_create) * 1000)
+            log_event(log, logging.INFO, TRADE, {
+                "action": "FAK_SIGNED_ORDER",
+                "side": side,
+                "token": token_id[:20],
+                "amount": amount,
+                "price_hint": current_price_hint,
+                "attempt": attempt,
+                "create_market_order_ms": create_ms,
+                **_signed_order_diagnostics(signed, side_const),
+            })
             t_post = time.monotonic()
             resp = client.post_order(signed, OrderType.FAK)
             post_ms = round((time.monotonic() - t_post) * 1000)

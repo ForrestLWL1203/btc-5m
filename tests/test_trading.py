@@ -8,6 +8,7 @@ import pytest
 from polybot.trading.trading import (
     OrderResult,
     _post_fak_market,
+    _signed_order_diagnostics,
 )
 
 
@@ -19,6 +20,41 @@ def _mock_client(fills: list[dict] | Exception):
     client.create_market_order.return_value = {}
     client.post_order.side_effect = fills
     return client
+
+
+# ─── Signed Order Diagnostics ────────────────────────────────────────────────
+
+def test_signed_order_diagnostics_derives_buy_limit_price():
+    """BUY limit price is makerAmount / takerAmount, matching web UI payloads."""
+    signed = {
+        "order": {
+            "makerAmount": "1000000",
+            "takerAmount": "1315700",
+            "side": "BUY",
+        }
+    }
+
+    diag = _signed_order_diagnostics(signed, "BUY")
+
+    assert diag["signed_side"] == "BUY"
+    assert diag["maker_amount"] == "1000000"
+    assert diag["taker_amount"] == "1315700"
+    assert diag["signed_limit_price"] == pytest.approx(1000000 / 1315700)
+
+
+def test_signed_order_diagnostics_derives_sell_limit_price():
+    """SELL limit price is takerAmount / makerAmount."""
+    signed = {
+        "order": {
+            "makerAmount": "2000000",
+            "takerAmount": "900000",
+            "side": "SELL",
+        }
+    }
+
+    diag = _signed_order_diagnostics(signed, "SELL")
+
+    assert diag["signed_limit_price"] == pytest.approx(0.45)
 
 
 # ─── FAK BUY ────────────────────────────────────────────────────────────────

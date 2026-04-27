@@ -8,17 +8,17 @@ Status: ✅ **LIVE CAPABLE**
 
 - Single active runtime strategy: `paired_window`
 - Reference dataset: 96-window / 8-hour capture
-- Current local tests: `129 passed`
+- Current local tests: `135 passed`
 - Risk management integrated
 - Conservative live YAML remains available
-- Latest enhanced YAML uses early entry + max-only strength-tier caps
+- Latest enhanced YAML uses 45s+ entries + max-only strength-tier caps
 
 ## Core Runtime Components
 
 **Strategy & Execution**
 
 - `polybot/strategies/paired_window.py` — BTC window-open signal,
-  persistence check, direction lock, optional early entry, strength-tier caps
+  persistence check, direction lock, strength-tier caps
 - `polybot/trading/monitor.py` — window lifecycle, target-leg book-depth
   gating, buy path, FAK price hints, retry path, risk pauses, shutdown handling
 - `polybot/trading/trading.py` — FAK order execution via Polymarket CLOB
@@ -73,9 +73,6 @@ strategy:
   theta_pct: 0.03
   persistence_sec: 10
   entry_start_remaining_sec: 255
-  early_entry_start_remaining_sec: 285
-  early_entry_strength_threshold: 1.5
-  early_entry_past_strength_threshold: 0.8
   entry_end_remaining_sec: 180
   max_entry_price: 0.68
   min_move_ratio: 0.7
@@ -87,6 +84,7 @@ strategy:
 
 params:
   amount: 1.0
+  entry_ask_level: 6
   amount_tiers:
     - threshold: 2.0
       amount: 1.5
@@ -106,16 +104,15 @@ risk:
 Enhanced behavior:
 
 - base cap is `0.68`
-- base entry pricing uses WS order-book ask level `1` (`best ask`)
-- `signal_strength >= 2.0x` -> ask level `2`
-- `signal_strength >= 3.5x` -> ask level `4`
+- entries start at `remaining=255s`, i.e. 45 seconds into the 5-minute window
+- no early-entry bypass; strong signals do not enter before 45s
+- entry pricing uses cap-limited WS order-book depth from level 2 onward
+- first BUY hint uses at least ask level 6 (`best ask +5`), then clamps to cap
 - `signal_strength >= 2.0x` -> cap `0.72`
 - `signal_strength >= 3.5x` -> cap `0.75`
 - `signal_strength >= 2.0x` -> amount `1.5`
 - normal full-cap guard: if a normal-confidence entry is priced at the active
   base cap, skip it when strength `< 1.05x` or remaining time `< 210s`
-- `signal_strength >= 1.5x` and past strength `>= 0.8x` allows entry as early
-  as `remaining=285s`, i.e. 15 seconds into a 5-minute window
 - runtime has no lower entry-price floor; low target asks are allowed
 
 ## Runtime Behavior
@@ -125,8 +122,7 @@ Enhanced behavior:
    - require BTC move from open >= `theta_pct`
    - require same direction to have existed `persistence_sec` ago
    - require current move >= `min_move_ratio * past_move`
-3. If early-entry fields are enabled, allow earlier persistent signals as early as 15s into
-   the window.
+3. Strong signals do not bypass the 45s timing gate.
 4. Lock the first valid direction for that window.
 5. Keep checking the chosen target leg until WS order book depth from level 2
    onward has enough notional inside the active cap.
@@ -152,8 +148,9 @@ Enhanced behavior:
   `target_max_entry_price`.
 - There is no runtime `min_entry_price`; execution is max-only.
 - Enhanced config applies a normal full-cap guard before `BUY_SIGNAL`.
-- First-attempt hint is the depth-covering ask level plus a small tick buffer,
-  clamped to cap.
+- First-attempt hint is at least configured `entry_ask_level`; enhanced uses
+  level 6 (`best ask +5`), plus a small tick buffer, clamped to cap.
+- FAK retry is capped at 3 attempts total.
 - Retry refreshes target-leg WS book depth with the same level-1 skip.
 - Retry aborts if refreshed cap-limited depth is stale or insufficient.
 - Retry hint is recalculated from fresh depth, then clamped to cap.
@@ -351,5 +348,5 @@ env -u ALL_PROXY -u all_proxy -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u http
 
 - Assume removed doc text is still true without checking code.
 - Reintroduce TP/SL/re-entry without fresh backtest evidence.
-- Describe enhanced caps/early entry as active in fixed-cap live YAML.
+- Describe enhanced timing/caps as active in fixed-cap live YAML.
 - Change exit timing away from `window.end_epoch`.

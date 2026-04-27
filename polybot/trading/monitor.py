@@ -35,6 +35,7 @@ log = logging.getLogger(__name__)
 _PREOPEN_BUFFER = 10  # seconds before window start to wake up
 _STARTED_SKIP_THRESHOLD = 60  # allow attaching to a window within its first minute
 _SIGNAL_EVAL_LOG_INTERVAL_SEC = 5.0
+_DEPTH_SKIP_LOG_INTERVAL_SEC = 10.0
 _DEPTH_ENTRY_SKIP_LEVELS = 1
 _DEPTH_PREVIEW_LEVELS = 6
 
@@ -49,6 +50,7 @@ class CapDepthQuote:
     levels_used: int
     total_levels: int
     skipped_levels: int
+    entry_ask_level: int
     best_ask_level_1: Optional[float]
     ask_age_sec: Optional[float]
     preview: list[tuple[float, float]]
@@ -121,6 +123,7 @@ def _cap_limited_depth_quote(
     *,
     max_age_sec: Optional[float] = None,
     skip_levels: int = _DEPTH_ENTRY_SKIP_LEVELS,
+    min_entry_level: int = 1,
     buffer_ticks: Optional[float] = None,
 ) -> CapDepthQuote:
     """Return the first ask level where cap-limited depth can cover amount.
@@ -148,6 +151,8 @@ def _cap_limited_depth_quote(
     levels = [(float(price), float(size)) for price, size in raw_levels if float(size) > 0]
     best_ask_level_1 = levels[0][0] if levels else _best_ask_level_1(ws, token_id)
     preview = levels[:_DEPTH_PREVIEW_LEVELS]
+    min_entry_level = max(1, int(min_entry_level))
+    min_entry_index = min_entry_level - 1
     if not levels or max_entry_price is None:
         return CapDepthQuote(
             price=None,
@@ -156,6 +161,7 @@ def _cap_limited_depth_quote(
             levels_used=0,
             total_levels=len(levels),
             skipped_levels=min(skip_levels, len(levels)),
+            entry_ask_level=min_entry_level,
             best_ask_level_1=best_ask_level_1,
             ask_age_sec=ask_age,
             preview=preview,
@@ -172,7 +178,7 @@ def _cap_limited_depth_quote(
             continue
         levels_used += 1
         cap_notional += ask_price * ask_size
-        if cap_notional >= amount:
+        if cap_notional >= amount and index >= min_entry_index:
             selected_price = ask_price
             break
 
@@ -189,6 +195,7 @@ def _cap_limited_depth_quote(
         levels_used=levels_used,
         total_levels=len(levels),
         skipped_levels=min(skip_levels, len(levels)),
+        entry_ask_level=min_entry_level,
         best_ask_level_1=best_ask_level_1,
         ask_age_sec=ask_age,
         preview=preview,
@@ -205,6 +212,25 @@ def _log_depth_skip(
     amount: float,
     reason: str,
 ) -> None:
+    now = time.monotonic()
+    price_bucket = None
+    if quote.best_ask_level_1 is not None:
+        price_bucket = round(quote.best_ask_level_1, 2)
+    key = (
+        side,
+        price_bucket,
+        quote.entry_ask_level,
+        round(max_entry_price, 6) if max_entry_price is not None else None,
+        round(amount, 6),
+        reason,
+    )
+    if (
+        state.last_depth_skip_key == key
+        and now - state.last_depth_skip_logged_at < _DEPTH_SKIP_LOG_INTERVAL_SEC
+    ):
+        return
+    state.last_depth_skip_key = key
+    state.last_depth_skip_logged_at = now
     _log_signal_eval(
         state,
         side,
@@ -225,6 +251,7 @@ def _log_depth_skip(
         "depth_notional": round(quote.cap_notional, 4),
         "depth_total_levels": quote.total_levels,
         "depth_skipped_levels": quote.skipped_levels,
+        "entry_ask_level": quote.entry_ask_level,
         "book_ask_preview": quote.preview,
         "amount": amount,
         "max_entry_price": max_entry_price,
@@ -247,12 +274,16 @@ def _price_hint_refresher(
         trade_amount = trade_config.amount_for_signal_strength(
             state.target_signal_strength if state is not None else None
         )
+        entry_ask_level = trade_config.ask_level_for_signal_strength(
+            state.target_signal_strength if state is not None else None
+        )
         quote = _cap_limited_depth_quote(
             ws,
             token_id,
             trade_amount,
             max_entry_price,
             max_age_sec=config.FAK_RETRY_MAX_BEST_ASK_AGE_SEC,
+            min_entry_level=entry_ask_level,
             buffer_ticks=config.FAK_RETRY_PRICE_HINT_BUFFER_TICKS,
         )
         if not quote.enough:
@@ -265,6 +296,7 @@ def _price_hint_refresher(
                 "depth_notional": round(quote.cap_notional, 4),
                 "depth_total_levels": quote.total_levels,
                 "depth_skipped_levels": quote.skipped_levels,
+                "entry_ask_level": quote.entry_ask_level,
                 "book_ask_preview": quote.preview,
                 "amount": trade_amount,
                 "max_entry_price": max_entry_price,
@@ -795,6 +827,8 @@ async def monitor_window(
     state.signal_reference_price = None
     state.last_signal_eval_key = None
     state.last_signal_eval_logged_at = 0.0
+    state.last_depth_skip_key = None
+    state.last_depth_skip_logged_at = 0.0
     state.entry_amount = 0.0
     state.last_entry_check_side = None
     state.last_entry_check_best_ask = None
@@ -876,6 +910,7 @@ async def monitor_window(
                 if state.target_side is not None:
                     buy_token_id, price_token_id = _side_token(window, state.target_side)
                 trade_amount = trade_config.amount_for_signal_strength(state.target_signal_strength)
+                entry_ask_level = trade_config.ask_level_for_signal_strength(state.target_signal_strength)
                 max_entry_price = _entry_price_cap(strategy, state)
                 quote = _cap_limited_depth_quote(
                     ws,
@@ -883,6 +918,7 @@ async def monitor_window(
                     trade_amount,
                     max_entry_price,
                     max_age_sec=config.FAK_RETRY_MAX_BEST_ASK_AGE_SEC,
+                    min_entry_level=entry_ask_level,
                 )
                 _log_signal_eval(
                     state,
@@ -943,6 +979,7 @@ async def monitor_window(
                             depth_levels_used=quote.levels_used,
                             depth_notional=quote.cap_notional,
                             depth_skipped_levels=quote.skipped_levels,
+                            entry_ask_level=quote.entry_ask_level,
                             book_ask_preview=quote.preview,
                             price_hint_refresher=_price_hint_refresher(ws, buy_token_id, strategy, trade_config, state),
                         )
@@ -1043,6 +1080,7 @@ async def _on_price_update(
                     effective_side = state.target_side
                     buy_token_id, _ = _side_token(window, effective_side)
                 trade_amount = trade_config.amount_for_signal_strength(state.target_signal_strength)
+                entry_ask_level = trade_config.ask_level_for_signal_strength(state.target_signal_strength)
                 max_entry_price = _entry_price_cap(strategy, state)
                 quote = _cap_limited_depth_quote(
                     ws,
@@ -1050,6 +1088,7 @@ async def _on_price_update(
                     trade_amount,
                     max_entry_price,
                     max_age_sec=config.FAK_RETRY_MAX_BEST_ASK_AGE_SEC,
+                    min_entry_level=entry_ask_level,
                 )
                 _log_signal_eval(
                     state,
@@ -1112,6 +1151,7 @@ async def _on_price_update(
                     "depth_notional": round(quote.cap_notional, 4),
                     "depth_total_levels": quote.total_levels,
                     "depth_skipped_levels": quote.skipped_levels,
+                    "entry_ask_level": quote.entry_ask_level,
                     "book_ask_preview": quote.preview,
                     "signal_price": price,
                     "side": effective_side.upper(),
@@ -1145,6 +1185,7 @@ async def _on_price_update(
                     depth_levels_used=quote.levels_used,
                     depth_notional=quote.cap_notional,
                     depth_skipped_levels=quote.skipped_levels,
+                    entry_ask_level=quote.entry_ask_level,
                     book_ask_preview=quote.preview,
                     price_hint_refresher=_price_hint_refresher(ws, buy_token_id, strategy, trade_config, state),
                 )
@@ -1172,6 +1213,7 @@ async def _handle_opening_price(
     depth_levels_used: Optional[int] = None,
     depth_notional: Optional[float] = None,
     depth_skipped_levels: Optional[int] = None,
+    entry_ask_level: Optional[int] = None,
     book_ask_preview: Optional[list[tuple[float, float]]] = None,
     price_hint_refresher=None,
 ) -> None:
@@ -1206,6 +1248,7 @@ async def _handle_opening_price(
             "depth_levels_used": depth_levels_used,
             "depth_notional": round(depth_notional, 4) if depth_notional is not None else None,
             "depth_skipped_levels": depth_skipped_levels,
+            "entry_ask_level": entry_ask_level,
             "book_ask_preview": book_ask_preview,
             "amount": trade_amount,
             "signal_strength": (
@@ -1291,6 +1334,7 @@ async def _handle_opening_price(
             "depth_levels_used": depth_levels_used,
             "depth_notional": round(depth_notional, 4) if depth_notional is not None else None,
             "depth_skipped_levels": depth_skipped_levels,
+            "entry_ask_level": entry_ask_level,
             "book_ask_preview": book_ask_preview,
             "amount": trade_amount,
             "signal_strength": (

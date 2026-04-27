@@ -251,6 +251,102 @@ async def test_on_price_excludes_first_book_level_from_depth():
 
 
 @pytest.mark.asyncio
+async def test_on_price_entry_ask_level_sets_minimum_price_hint_level():
+    window = _make_window()
+    state = _make_state()
+    strategy = _mock_strategy()
+    strategy.max_entry_price = 0.75
+    ws = MagicMock()
+    ws.get_latest_ask_levels_with_size.return_value = [
+        (0.60, 0.1),   # level 1 ignored for fillability
+        (0.61, 10.0),  # already covers amount, but configured hint level is 4
+        (0.62, 10.0),
+        (0.63, 10.0),
+    ]
+    ws.get_latest_best_ask.return_value = 0.60
+    ws.get_latest_best_ask_age.return_value = 0.001
+    strategy.should_buy.side_effect = lambda price, state_obj: setattr(state_obj, "target_side", "up") or True
+
+    update = _make_update("up-token-123", midpoint=0.58)
+
+    with patch("polybot.trading.monitor.get_tick_size", return_value=0.01), \
+         patch("polybot.trading.monitor._handle_opening_price", new_callable=AsyncMock) as mock_buy:
+        await _on_price_update(
+            update,
+            window,
+            state,
+            ws=ws,
+            dry_run=True,
+            trade_config=_tc(amount=1.0, entry_ask_level=4),
+            strategy=strategy,
+            side="up",
+        )
+
+    mock_buy.assert_awaited_once()
+    assert mock_buy.await_args.kwargs["target_entry_ask"] == pytest.approx(0.63)
+    assert mock_buy.await_args.kwargs["best_ask"] == pytest.approx(0.64)
+    assert mock_buy.await_args.kwargs["entry_ask_level"] == 4
+
+
+@pytest.mark.asyncio
+async def test_entry_depth_skip_logs_once_for_repeated_same_quote(caplog):
+    window = _make_window()
+    state = _make_state()
+    strategy = _mock_strategy()
+    strategy.max_entry_price = 0.65
+    strategy.should_buy.side_effect = lambda price, state_obj: setattr(state_obj, "target_side", "up") or True
+    ws = MagicMock()
+    ws.get_latest_ask_levels_with_size.return_value = [
+        (0.60, 10.0),
+        (0.64, 0.1),
+    ]
+    ws.get_latest_best_ask.return_value = 0.60
+    ws.get_latest_best_ask_age.return_value = 0.01
+    update = _make_update("up-token-123", midpoint=0.58)
+
+    with patch("polybot.trading.monitor._handle_opening_price", new_callable=AsyncMock) as mock_buy:
+        with caplog.at_level(logging.INFO, logger="polybot.trading.monitor"):
+            await _on_price_update(update, window, state, ws=ws, dry_run=True, trade_config=_tc(amount=1.0), strategy=strategy, side="up")
+            await _on_price_update(update, window, state, ws=ws, dry_run=True, trade_config=_tc(amount=1.0), strategy=strategy, side="up")
+
+    mock_buy.assert_not_called()
+    depth_skips = [
+        record for record in caplog.records
+        if getattr(record, "event_data", {}).get("action") == "ENTRY_DEPTH_SKIP"
+    ]
+    assert len(depth_skips) == 1
+
+
+@pytest.mark.asyncio
+async def test_entry_depth_skip_throttles_depth_notional_churn(caplog):
+    window = _make_window()
+    state = _make_state()
+    strategy = _mock_strategy()
+    strategy.max_entry_price = 0.65
+    strategy.should_buy.side_effect = lambda price, state_obj: setattr(state_obj, "target_side", "up") or True
+    ws = MagicMock()
+    ws.get_latest_ask_levels_with_size.side_effect = [
+        [(0.66, 10.0), (0.67, 10.0)],
+        [(0.66, 100.0), (0.67, 100.0)],
+    ]
+    ws.get_latest_best_ask.return_value = 0.66
+    ws.get_latest_best_ask_age.return_value = 0.01
+    update = _make_update("up-token-123", midpoint=0.58)
+
+    with patch("polybot.trading.monitor._handle_opening_price", new_callable=AsyncMock) as mock_buy:
+        with caplog.at_level(logging.INFO, logger="polybot.trading.monitor"):
+            await _on_price_update(update, window, state, ws=ws, dry_run=True, trade_config=_tc(amount=1.0), strategy=strategy, side="up")
+            await _on_price_update(update, window, state, ws=ws, dry_run=True, trade_config=_tc(amount=1.0), strategy=strategy, side="up")
+
+    mock_buy.assert_not_called()
+    depth_skips = [
+        record for record in caplog.records
+        if getattr(record, "event_data", {}).get("action") == "ENTRY_DEPTH_SKIP"
+    ]
+    assert len(depth_skips) == 1
+
+
+@pytest.mark.asyncio
 async def test_on_price_skips_normal_full_cap_entry_when_guard_matches(caplog):
     window = _make_window()
     state = _make_state()

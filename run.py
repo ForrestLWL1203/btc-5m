@@ -9,6 +9,7 @@ Requirements:
 
 import argparse
 import asyncio
+import datetime
 import logging
 import logging.handlers
 import sys
@@ -45,11 +46,13 @@ _LAST_DRY_RUN = False
 # File and JSONL handlers — initialized lazily once we know the market series
 _file_handler = None
 _jsonl_handler = None
+_run_file_handler = None
+_run_jsonl_handler = None
 
 
-def _setup_file_logging(slug_prefix: str) -> None:
+def _setup_file_logging(slug_prefix: str, run_id: str) -> None:
     """Set up file and JSONL logging with market-specific filenames."""
-    global _file_handler, _jsonl_handler
+    global _file_handler, _jsonl_handler, _run_file_handler, _run_jsonl_handler
     if _file_handler is not None:
         return  # Already set up
 
@@ -78,6 +81,26 @@ def _setup_file_logging(slug_prefix: str) -> None:
     )
     _jsonl_handler.setFormatter(JsonFormatter())
     root_log.addHandler(_jsonl_handler)
+
+    run_dir = LOG_DIR / "runs" / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    _run_file_handler = logging.FileHandler(
+        run_dir / f"{slug_prefix}_trade.log",
+        encoding="utf-8",
+    )
+    _run_file_handler.setFormatter(ConsoleFormatter(
+        "%(asctime)s.%(msecs)03d %(levelname)s %(name)s — %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    ))
+    root_log.addHandler(_run_file_handler)
+
+    _run_jsonl_handler = logging.FileHandler(
+        run_dir / f"{slug_prefix}_trade.jsonl",
+        encoding="utf-8",
+    )
+    _run_jsonl_handler.setFormatter(JsonFormatter())
+    root_log.addHandler(_run_jsonl_handler)
 
 async def main() -> None:
     global _LAST_DRY_RUN
@@ -109,9 +132,10 @@ Examples:
 
     dry_run = args.dry
     _LAST_DRY_RUN = dry_run
+    run_id = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
     # Set up file logging with market-specific names
-    _setup_file_logging(series.slug_prefix)
+    _setup_file_logging(series.slug_prefix, run_id)
 
     # Get display side from strategy for logging
     display_side = "DYNAMIC" if getattr(strategy, "dynamic_side", False) else (strategy.get_side() or "UP")
@@ -119,12 +143,14 @@ Examples:
     rounds_desc = trade_config.rounds if trade_config.rounds is not None else "∞"
     mode = "DRY" if dry_run else "LIVE"
     log.info(
-        "RUN_START: mode=%s strategy=%s side=%s amount=$%.1f rounds=%s exit=window_end",
+        "RUN_START: run_id=%s mode=%s strategy=%s side=%s amount=$%.1f rounds=%s exit=window_end log_dir=%s",
+        run_id,
         mode,
         type(strategy).__name__,
         display_side.upper(),
         trade_config.amount,
         rounds_desc,
+        LOG_DIR / "runs" / run_id,
     )
 
     # Print key strategy parameters for verification
