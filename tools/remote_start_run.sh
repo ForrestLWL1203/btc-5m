@@ -47,7 +47,7 @@ cat > "${RUN_DIR}/run.sh" <<EOF
 set -euo pipefail
 cd "${ROOT_DIR}"
 mkdir -p log
-find log -maxdepth 1 -type f \( -name '*_trade.log' -o -name '*_trade.jsonl' \) -delete
+find log -maxdepth 1 -type f \( -name '*_trade.log*' -o -name '*_trade.jsonl*' \) -delete
 if [ "${MODE}" = "dry" ]; then
   polybot-run --preset "${PRESET}" --rounds "${ROUNDS}" --dry
 else
@@ -56,20 +56,22 @@ fi
 EOF
 chmod +x "${RUN_DIR}/run.sh"
 
-nohup bash -lc "
+nohup setsid bash -lc "
   set -euo pipefail
   RC=0
+  echo \"\$\$\" > '${RUN_DIR}/pgid'
   if ! '${RUN_DIR}/run.sh' >'${RUN_DIR}/stdout.log' 2>&1; then
     RC=\$?
   fi
   printf '%s\n' \"\${RC}\" > '${RUN_DIR}/exit_code'
   date -u '+%Y-%m-%dT%H:%M:%SZ' > '${RUN_DIR}/finished_at'
-  find '${ROOT_DIR}/log' -maxdepth 1 -type f \\( -name '*_trade.log' -o -name '*_trade.jsonl' \\) -exec cp {} '${RUN_DIR}/' \\;
+  find '${ROOT_DIR}/log' -maxdepth 1 -type f \\( -name '*_trade.log*' -o -name '*_trade.jsonl*' \\) -exec cp {} '${RUN_DIR}/' \\;
 " </dev/null >/dev/null 2>&1 &
 RUN_PID=$!
 
 echo "${RUN_PID}" > "${RUN_DIR}/pid"
 echo "PID=${RUN_PID}" >> "${RUN_DIR}/meta.env"
+echo "PGID=${RUN_PID}" >> "${RUN_DIR}/meta.env"
 
 ln -sfn "${RUN_DIR}" "${RUNS_DIR}/latest"
 
