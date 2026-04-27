@@ -57,6 +57,7 @@ LABEL=""
 TOKEN_ID=""
 VPS_PROFILE=""
 ACCOUNT_PROFILE=""
+RUN_EXTRA_ARGS=()
 PROFILE_HOME="${POLYBOT_PROFILE_HOME:-$DEFAULT_PROFILE_HOME}"
 
 EXPECT_TIMEOUT="${POLYBOT_EXPECT_TIMEOUT:-120}"
@@ -318,7 +319,13 @@ EOF
 }
 
 run_remote() {
-  local remote_cmd="polybot-update && /usr/local/bin/polybot-remote-start '${PRESET}' '${ROUNDS}' '${MODE}' '${LABEL}'"
+  local extra_args_text=""
+  local arg quoted_arg
+  for arg in "${RUN_EXTRA_ARGS[@]}"; do
+    printf -v quoted_arg '%q' "$arg"
+    extra_args_text+=" ${quoted_arg}"
+  done
+  local remote_cmd="polybot-update && /usr/local/bin/polybot-remote-start '${PRESET}' '${ROUNDS}' '${MODE}' '${LABEL}'${extra_args_text}"
   expect_ssh "$remote_cmd"
 }
 
@@ -395,6 +402,11 @@ case "$subcommand" in
         --label)
           LABEL="$2"
           shift 2
+          ;;
+        --)
+          shift
+          RUN_EXTRA_ARGS+=("$@")
+          break
           ;;
         -h|--help)
           usage

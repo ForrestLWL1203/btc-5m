@@ -5,6 +5,11 @@ PRESET="${1:-enhanced}"
 ROUNDS="${2:-1}"
 MODE="${3:-live}"
 RUN_LABEL="${4:-}"
+if [ "$#" -gt 4 ]; then
+  EXTRA_ARGS=("${@:5}")
+else
+  EXTRA_ARGS=()
+fi
 
 ROOT_DIR="/opt/polybot/current"
 RUNS_DIR="/opt/polybot/log/runs"
@@ -30,6 +35,11 @@ cd "$ROOT_DIR"
 
 GIT_HEAD="$(git rev-parse --short HEAD)"
 STARTED_AT="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+EXTRA_ARGS_TEXT=""
+for ARG in "${EXTRA_ARGS[@]}"; do
+  printf -v QUOTED_ARG '%q' "$ARG"
+  EXTRA_ARGS_TEXT+=" ${QUOTED_ARG}"
+done
 
 cat > "${RUN_DIR}/meta.env" <<EOF
 RUN_ID=${RUN_ID}
@@ -40,6 +50,7 @@ MODE=${MODE}
 GIT_HEAD=${GIT_HEAD}
 STARTED_AT=${STARTED_AT}
 ROOT_DIR=${ROOT_DIR}
+EXTRA_ARGS=${EXTRA_ARGS_TEXT}
 EOF
 
 cat > "${RUN_DIR}/run.sh" <<EOF
@@ -49,9 +60,9 @@ cd "${ROOT_DIR}"
 mkdir -p log
 find log -maxdepth 1 -type f \( -name '*_trade.log*' -o -name '*_trade.jsonl*' \) -delete
 if [ "${MODE}" = "dry" ]; then
-  polybot-run --preset "${PRESET}" --rounds "${ROUNDS}" --dry
+  polybot-run --preset "${PRESET}" --rounds "${ROUNDS}" --dry${EXTRA_ARGS_TEXT}
 else
-  polybot-run --preset "${PRESET}" --rounds "${ROUNDS}"
+  polybot-run --preset "${PRESET}" --rounds "${ROUNDS}"${EXTRA_ARGS_TEXT}
 fi
 EOF
 chmod +x "${RUN_DIR}/run.sh"
