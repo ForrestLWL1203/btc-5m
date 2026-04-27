@@ -290,8 +290,8 @@ def _stop_loss_bid_quote(
         else None
     )
     preview = levels[:_DEPTH_PREVIEW_LEVELS]
-    min_sell_level = max(1, int(min_sell_level))
-    min_sell_index = min_sell_level - 1
+    max_sell_level = max(1, int(min_sell_level))
+    max_sell_index = max(max_sell_level - 1, int(skip_levels))
     if not levels or shares <= 0:
         return BidDepthQuote(
             price=None,
@@ -300,7 +300,7 @@ def _stop_loss_bid_quote(
             levels_used=0,
             total_levels=len(levels),
             skipped_levels=min(skip_levels, len(levels)),
-            sell_bid_level=min_sell_level,
+            sell_bid_level=max_sell_level,
             best_bid_level_1=best_bid_level_1,
             bid_age_sec=bid_age,
             preview=preview,
@@ -310,23 +310,26 @@ def _stop_loss_bid_quote(
     shares_available = 0.0
     levels_used = 0
     selected_price = None
+    enough = False
     for index, (bid_price, bid_size) in enumerate(levels):
+        if index > max_sell_index:
+            break
         if bid_price < min_sell_price:
             break
         if index < skip_levels:
             continue
         levels_used += 1
         shares_available += bid_size
-        if shares_available >= shares and index >= min_sell_index:
-            selected_price = bid_price
-            break
+        selected_price = bid_price
+        if shares_available >= shares:
+            enough = True
 
     price_hint = _buffer_sell_price_hint(
         token_id,
         selected_price,
         buffer_ticks=buffer_ticks,
         min_price=min_sell_price,
-    ) if selected_price is not None else None
+    ) if enough and selected_price is not None else None
     return BidDepthQuote(
         price=selected_price,
         price_hint=price_hint,
@@ -334,11 +337,11 @@ def _stop_loss_bid_quote(
         levels_used=levels_used,
         total_levels=len(levels),
         skipped_levels=min(skip_levels, len(levels)),
-        sell_bid_level=min_sell_level,
+        sell_bid_level=max_sell_level,
         best_bid_level_1=best_bid_level_1,
         bid_age_sec=bid_age,
         preview=preview,
-        enough=selected_price is not None and price_hint is not None,
+        enough=enough and selected_price is not None and price_hint is not None,
     )
 
 
@@ -497,6 +500,61 @@ def _stop_loss_price_hint_refresher(
     return refresh
 
 
+async def _sync_holding_balance_after_buy(
+    state: MonitorState,
+    token_id: str,
+    window: MarketWindow,
+    side: str,
+    entry_count: int,
+    *,
+    delay_sec: float = 8.0,
+) -> None:
+    """Refresh held shares from CLOB shortly after a successful FAK BUY."""
+    await asyncio.sleep(delay_sec)
+    if not state.bought or state.exit_triggered or state.entry_count != entry_count:
+        return
+    live_balance = await asyncio.to_thread(get_token_balance, token_id, False)
+    if live_balance is None:
+        log_event(log, logging.WARNING, TRADE, {
+            "action": "HOLDING_BALANCE_SYNC_FAILED",
+            "side": side.upper(),
+            "window": window.short_label,
+            "token": token_id[:20],
+            "state_shares": state.holding_size,
+        })
+        return
+    if live_balance <= 1e-9:
+        log_event(log, logging.WARNING, TRADE, {
+            "action": "HOLDING_BALANCE_SYNC_EMPTY",
+            "side": side.upper(),
+            "window": window.short_label,
+            "token": token_id[:20],
+            "state_shares": state.holding_size,
+            "balance_shares": live_balance,
+        })
+        return
+    if abs(live_balance - state.holding_size) > 1e-6:
+        old_shares = state.holding_size
+        state.holding_size = live_balance
+        log_event(log, logging.INFO, TRADE, {
+            "action": "HOLDING_BALANCE_SYNCED",
+            "side": side.upper(),
+            "window": window.short_label,
+            "token": token_id[:20],
+            "old_shares": old_shares,
+            "balance_shares": live_balance,
+        })
+        return
+    log_event(log, logging.INFO, TRADE, {
+        "action": "HOLDING_BALANCE_SYNCED",
+        "side": side.upper(),
+        "window": window.short_label,
+        "token": token_id[:20],
+        "balance_shares": live_balance,
+        "unchanged": True,
+    })
+
+
 def _log_signal_eval(
     state: MonitorState,
     side: str,
@@ -542,6 +600,11 @@ def _log_signal_eval(
         "past_signal_strength": (
             round(state.target_past_signal_strength, 3)
             if state.target_past_signal_strength is not None
+            else None
+        ),
+        "active_theta_pct": (
+            round(state.target_active_theta_pct, 4)
+            if state.target_active_theta_pct is not None
             else None
         ),
         "remaining_sec": (
@@ -710,9 +773,11 @@ async def _maybe_handle_stop_loss(
     entry_price = state.entry_avg_price or state.entry_price
     if entry_price <= 0:
         return
+    if entry_price < trade_config.stop_loss_disable_below_entry_price:
+        return
     stop_price = max(
         trade_config.stop_loss_min_sell_price,
-        (1.0 - entry_price) * trade_config.stop_loss_multiplier,
+        trade_config.stop_loss_trigger_price,
     )
     state.stop_loss_price = stop_price
 
@@ -1130,6 +1195,7 @@ async def monitor_window(
     state.target_signal_confidence = None
     state.target_signal_strength = None
     state.target_past_signal_strength = None
+    state.target_active_theta_pct = None
     state.target_remaining_sec = None
     state.signal_reference_price = None
     state.entry_avg_price = 0.0
@@ -1442,6 +1508,11 @@ async def _on_price_update(
                         if state.target_past_signal_strength is not None
                         else None
                     ),
+                    "active_theta_pct": (
+                        round(state.target_active_theta_pct, 4)
+                        if state.target_active_theta_pct is not None
+                        else None
+                    ),
                     "remaining_sec": (
                         round(state.target_remaining_sec)
                         if state.target_remaining_sec is not None
@@ -1544,6 +1615,11 @@ async def _handle_opening_price(
                 if state.target_past_signal_strength is not None
                 else None
             ),
+            "active_theta_pct": (
+                round(state.target_active_theta_pct, 4)
+                if state.target_active_theta_pct is not None
+                else None
+            ),
             "remaining_sec": (
                 round(state.target_remaining_sec)
                 if state.target_remaining_sec is not None
@@ -1577,6 +1653,13 @@ async def _handle_opening_price(
                 "window": window.short_label,
                 "entry_latency_ms": entry_latency_ms,
             })
+            asyncio.create_task(_sync_holding_balance_after_buy(
+                state,
+                buy_token_id,
+                window,
+                side,
+                state.entry_count,
+            ))
             if strategy is not None and hasattr(strategy, "on_buy_confirmed"):
                 strategy.on_buy_confirmed(time.time())
         else:
@@ -1630,6 +1713,11 @@ async def _handle_opening_price(
             "past_signal_strength": (
                 round(state.target_past_signal_strength, 3)
                 if state.target_past_signal_strength is not None
+                else None
+            ),
+            "active_theta_pct": (
+                round(state.target_active_theta_pct, 4)
+                if state.target_active_theta_pct is not None
                 else None
             ),
             "remaining_sec": (

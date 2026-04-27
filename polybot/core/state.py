@@ -26,6 +26,7 @@ class MonitorState:
     target_signal_confidence: Optional[str] = None  # "normal" or "high"
     target_signal_strength: Optional[float] = None
     target_past_signal_strength: Optional[float] = None
+    target_active_theta_pct: Optional[float] = None
     target_remaining_sec: Optional[float] = None
     entry_amount: float = 0.0
     entry_avg_price: float = 0.0

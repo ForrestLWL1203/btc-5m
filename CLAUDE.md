@@ -12,6 +12,8 @@ filename contains `dry`, but `--dry` controls dry/live mode.
 strategy:
   type: paired_window
   theta_pct: 0.03
+  theta_start_pct: 0.02
+  theta_end_pct: 0.04
   persistence_sec: 10
   entry_start_remaining_sec: 255
   entry_end_remaining_sec: 180
@@ -29,10 +31,11 @@ params:
   max_entries_per_window: 1
   stop_loss:
     enabled: false
-    multiplier: 1.2
+    trigger_price: 0.35
+    disable_below_entry_price: 0.45
     start_remaining_sec: 120
     end_remaining_sec: 15
-    sell_bid_level: 9
+    sell_bid_level: 20
     retry_count: 3
     min_sell_price: 0.20
 ```
@@ -41,7 +44,9 @@ Rules:
 
 - BTC baseline is current window open.
 - Entry band is 45s to 120s after window start.
-- Need theta, persistence, same direction, and non-fading move.
+- Dynamic theta is active: 0.02% at 45s after open, linearly rising to 0.04%
+  at 120s. `theta_pct=0.03%` is fallback only.
+- Need persistence, same direction, and non-fading move.
 - Direction locks once per window.
 - Hard cap is `0.75`; no strength cap tiers and no early-entry bypass.
 - WS order-book depth drives execution; level 1 is skipped for fillability.
@@ -57,9 +62,13 @@ Rules:
 
 Stop-loss when enabled:
 
-- Trigger price is `max(min_sell_price, (1 - entry_avg_price) * multiplier)`.
+- Entries below 0.45 do not use stop-loss.
+- Trigger price is `max(min_sell_price, trigger_price=0.35)`.
 - Active only while `start_remaining_sec >= remaining >= end_remaining_sec`.
-- Uses held-leg bid book, skips level 1, and defaults to bid level 9.
+- Uses held-leg bid book, skips level 1, and defaults to scanning up to bid
+  level 20.
+- Live runs sync actual CLOB token balance about 8 seconds after BUY fill, then
+  check balance again before stop-loss SELL.
 - SELL FAK retries up to 3 times.
 - A filled stop records realized PnL and exits the window.
 
@@ -143,6 +152,8 @@ Price fields:
 - `target_entry_ask`: selected depth level price.
 - `price_hint`: clamped FAK hint.
 - `FAK_FILLED.avg_price`: actual average fill.
+- Persistent trade logs are JSONL only: `log/<market>_trade.jsonl` and run-dir
+  copies. Human-readable logs stay in stdout/stderr, not `*_trade.log`.
 
 ## Guardrails
 

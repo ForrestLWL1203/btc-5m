@@ -33,7 +33,50 @@ def test_should_buy_uses_fixed_cap():
     assert state.target_signal_confidence == "normal"
     assert state.target_signal_strength == pytest.approx(100.0)
     assert state.target_past_signal_strength == pytest.approx(83.3333333333)
+    assert state.target_active_theta_pct == pytest.approx(0.03)
     assert state.target_remaining_sec == pytest.approx(240.0, abs=1.0)
+
+
+def test_should_buy_uses_dynamic_theta_at_entry_start():
+    strat = _strategy(
+        theta_pct=0.03,
+        theta_start_pct=0.02,
+        theta_end_pct=0.04,
+        max_entry_price=0.75,
+        persistence_sec=10,
+        entry_start_remaining_sec=255,
+        entry_end_remaining_sec=180,
+    )
+    now = time.time()
+    strat._window_start_epoch = now - 45
+    strat._window_open_btc = 100.0
+    strat._feed.latest_price = 100.025
+    strat._feed.price_at_or_before = lambda ts: 100.022
+
+    state = MonitorState()
+
+    assert strat.should_buy(0.60, state) is True
+    assert state.target_active_theta_pct == pytest.approx(0.02)
+    assert state.target_signal_strength == pytest.approx(1.25)
+
+
+def test_should_buy_uses_dynamic_theta_at_entry_end():
+    strat = _strategy(
+        theta_pct=0.03,
+        theta_start_pct=0.02,
+        theta_end_pct=0.04,
+        max_entry_price=0.75,
+        persistence_sec=10,
+        entry_start_remaining_sec=255,
+        entry_end_remaining_sec=180,
+    )
+    now = time.time()
+    strat._window_start_epoch = now - 120
+    strat._window_open_btc = 100.0
+    strat._feed.latest_price = 100.035
+    strat._feed.price_at_or_before = lambda ts: 100.033
+
+    assert strat.should_buy(0.60, MonitorState()) is False
 
 
 def test_should_buy_rejects_before_entry_band():

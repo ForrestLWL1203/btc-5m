@@ -18,6 +18,8 @@ The filename contains `dry`, but live/dry behavior is controlled only by
 strategy:
   type: paired_window
   theta_pct: 0.03
+  theta_start_pct: 0.02
+  theta_end_pct: 0.04
   persistence_sec: 10
   entry_start_remaining_sec: 255
   entry_end_remaining_sec: 180
@@ -35,10 +37,11 @@ params:
   max_entries_per_window: 1
   stop_loss:
     enabled: false
-    multiplier: 1.2
+    trigger_price: 0.35
+    disable_below_entry_price: 0.45
     start_remaining_sec: 120
     end_remaining_sec: 15
-    sell_bid_level: 9
+    sell_bid_level: 20
     retry_count: 3
     min_sell_price: 0.20
 ```
@@ -47,8 +50,11 @@ Behavior:
 
 - BTC baseline is the current 5-minute window open.
 - Entry band is `remaining=[255s,180s]`, i.e. 45s to 120s after window start.
-- Signal requires `abs(move_pct) >= theta_pct`, same-direction persistence
-  `persistence_sec` ago, and current move at least `min_move_ratio * past_move`.
+- Signal threshold is dynamic: `theta_start_pct=0.02%` at 45s after open,
+  linearly rising to `theta_end_pct=0.04%` at 120s after open. `theta_pct=0.03%`
+  remains the fixed-threshold fallback if dynamic fields are absent.
+- Signal also requires same-direction persistence `persistence_sec` ago and
+  current move at least `min_move_ratio * past_move`.
 - First valid direction is locked for the window.
 - Hard max entry cap is `0.75`; there are no dynamic strength caps.
 - Execution uses target-leg WS order-book depth, not theoretical `1 - up_price`.
@@ -124,15 +130,21 @@ Stop loss is off unless `params.stop_loss.enabled=true`.
 Trigger:
 
 ```text
-stop_price = max(min_sell_price, (1 - entry_avg_price) * multiplier)
+if entry_avg_price < disable_below_entry_price:
+    stop-loss disabled
+else:
+    stop_price = max(min_sell_price, trigger_price)
 ```
 
 Execution constraints:
 
 - Only active while holding and `start_remaining_sec >= remaining >= end_remaining_sec`.
 - Default range: `120s >= remaining >= 15s`.
+- Default trigger is around `0.35`; entries below `0.45` do not use stop-loss.
 - Uses held-leg bid book, not ask book.
-- Level 1 bid is skipped; sell depth targets `sell_bid_level=9` by default.
+- Level 1 bid is skipped; sell depth scans up to `sell_bid_level=20` by default.
+- Live runs sync actual CLOB token balance about 8 seconds after BUY fill, and
+  check balance again before stop-loss SELL.
 - SELL FAK price hint is placed below the selected bid level and retried up to
   `retry_count=3`.
 - If stop-loss fills, the bot records realized PnL and exits the window.
@@ -208,6 +220,9 @@ Fetch logs:
 ```bash
 bash tools/vpsctl.sh fetch --vps-profile sweden --run-id latest
 ```
+
+Runs persist one structured analysis log: `<market>_trade.jsonl`. Human-readable
+logs are stdout/stderr only; remote runs capture them in `stdout.log`.
 
 Probe latency remotely:
 

@@ -65,6 +65,16 @@ def build_strategy(cfg: dict, series: Optional[MarketSeries] = None):
         return PairedWindowStrategy(
             series=series,
             theta_pct=strat_cfg.get("theta_pct", 0.02),
+            theta_start_pct=(
+                float(strat_cfg["theta_start_pct"])
+                if strat_cfg.get("theta_start_pct") is not None
+                else None
+            ),
+            theta_end_pct=(
+                float(strat_cfg["theta_end_pct"])
+                if strat_cfg.get("theta_end_pct") is not None
+                else None
+            ),
             entry_start_remaining_sec=strat_cfg.get("entry_start_remaining_sec", 255.0),
             entry_end_remaining_sec=strat_cfg.get("entry_end_remaining_sec", 120.0),
             persistence_sec=strat_cfg.get("persistence_sec", 10.0),
@@ -140,9 +150,11 @@ def _build_stop_loss(raw: Optional[dict]) -> dict:
     return {
         "stop_loss_enabled": bool(raw.get("enabled", False)),
         "stop_loss_multiplier": float(raw.get("multiplier", 1.2)),
+        "stop_loss_trigger_price": float(raw.get("trigger_price", 0.35)),
+        "stop_loss_disable_below_entry_price": float(raw.get("disable_below_entry_price", 0.45)),
         "stop_loss_start_remaining_sec": float(raw.get("start_remaining_sec", 120.0)),
         "stop_loss_end_remaining_sec": float(raw.get("end_remaining_sec", 15.0)),
-        "stop_loss_sell_bid_level": max(1, int(raw.get("sell_bid_level", 9))),
+        "stop_loss_sell_bid_level": max(1, int(raw.get("sell_bid_level", 20))),
         "stop_loss_retry_count": max(1, int(raw.get("retry_count", 3))),
         "stop_loss_min_sell_price": float(raw.get("min_sell_price", 0.20)),
     }

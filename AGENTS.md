@@ -19,6 +19,8 @@ The filename contains `dry`, but live/dry is controlled only by `--dry`.
 strategy:
   type: paired_window
   theta_pct: 0.03
+  theta_start_pct: 0.02
+  theta_end_pct: 0.04
   persistence_sec: 10
   entry_start_remaining_sec: 255
   entry_end_remaining_sec: 180
@@ -36,10 +38,11 @@ params:
   max_entries_per_window: 1
   stop_loss:
     enabled: false
-    multiplier: 1.2
+    trigger_price: 0.35
+    disable_below_entry_price: 0.45
     start_remaining_sec: 120
     end_remaining_sec: 15
-    sell_bid_level: 9
+    sell_bid_level: 20
     retry_count: 3
     min_sell_price: 0.20
 ```
@@ -48,8 +51,11 @@ Runtime behavior:
 
 - BTC baseline is the current 5-minute window open.
 - Entry band is `remaining=[255s,180s]`, i.e. 45s to 120s after open.
-- Require `abs(move_pct) >= theta_pct`, same-direction persistence
-  `persistence_sec` ago, and current move >= `min_move_ratio * past_move`.
+- Dynamic theta is active: `0.02%` at 45s after open, linearly rising to
+  `0.04%` at 120s after open. `theta_pct=0.03%` is fallback only if dynamic
+  fields are absent.
+- Require same-direction persistence `persistence_sec` ago and current move >=
+  `min_move_ratio * past_move`.
 - Lock the first valid direction per window.
 - Hard cap is `0.75`; no dynamic cap tiers.
 - Execution uses target-leg WS order-book depth.
@@ -64,9 +70,13 @@ Runtime behavior:
 
 Stop-loss behavior when enabled:
 
-- Trigger price: `max(min_sell_price, (1 - entry_avg_price) * multiplier)`.
+- Entries below `disable_below_entry_price=0.45` do not use stop-loss.
+- Trigger price: `max(min_sell_price, trigger_price=0.35)`.
 - Only active while `start_remaining_sec >= remaining >= end_remaining_sec`.
-- Uses held-leg bid book, skips level 1, and defaults to bid level 9.
+- Uses held-leg bid book, skips level 1, and defaults to scanning up to bid
+  level 20.
+- Live runs sync actual CLOB token balance about 8 seconds after BUY fill, then
+  check balance again before stop-loss SELL.
 - Live SELL size comes from the actual CLOB token balance before exit; estimated
   runtime shares are only a fallback if balance lookup fails.
 - SELL FAK retry count defaults to 3.
@@ -158,6 +168,10 @@ Account profile required fields:
 `signature_type=1` are defaults.
 
 ## Logging Notes
+
+Runtime writes one persistent analysis log per market: `log/<market>_trade.jsonl`.
+Human-readable logs are stdout/stderr only and are captured in remote
+`stdout.log`; do not reintroduce persistent `*_trade.log` files.
 
 Important fields:
 

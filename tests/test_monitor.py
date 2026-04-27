@@ -15,6 +15,7 @@ from polybot.trading.monitor import (
     _handle_opening_price,
     _log_window_summary,
     _maybe_handle_stop_loss,
+    _sync_holding_balance_after_buy,
     _monitor_single_window,
     _on_price_update,
     _process_trade_result,
@@ -159,6 +160,41 @@ async def test_stop_loss_sells_with_bid_depth_inside_time_band():
     assert state.bought is False
     assert state.holding_size == pytest.approx(0.0)
     assert state.daily_realized_pnl == pytest.approx(1.522 * 0.33 - 1.0)
+
+
+@pytest.mark.asyncio
+async def test_stop_loss_disabled_for_low_entry_price():
+    now = time.time()
+    window = _make_window(start_epoch=int(now) - 180, end_epoch=int(now) + 120)
+    state = _make_state(
+        bought=True,
+        holding_size=2.381,
+        entry_amount=1.0,
+        entry_price=0.42,
+        entry_avg_price=0.42,
+    )
+    ws = MagicMock()
+    ws.get_latest_bid_levels_with_size.return_value = _bid_book(0.65, 12)
+    trade_config = _tc(
+        stop_loss_enabled=True,
+        stop_loss_start_remaining_sec=120,
+        stop_loss_end_remaining_sec=15,
+        stop_loss_disable_below_entry_price=0.45,
+    )
+
+    with patch("polybot.trading.monitor.sell_token", new_callable=AsyncMock) as mock_sell:
+        await _maybe_handle_stop_loss(
+            window,
+            state,
+            ws,
+            "up-token-123",
+            False,
+            trade_config,
+            "up",
+        )
+
+    mock_sell.assert_not_called()
+    assert state.stop_loss_triggered is False
 
 
 @pytest.mark.asyncio
@@ -721,6 +757,28 @@ async def test_handle_opening_price_uses_strength_amount_tier():
 
     assert state.entry_amount == pytest.approx(1.5)
     assert state.holding_size == pytest.approx(1.5 / 0.60)
+
+
+@pytest.mark.asyncio
+async def test_sync_holding_balance_after_buy_updates_live_shares():
+    window = _make_window()
+    state = _make_state(
+        bought=True,
+        holding_size=1.3889,
+        entry_count=1,
+    )
+
+    with patch("polybot.trading.monitor.get_token_balance", return_value=1.522):
+        await _sync_holding_balance_after_buy(
+            state,
+            "up-token-123",
+            window,
+            "up",
+            entry_count=1,
+            delay_sec=0,
+        )
+
+    assert state.holding_size == pytest.approx(1.522)
 
 
 @pytest.mark.asyncio

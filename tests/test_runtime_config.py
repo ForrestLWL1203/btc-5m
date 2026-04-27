@@ -21,6 +21,8 @@ def _args(**overrides) -> argparse.Namespace:
         "timeframe": None,
         "rounds": None,
         "theta": None,
+        "theta_start": None,
+        "theta_end": None,
         "persistence": None,
         "max_entry_price": None,
         "entry_start": None,
@@ -33,6 +35,8 @@ def _args(**overrides) -> argparse.Namespace:
         "max_entries": None,
         "stop_loss_enabled": None,
         "stop_loss_multiplier": None,
+        "stop_loss_trigger_price": None,
+        "stop_loss_disable_below_entry_price": None,
         "stop_loss_start_remaining": None,
         "stop_loss_end_remaining": None,
         "stop_loss_sell_bid_level": None,
@@ -49,6 +53,8 @@ def _args(**overrides) -> argparse.Namespace:
 def test_preset_config_loads_enhanced_yaml():
     cfg = preset_config("enhanced")
     assert cfg["market"]["asset"] == "btc"
+    assert cfg["strategy"]["theta_start_pct"] == pytest.approx(0.02)
+    assert cfg["strategy"]["theta_end_pct"] == pytest.approx(0.04)
     assert cfg["strategy"]["max_entry_price"] == pytest.approx(0.75)
     assert cfg["params"]["entry_ask_level"] == 9
     assert cfg["params"]["low_price_threshold"] == pytest.approx(0.60)
@@ -70,6 +76,8 @@ def test_build_runtime_config_from_preset_applies_common_overrides():
         market="eth",
         rounds=24,
         amount=2.0,
+        theta_start=0.021,
+        theta_end=0.041,
         entry_ask_level=4,
         low_price_threshold=0.58,
         low_price_entry_ask_level=8,
@@ -78,6 +86,8 @@ def test_build_runtime_config_from_preset_applies_common_overrides():
         entry_end=175,
         stop_loss_enabled=True,
         stop_loss_multiplier=1.15,
+        stop_loss_trigger_price=0.34,
+        stop_loss_disable_below_entry_price=0.46,
         stop_loss_start_remaining=110,
         stop_loss_end_remaining=20,
         stop_loss_sell_bid_level=8,
@@ -90,12 +100,16 @@ def test_build_runtime_config_from_preset_applies_common_overrides():
     assert cfg["params"]["entry_ask_level"] == 4
     assert cfg["params"]["low_price_threshold"] == pytest.approx(0.58)
     assert cfg["params"]["low_price_entry_ask_level"] == 8
+    assert cfg["strategy"]["theta_start_pct"] == pytest.approx(0.021)
+    assert cfg["strategy"]["theta_end_pct"] == pytest.approx(0.041)
     assert cfg["strategy"]["max_entry_price"] == pytest.approx(0.69)
     assert cfg["strategy"]["entry_start_remaining_sec"] == pytest.approx(250)
     assert cfg["strategy"]["entry_end_remaining_sec"] == pytest.approx(175)
     stop = cfg["params"]["stop_loss"]
     assert stop["enabled"] is True
     assert stop["multiplier"] == pytest.approx(1.15)
+    assert stop["trigger_price"] == pytest.approx(0.34)
+    assert stop["disable_below_entry_price"] == pytest.approx(0.46)
     assert stop["start_remaining_sec"] == pytest.approx(110)
     assert stop["end_remaining_sec"] == pytest.approx(20)
     assert stop["sell_bid_level"] == 8
@@ -115,9 +129,12 @@ def test_advanced_runtime_input_schema_includes_engineering_fields():
     schema = advanced_runtime_input_schema()
     names = {item["name"] for item in schema}
     assert "theta" in names
+    assert "theta_start" in names
+    assert "theta_end" in names
     assert "entry_ask_level" in names
     assert "low_price_entry_ask_level" in names
     assert "stop_loss_enabled" in names
+    assert "stop_loss_trigger_price" in names
 
 
 def test_validate_runtime_inputs_rejects_bad_ranges_and_relationships():

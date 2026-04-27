@@ -43,36 +43,20 @@ root_log.addHandler(console)
 log = logging.getLogger(__name__)
 _LAST_DRY_RUN = False
 
-# File and JSONL handlers — initialized lazily once we know the market series
-_file_handler = None
+# JSONL handlers — initialized lazily once we know the market series
 _jsonl_handler = None
-_run_file_handler = None
 _run_jsonl_handler = None
 
 
 def _setup_file_logging(slug_prefix: str, run_id: str) -> None:
-    """Set up file and JSONL logging with market-specific filenames."""
-    global _file_handler, _jsonl_handler, _run_file_handler, _run_jsonl_handler
-    if _file_handler is not None:
+    """Set up structured JSONL logging with market-specific filenames."""
+    global _jsonl_handler, _run_jsonl_handler
+    if _jsonl_handler is not None:
         return  # Already set up
 
-    log_file = LOG_DIR / f"{slug_prefix}_trade.log"
     jsonl_file = LOG_DIR / f"{slug_prefix}_trade.jsonl"
 
-    # File — human-readable (rotate at 10 MB, keep 5 backups)
-    _file_handler = logging.handlers.RotatingFileHandler(
-        log_file,
-        maxBytes=10 * 1024 * 1024,
-        backupCount=5,
-        encoding="utf-8",
-    )
-    _file_handler.setFormatter(ConsoleFormatter(
-        "%(asctime)s.%(msecs)03d %(levelname)s %(name)s — %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    ))
-    root_log.addHandler(_file_handler)
-
-    # JSONL — structured JSON Lines for frontend consumption
+    # Structured JSON Lines for analysis and future UI consumption.
     _jsonl_handler = logging.handlers.RotatingFileHandler(
         jsonl_file,
         maxBytes=10 * 1024 * 1024,
@@ -84,16 +68,6 @@ def _setup_file_logging(slug_prefix: str, run_id: str) -> None:
 
     run_dir = LOG_DIR / "runs" / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
-
-    _run_file_handler = logging.FileHandler(
-        run_dir / f"{slug_prefix}_trade.log",
-        encoding="utf-8",
-    )
-    _run_file_handler.setFormatter(ConsoleFormatter(
-        "%(asctime)s.%(msecs)03d %(levelname)s %(name)s — %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    ))
-    root_log.addHandler(_run_file_handler)
 
     _run_jsonl_handler = logging.FileHandler(
         run_dir / f"{slug_prefix}_trade.jsonl",

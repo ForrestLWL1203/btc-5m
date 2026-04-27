@@ -13,7 +13,7 @@ def test_setup_file_logging_creates_run_specific_files(tmp_path, monkeypatch):
     run._setup_file_logging("btc-updown-5m", "run-test")
     logging.getLogger("test_run_logging").info("hello")
 
-    assert (tmp_path / "log" / "btc-updown-5m_trade.log").exists()
     assert (tmp_path / "log" / "btc-updown-5m_trade.jsonl").exists()
-    assert (tmp_path / "log" / "runs" / "run-test" / "btc-updown-5m_trade.log").exists()
     assert (tmp_path / "log" / "runs" / "run-test" / "btc-updown-5m_trade.jsonl").exists()
+    assert not (tmp_path / "log" / "btc-updown-5m_trade.log").exists()
+    assert not (tmp_path / "log" / "runs" / "run-test" / "btc-updown-5m_trade.log").exists()

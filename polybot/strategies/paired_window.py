@@ -17,7 +17,7 @@ log = logging.getLogger(__name__)
 class PairedWindowStrategy(Strategy):
     """Trade once per window after BTC establishes a persistent move from window open.
 
-    - wait for BTC to move away from the window open by `theta_pct`
+    - wait for BTC to move away from the window open by fixed or dynamic theta
     - require the move to persist for `persistence_sec`
     - only enter during a remaining-time band inside the 5m window
     - only buy when the target token is at or below the active cap
@@ -29,6 +29,8 @@ class PairedWindowStrategy(Strategy):
         self,
         series: MarketSeries,
         theta_pct: float = 0.02,
+        theta_start_pct: Optional[float] = None,
+        theta_end_pct: Optional[float] = None,
         entry_start_remaining_sec: float = 255.0,
         entry_end_remaining_sec: float = 120.0,
         persistence_sec: float = 10.0,
@@ -38,6 +40,8 @@ class PairedWindowStrategy(Strategy):
     ):
         self._series = series
         self._theta_pct = theta_pct
+        self._theta_start_pct = theta_start_pct
+        self._theta_end_pct = theta_end_pct
         self._entry_start_remaining_sec = entry_start_remaining_sec
         self._entry_end_remaining_sec = entry_end_remaining_sec
         self._persistence_sec = persistence_sec
@@ -69,9 +73,11 @@ class PairedWindowStrategy(Strategy):
         await self._feed.start()
         self._started = True
         log.debug(
-            "PairedWindowStrategy started | theta=%.3f%% | persistence=%ds | "
+            "PairedWindowStrategy started | theta=%.3f%% dynamic=[%s,%s] | persistence=%ds | "
             "remaining=[%.0f, %.0f]s | max_entry=%.2f",
             self._theta_pct,
+            self._theta_start_pct,
+            self._theta_end_pct,
             self._persistence_sec,
             self._entry_end_remaining_sec,
             self._entry_start_remaining_sec,
@@ -130,7 +136,8 @@ class PairedWindowStrategy(Strategy):
             return False
 
         move_pct = (current_btc - open_price) / open_price * 100.0
-        if abs(move_pct) < self._theta_pct:
+        active_theta_pct = self._active_theta_pct(elapsed)
+        if abs(move_pct) < active_theta_pct:
             return False
 
         past_move_pct = (past_btc - open_price) / open_price * 100.0
@@ -139,8 +146,8 @@ class PairedWindowStrategy(Strategy):
         if abs(move_pct) < abs(past_move_pct) * self._min_move_ratio:
             return False
 
-        signal_strength = abs(move_pct) / self._theta_pct if self._theta_pct > 0 else 0.0
-        past_signal_strength = abs(past_move_pct) / self._theta_pct if self._theta_pct > 0 else 0.0
+        signal_strength = abs(move_pct) / active_theta_pct if active_theta_pct > 0 else 0.0
+        past_signal_strength = abs(past_move_pct) / active_theta_pct if active_theta_pct > 0 else 0.0
         if remaining > self._entry_start_remaining_sec or remaining < self._entry_end_remaining_sec:
             return False
 
@@ -157,17 +164,19 @@ class PairedWindowStrategy(Strategy):
         state.target_signal_confidence = "normal"
         state.target_signal_strength = signal_strength
         state.target_past_signal_strength = past_signal_strength
+        state.target_active_theta_pct = active_theta_pct
         state.target_remaining_sec = remaining
 
         if not self._signal_logged:
             log.info(
                 "SIGNAL: dir=%s btc_open=%.1f btc_now=%.1f move=%.4f%% past=%.4f%% "
-                "strength=%.2fx signal_ref_price=%.3f max_entry=%.3f remaining=%.0fs",
+                "theta=%.4f%% strength=%.2fx signal_ref_price=%.3f max_entry=%.3f remaining=%.0fs",
                 direction.upper(),
                 open_price,
                 current_btc,
                 move_pct,
                 past_move_pct,
+                active_theta_pct,
                 signal_strength,
                 state.signal_reference_price,
                 state.target_max_entry_price,
@@ -184,3 +193,15 @@ class PairedWindowStrategy(Strategy):
             max_forward_sec=self._open_price_max_wait_sec,
         )
         return self._window_open_btc
+
+    def _active_theta_pct(self, elapsed_sec: float) -> float:
+        """Return fixed theta or linearly increasing theta over the entry band."""
+        if self._theta_start_pct is None or self._theta_end_pct is None:
+            return self._theta_pct
+        start_elapsed = max(0.0, self._series.slug_step - self._entry_start_remaining_sec)
+        end_elapsed = max(start_elapsed, self._series.slug_step - self._entry_end_remaining_sec)
+        if end_elapsed <= start_elapsed:
+            return self._theta_end_pct
+        progress = (elapsed_sec - start_elapsed) / (end_elapsed - start_elapsed)
+        progress = max(0.0, min(1.0, progress))
+        return self._theta_start_pct + progress * (self._theta_end_pct - self._theta_start_pct)

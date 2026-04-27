@@ -76,7 +76,7 @@ nohup setsid bash -lc "
   fi
   printf '%s\n' \"\${RC}\" > '${RUN_DIR}/exit_code'
   date -u '+%Y-%m-%dT%H:%M:%SZ' > '${RUN_DIR}/finished_at'
-  find '${ROOT_DIR}/log' -maxdepth 1 -type f \\( -name '*_trade.log*' -o -name '*_trade.jsonl*' \\) -exec cp {} '${RUN_DIR}/' \\;
+  find '${ROOT_DIR}/log' -maxdepth 1 -type f -name '*_trade.jsonl*' -exec cp {} '${RUN_DIR}/' \\;
 " </dev/null >/dev/null 2>&1 &
 RUN_PID=$!
 
