@@ -371,16 +371,19 @@ exec env -u ALL_PROXY -u all_proxy -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u
   /opt/polybot/venv/bin/python "\${ROOT_DIR}/tools/collect_data.py" --market btc-updown-5m --windows ${ROUNDS}${collect_args_text}
 RUNSH
 chmod +x "\${RUN_DIR}/run.sh"
-nohup setsid bash -lc "
-  set -euo pipefail
-  RC=0
-  echo \"\$\$\" > '\${RUN_DIR}/pgid'
-  if ! '\${RUN_DIR}/run.sh' >'\${RUN_DIR}/stdout.log' 2>&1; then
-    RC=\$?
-  fi
-  printf '%s\n' \"\$RC\" > '\${RUN_DIR}/exit_code'
-  date -u '+%Y-%m-%dT%H:%M:%SZ' > '\${RUN_DIR}/finished_at'
-" </dev/null >/dev/null 2>&1 &
+cat > "\${RUN_DIR}/wrapper.sh" <<WRAP
+#!/usr/bin/env bash
+set -euo pipefail
+RC=0
+echo "\\\$\\\$" > "\${RUN_DIR}/pgid"
+if ! "\${RUN_DIR}/run.sh" >"\${RUN_DIR}/stdout.log" 2>&1; then
+  RC=\\\$?
+fi
+printf '%s\n' "\\\$RC" > "\${RUN_DIR}/exit_code"
+date -u '+%Y-%m-%dT%H:%M:%SZ' > "\${RUN_DIR}/finished_at"
+WRAP
+chmod +x "\${RUN_DIR}/wrapper.sh"
+nohup setsid "\${RUN_DIR}/wrapper.sh" </dev/null >/dev/null 2>&1 &
 RUN_PID=\$!
 echo "\${RUN_PID}" > "\${RUN_DIR}/pid"
 echo "PID=\${RUN_PID}" >> "\${RUN_DIR}/meta.env"
