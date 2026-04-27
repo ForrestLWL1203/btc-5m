@@ -19,6 +19,7 @@ usage:
   tools/vpsctl.sh stop     --host <ip> [--user root] [--run-id latest]
   tools/vpsctl.sh fetch    --host <ip> [--user root] [--run-id latest] [--dest remote_runs]
   tools/vpsctl.sh status   --host <ip> [--user root] [--run-id latest]
+  tools/vpsctl.sh collect  --host <ip> [--user root] [--windows 96] [--label LABEL] [collector args...]
   tools/vpsctl.sh probe    --host <ip> [--user root] --token-id <TOKEN> [extra probe args...]
 
 profile options:
@@ -58,6 +59,7 @@ TOKEN_ID=""
 VPS_PROFILE=""
 ACCOUNT_PROFILE=""
 RUN_EXTRA_ARGS=()
+COLLECT_ARGS=()
 PROFILE_HOME="${POLYBOT_PROFILE_HOME:-$DEFAULT_PROFILE_HOME}"
 
 EXPECT_TIMEOUT="${POLYBOT_EXPECT_TIMEOUT:-120}"
@@ -329,14 +331,93 @@ run_remote() {
   expect_ssh "$remote_cmd"
 }
 
+collect_remote() {
+  local collect_args_text=""
+  local arg quoted_arg
+  for arg in "${COLLECT_ARGS[@]}"; do
+    printf -v quoted_arg '%q' "$arg"
+    collect_args_text+=" ${quoted_arg}"
+  done
+  local label_arg="${LABEL:-collect}"
+  local remote_cmd
+  remote_cmd=$(cat <<EOF
+polybot-update && bash -lc '
+set -euo pipefail
+ROOT_DIR=/opt/polybot/current
+RUNS_DIR=/opt/polybot/log/collect_runs
+STAMP=\$(date -u "+%Y%m%dT%H%M%SZ")
+RUN_ID="\${STAMP}_${label_arg}"
+RUN_DIR="\${RUNS_DIR}/\${RUN_ID}"
+mkdir -p "\${RUN_DIR}"
+cd "\${RUN_DIR}"
+GIT_HEAD=\$(git -C "\${ROOT_DIR}" rev-parse --short HEAD)
+STARTED_AT=\$(date -u "+%Y-%m-%dT%H:%M:%SZ")
+cat > "\${RUN_DIR}/meta.env" <<META
+RUN_ID=\${RUN_ID}
+RUN_DIR=\${RUN_DIR}
+WINDOWS=${ROUNDS}
+GIT_HEAD=\${GIT_HEAD}
+STARTED_AT=\${STARTED_AT}
+ROOT_DIR=\${ROOT_DIR}
+EXTRA_ARGS=${collect_args_text}
+META
+cat > "\${RUN_DIR}/run.sh" <<RUNSH
+#!/usr/bin/env bash
+set -euo pipefail
+cd "\${RUN_DIR}"
+mkdir -p data
+exec env -u ALL_PROXY -u all_proxy -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy \\
+  PYTHONPATH="\${ROOT_DIR}" \\
+  /opt/polybot/venv/bin/python "\${ROOT_DIR}/tools/collect_data.py" --market btc-updown-5m --windows ${ROUNDS}${collect_args_text}
+RUNSH
+chmod +x "\${RUN_DIR}/run.sh"
+nohup setsid bash -lc "
+  set -euo pipefail
+  RC=0
+  echo \\"\\$\\$\\" > '\${RUN_DIR}/pgid'
+  if ! '\${RUN_DIR}/run.sh' >'\${RUN_DIR}/stdout.log' 2>&1; then
+    RC=\\$?
+  fi
+  printf '%s\\n' \\"\\${RC}\\" > '\${RUN_DIR}/exit_code'
+  date -u '+%Y-%m-%dT%H:%M:%SZ' > '\${RUN_DIR}/finished_at'
+" </dev/null >/dev/null 2>&1 &
+RUN_PID=\$!
+echo "\${RUN_PID}" > "\${RUN_DIR}/pid"
+echo "PID=\${RUN_PID}" >> "\${RUN_DIR}/meta.env"
+echo "PGID=\${RUN_PID}" >> "\${RUN_DIR}/meta.env"
+ln -sfn "\${RUN_DIR}" "\${RUNS_DIR}/latest"
+sleep 3
+STATUS=running
+EXIT_CODE_VALUE=""
+if [ -f "\${RUN_DIR}/exit_code" ]; then
+  STATUS=failed
+  EXIT_CODE_VALUE=\$(cat "\${RUN_DIR}/exit_code" 2>/dev/null || true)
+elif ! kill -0 "\${RUN_PID}" 2>/dev/null; then
+  STATUS=exited
+fi
+printf "RUN_ID=%s\\nRUN_DIR=%s\\nPID=%s\\nGIT_HEAD=%s\\nSTATUS=%s\\n" "\${RUN_ID}" "\${RUN_DIR}" "\${RUN_PID}" "\${GIT_HEAD}" "\${STATUS}"
+if [ -n "\${EXIT_CODE_VALUE}" ]; then
+  printf "EXIT_CODE=%s\\n" "\${EXIT_CODE_VALUE}"
+fi
+if [ -f "\${RUN_DIR}/stdout.log" ]; then
+  echo "STDOUT_TAIL_BEGIN"
+  tail -n 20 "\${RUN_DIR}/stdout.log" || true
+  echo "STDOUT_TAIL_END"
+fi
+'
+EOF
+)
+  expect_ssh "$remote_cmd"
+}
+
 stop_remote() {
-  local remote_cmd="RUN_DIR=\$(if [ '${RUN_ID}' = 'latest' ]; then readlink -f /opt/polybot/log/runs/latest; else echo /opt/polybot/log/runs/'${RUN_ID}'; fi); echo RUN_DIR=\$RUN_DIR; if [ ! -d \"\$RUN_DIR\" ]; then echo STATUS=no_run_dir; exit 0; fi; PID=\$(cat \"\$RUN_DIR/pid\" 2>/dev/null || true); PGID=\$(cat \"\$RUN_DIR/pgid\" 2>/dev/null || printf '%s' \"\$PID\"); [ -n \"\$PGID\" ] && kill -TERM -- -\"\$PGID\" 2>/dev/null || true; [ -n \"\$PID\" ] && kill -TERM \"\$PID\" 2>/dev/null || true; pkill -TERM -f '/opt/polybot/venv/bin/python run.py' 2>/dev/null || true; sleep 2; [ -n \"\$PGID\" ] && kill -KILL -- -\"\$PGID\" 2>/dev/null || true; pkill -KILL -f '/opt/polybot/venv/bin/python run.py' 2>/dev/null || true; sleep 1; REMAINING=\$(ps -eo pid,ppid,cmd | grep -E 'python.*run\\.py|polybot-run|remote_start_run|polybot-remote-start' | grep -v grep || true); printf '143\n' > \"\$RUN_DIR/exit_code\"; date -u '+%Y-%m-%dT%H:%M:%SZ' > \"\$RUN_DIR/finished_at\"; date -u '+%Y-%m-%dT%H:%M:%SZ' > \"\$RUN_DIR/stopped_at\"; if [ -n \"\$REMAINING\" ]; then echo STATUS=still_running; printf '%s\n' \"\$REMAINING\"; else echo STATUS=stopped; fi; echo PID=\$PID; echo PGID=\$PGID"
+  local remote_cmd="RUN_DIR=\$(if [ '${RUN_ID}' = 'latest' ]; then if [ -L /opt/polybot/log/runs/latest ]; then readlink -f /opt/polybot/log/runs/latest; else readlink -f /opt/polybot/log/collect_runs/latest; fi; elif [ -d /opt/polybot/log/runs/'${RUN_ID}' ]; then echo /opt/polybot/log/runs/'${RUN_ID}'; else echo /opt/polybot/log/collect_runs/'${RUN_ID}'; fi); echo RUN_DIR=\$RUN_DIR; if [ ! -d \"\$RUN_DIR\" ]; then echo STATUS=no_run_dir; exit 0; fi; PID=\$(cat \"\$RUN_DIR/pid\" 2>/dev/null || true); PGID=\$(cat \"\$RUN_DIR/pgid\" 2>/dev/null || printf '%s' \"\$PID\"); [ -n \"\$PGID\" ] && kill -TERM -- -\"\$PGID\" 2>/dev/null || true; [ -n \"\$PID\" ] && kill -TERM \"\$PID\" 2>/dev/null || true; pkill -TERM -f '/opt/polybot/venv/bin/python run.py' 2>/dev/null || true; pkill -TERM -f '/opt/polybot/venv/bin/python.*/tools/collect_data.py' 2>/dev/null || true; sleep 2; [ -n \"\$PGID\" ] && kill -KILL -- -\"\$PGID\" 2>/dev/null || true; pkill -KILL -f '/opt/polybot/venv/bin/python run.py' 2>/dev/null || true; pkill -KILL -f '/opt/polybot/venv/bin/python.*/tools/collect_data.py' 2>/dev/null || true; sleep 1; REMAINING=\$(ps -eo pid,ppid,cmd | grep -E 'python.*run\\.py|python.*collect_data\\.py|polybot-run|remote_start_run|polybot-remote-start' | grep -v grep || true); printf '143\n' > \"\$RUN_DIR/exit_code\"; date -u '+%Y-%m-%dT%H:%M:%SZ' > \"\$RUN_DIR/finished_at\"; date -u '+%Y-%m-%dT%H:%M:%SZ' > \"\$RUN_DIR/stopped_at\"; if [ -n \"\$REMAINING\" ]; then echo STATUS=still_running; printf '%s\n' \"\$REMAINING\"; else echo STATUS=stopped; fi; echo PID=\$PID; echo PGID=\$PGID"
   expect_ssh "$remote_cmd"
 }
 
 fetch_remote() {
   local remote_dir
-  remote_dir="$(expect_ssh "if [ '${RUN_ID}' = 'latest' ]; then readlink -f /opt/polybot/log/runs/latest; else echo /opt/polybot/log/runs/'${RUN_ID}'; fi")"
+  remote_dir="$(expect_ssh "if [ '${RUN_ID}' = 'latest' ]; then if [ -L /opt/polybot/log/runs/latest ]; then readlink -f /opt/polybot/log/runs/latest; else readlink -f /opt/polybot/log/collect_runs/latest; fi; elif [ -d /opt/polybot/log/runs/'${RUN_ID}' ]; then echo /opt/polybot/log/runs/'${RUN_ID}'; else echo /opt/polybot/log/collect_runs/'${RUN_ID}'; fi")"
   remote_dir="$(printf '%s\n' "$remote_dir" | tail -n 1 | tr -d '\r')"
   [ -n "$remote_dir" ] || die "remote run dir not found"
   local host_safe="${HOST//./_}"
@@ -347,7 +428,7 @@ fetch_remote() {
 }
 
 status_remote() {
-  local remote_cmd="RUN_DIR=\$(if [ '${RUN_ID}' = 'latest' ]; then readlink -f /opt/polybot/log/runs/latest; else echo /opt/polybot/log/runs/'${RUN_ID}'; fi); echo RUN_DIR=\$RUN_DIR; if [ -f \"\$RUN_DIR/meta.env\" ]; then cat \"\$RUN_DIR/meta.env\"; fi; LIVE=\$(ps -eo pid,ppid,cmd | grep -E 'python.*run\\.py|polybot-run|remote_start_run|polybot-remote-start' | grep -v grep || true); if [ -n \"\$LIVE\" ]; then echo STATUS=running; printf '%s\n' \"\$LIVE\"; elif [ -f \"\$RUN_DIR/exit_code\" ]; then CODE=\$(cat \"\$RUN_DIR/exit_code\"); if [ \"\$CODE\" = '143' ] && [ -f \"\$RUN_DIR/stopped_at\" ]; then echo STATUS=stopped; else echo STATUS=done; fi; echo EXIT_CODE=\$CODE; elif [ -f \"\$RUN_DIR/pid\" ]; then echo STATUS=stopped_no_exit; echo PID=\$(cat \"\$RUN_DIR/pid\"); else echo STATUS=unknown; fi"
+  local remote_cmd="RUN_DIR=\$(if [ '${RUN_ID}' = 'latest' ]; then if [ -L /opt/polybot/log/runs/latest ]; then readlink -f /opt/polybot/log/runs/latest; else readlink -f /opt/polybot/log/collect_runs/latest; fi; elif [ -d /opt/polybot/log/runs/'${RUN_ID}' ]; then echo /opt/polybot/log/runs/'${RUN_ID}'; else echo /opt/polybot/log/collect_runs/'${RUN_ID}'; fi); echo RUN_DIR=\$RUN_DIR; if [ -f \"\$RUN_DIR/meta.env\" ]; then cat \"\$RUN_DIR/meta.env\"; fi; PID=\$(cat \"\$RUN_DIR/pid\" 2>/dev/null || true); LIVE=\"\"; if [ -n \"\$PID\" ]; then LIVE=\$(ps -p \"\$PID\" -o pid=,ppid=,cmd= 2>/dev/null || true); fi; if [ -z \"\$LIVE\" ]; then LIVE=\$(ps -eo pid,ppid,cmd | grep -E 'python.*run\\.py|python.*collect_data\\.py|polybot-run|remote_start_run|polybot-remote-start' | grep -v grep || true); fi; if [ -n \"\$LIVE\" ]; then echo STATUS=running; printf '%s\n' \"\$LIVE\"; elif [ -f \"\$RUN_DIR/exit_code\" ]; then CODE=\$(cat \"\$RUN_DIR/exit_code\"); if [ \"\$CODE\" = '143' ] && [ -f \"\$RUN_DIR/stopped_at\" ]; then echo STATUS=stopped; else echo STATUS=done; fi; echo EXIT_CODE=\$CODE; elif [ -f \"\$RUN_DIR/pid\" ]; then echo STATUS=stopped_no_exit; echo PID=\$(cat \"\$RUN_DIR/pid\"); else echo STATUS=unknown; fi"
   expect_ssh "$remote_cmd"
 }
 
@@ -476,6 +557,35 @@ case "$subcommand" in
       esac
     done
     status_remote
+    ;;
+  collect)
+    COLLECT_ARGS=(--slim --no-snap --poly-min-interval-ms 100)
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --windows)
+          ROUNDS="$2"
+          shift 2
+          ;;
+        --label)
+          LABEL="$2"
+          shift 2
+          ;;
+        --)
+          shift
+          COLLECT_ARGS=("$@")
+          break
+          ;;
+        -h|--help)
+          usage
+          exit 0
+          ;;
+        *)
+          COLLECT_ARGS+=("$1")
+          shift
+          ;;
+      esac
+    done
+    collect_remote
     ;;
   probe)
     probe_args=()

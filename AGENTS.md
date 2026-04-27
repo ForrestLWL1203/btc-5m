@@ -97,7 +97,7 @@ Stop-loss behavior when enabled:
 - `polybot/config_loader.py` — YAML loader and object builders
 - `polybot/runtime_config.py` — `--preset` / `--config` assembly
 - `polybot/runtime_inputs.py` — CLI/UI input schema and validation
-- `tools/vpsctl.sh` — bootstrap/run/status/stop/fetch/probe for VPS
+- `tools/vpsctl.sh` — bootstrap/run/status/stop/fetch/collect/probe for VPS
 - `tools/remote_start_run.sh` — remote unattended wrapper installed by `vpsctl`
 - `tools/collect_data.py` — collector
 - `tools/probe_post_order_latency.py` — intentional-fail `/order` latency probe
@@ -139,6 +139,17 @@ bash tools/vpsctl.sh status --vps-profile <vps_name> --run-id latest
 bash tools/vpsctl.sh stop --vps-profile <vps_name> --run-id latest
 bash tools/vpsctl.sh fetch --vps-profile <vps_name> --run-id latest
 ```
+
+VPS collect:
+
+```bash
+bash tools/vpsctl.sh collect --vps-profile <vps_name> --windows 96 --label collect96
+bash tools/vpsctl.sh status --vps-profile <vps_name> --run-id <collect_run_id>
+bash tools/vpsctl.sh fetch --vps-profile <vps_name> --run-id <collect_run_id>
+```
+
+`collect` defaults to `--slim --no-snap --poly-min-interval-ms 100`. Pass
+collector arguments after `--` to override the default argument set.
 
 Always use `--vps-profile` for VPS commands so host/user/password are loaded
 from profile. Do not run raw `ssh`/`scp` for stop/status unless profile password

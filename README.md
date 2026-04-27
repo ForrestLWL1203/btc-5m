@@ -83,7 +83,7 @@ Behavior:
 - [polybot/trading/trading.py](/Users/forrestliao/workspace/polybot/trading/trading.py) — Polymarket CLOB order execution
 - [polybot/runtime_config.py](/Users/forrestliao/workspace/polybot/runtime_config.py) — preset/config startup assembly
 - [polybot/runtime_inputs.py](/Users/forrestliao/workspace/polybot/runtime_inputs.py) — CLI/UI input schema and validation
-- [tools/vpsctl.sh](/Users/forrestliao/workspace/tools/vpsctl.sh) — bootstrap/run/status/stop/fetch/probe on VPS
+- [tools/vpsctl.sh](/Users/forrestliao/workspace/tools/vpsctl.sh) — bootstrap/run/status/stop/fetch/collect/probe on VPS
 - [tools/remote_start_run.sh](/Users/forrestliao/workspace/tools/remote_start_run.sh) — remote unattended run wrapper installed by `vpsctl`
 - [tools/collect_data.py](/Users/forrestliao/workspace/tools/collect_data.py) — BTC + Polymarket collector
 - [tools/probe_post_order_latency.py](/Users/forrestliao/workspace/tools/probe_post_order_latency.py) — intentional-fail `/order` latency probe
@@ -246,6 +246,17 @@ Fetch logs:
 ```bash
 bash tools/vpsctl.sh fetch --vps-profile sweden --run-id latest
 ```
+
+Collect data remotely:
+
+```bash
+bash tools/vpsctl.sh collect --vps-profile sweden --windows 96 --label collect96
+bash tools/vpsctl.sh status --vps-profile sweden --run-id <collect_run_id>
+bash tools/vpsctl.sh fetch --vps-profile sweden --run-id <collect_run_id>
+```
+
+Remote `collect` defaults to `--slim --no-snap --poly-min-interval-ms 100`.
+Pass collector arguments after `--` to replace that default set.
 
 Runs persist one structured analysis log:
 `log/runs/<RUN_ID>/<market>_trade.jsonl`. Human-readable logs are stdout/stderr
