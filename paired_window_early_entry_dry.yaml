@@ -8,24 +8,17 @@ strategy:
   persistence_sec: 10
   entry_start_remaining_sec: 255
   entry_end_remaining_sec: 180
-  max_entry_price: 0.68
+  max_entry_price: 0.72
   min_move_ratio: 0.7
-  strength_caps:
-    - threshold: 2.0
-      max_entry_price: 0.72
-    - threshold: 3.5
-      max_entry_price: 0.75
 
 params:
   amount: 1.0
-  entry_ask_level: 6
+  entry_ask_level: 7
+  low_price_threshold: 0.60
+  low_price_entry_ask_level: 9
   amount_tiers:
     - threshold: 2.0
       amount: 1.5
-  normal_full_cap_guard:
-    enabled: true
-    min_signal_strength: 1.05
-    min_remaining_sec: 210
   max_entries_per_window: 1
 
 risk:

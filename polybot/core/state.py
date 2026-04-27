@@ -30,14 +30,18 @@ class MonitorState:
     entry_amount: float = 0.0
     last_entry_check_side: Optional[str] = None  # target side for the last entry-band check
     last_entry_check_best_ask: Optional[float] = None  # target ask used by the last entry-band check
-    last_guard_skip_side: Optional[str] = None
-    last_guard_skip_best_ask: Optional[float] = None
-    last_guard_skip_max_entry_price: Optional[float] = None
-    last_guard_skip_reason: Optional[str] = None
     last_signal_eval_key: Optional[tuple] = None
     last_signal_eval_logged_at: float = 0.0
     last_depth_skip_key: Optional[tuple] = None
     last_depth_skip_logged_at: float = 0.0
+    depth_skip_count: int = 0
+    depth_skip_first_logged: bool = False
+    depth_skip_last_reason: Optional[str] = None
+    depth_skip_min_best_ask: Optional[float] = None
+    depth_skip_max_best_ask: Optional[float] = None
+    depth_skip_min_entry_ask: Optional[float] = None
+    depth_skip_max_entry_ask: Optional[float] = None
+    depth_skip_max_notional: float = 0.0
     trade_lock: asyncio.Lock = None  # prevents concurrent buy/sell from WS callbacks
     started: bool = False  # set True when window officially starts — prevents pre-start trades
 

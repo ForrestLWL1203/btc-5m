@@ -95,17 +95,6 @@ RUNTIME_INPUT_FIELDS: tuple[RuntimeInputField, ...] = (
         coerce=float,
     ),
     RuntimeInputField(
-        name="min_entry_price",
-        config_path=("strategy", "min_entry_price"),
-        value_type="float",
-        minimum=0.0,
-        maximum=0.99,
-        description="Deprecated legacy floor; ignored by current runtime",
-        ui_exposed=False,
-        cli_flag="--min-entry-price",
-        coerce=float,
-    ),
-    RuntimeInputField(
         name="entry_start",
         config_path=("strategy", "entry_start_remaining_sec"),
         value_type="float",
@@ -123,39 +112,6 @@ RUNTIME_INPUT_FIELDS: tuple[RuntimeInputField, ...] = (
         maximum=300.0,
         description="Entry band end remaining seconds",
         cli_flag="--entry-end",
-        coerce=float,
-    ),
-    RuntimeInputField(
-        name="early_entry_start",
-        config_path=("strategy", "early_entry_start_remaining_sec"),
-        value_type="float",
-        minimum=1.0,
-        maximum=300.0,
-        description="Early-entry start remaining seconds",
-        ui_exposed=False,
-        cli_flag="--early-entry-start",
-        coerce=float,
-    ),
-    RuntimeInputField(
-        name="early_entry_strength",
-        config_path=("strategy", "early_entry_strength_threshold"),
-        value_type="float",
-        minimum=0.1,
-        maximum=20.0,
-        description="Early-entry signal strength threshold",
-        ui_exposed=False,
-        cli_flag="--early-entry-strength",
-        coerce=float,
-    ),
-    RuntimeInputField(
-        name="early_entry_past_strength",
-        config_path=("strategy", "early_entry_past_strength_threshold"),
-        value_type="float",
-        minimum=0.0,
-        maximum=20.0,
-        description="Early-entry past signal strength threshold",
-        ui_exposed=False,
-        cli_flag="--early-entry-past-strength",
         coerce=float,
     ),
     RuntimeInputField(
@@ -191,6 +147,28 @@ RUNTIME_INPUT_FIELDS: tuple[RuntimeInputField, ...] = (
         coerce=int,
     ),
     RuntimeInputField(
+        name="low_price_threshold",
+        config_path=("params", "low_price_threshold"),
+        value_type="float",
+        minimum=0.0,
+        maximum=1.0,
+        description="Use a deeper ask level when target-leg top ask is below this price",
+        ui_exposed=False,
+        cli_flag="--low-price-threshold",
+        coerce=float,
+    ),
+    RuntimeInputField(
+        name="low_price_entry_ask_level",
+        config_path=("params", "low_price_entry_ask_level"),
+        value_type="int",
+        minimum=1,
+        maximum=20,
+        description="Ask-book level used when top ask is below low_price_threshold",
+        ui_exposed=False,
+        cli_flag="--low-price-entry-ask-level",
+        coerce=int,
+    ),
+    RuntimeInputField(
         name="max_entries",
         config_path=("params", "max_entries_per_window"),
         value_type="int",
@@ -199,28 +177,6 @@ RUNTIME_INPUT_FIELDS: tuple[RuntimeInputField, ...] = (
         description="Max entries per window",
         cli_flag="--max-entries",
         coerce=int,
-    ),
-    RuntimeInputField(
-        name="normal_full_cap_min_strength",
-        config_path=("params", "normal_full_cap_guard", "min_signal_strength"),
-        value_type="float",
-        minimum=0.0,
-        maximum=20.0,
-        description="Min strength for normal full-cap entries",
-        ui_exposed=False,
-        cli_flag="--normal-full-cap-min-strength",
-        coerce=float,
-    ),
-    RuntimeInputField(
-        name="normal_full_cap_min_remaining",
-        config_path=("params", "normal_full_cap_guard", "min_remaining_sec"),
-        value_type="float",
-        minimum=0.0,
-        maximum=300.0,
-        description="Min remaining seconds for normal full-cap entries",
-        ui_exposed=False,
-        cli_flag="--normal-full-cap-min-remaining",
-        coerce=float,
     ),
     RuntimeInputField(
         name="consecutive_loss_amount",
@@ -298,11 +254,3 @@ def _validate_runtime_input_relationships(values: dict[str, Any]) -> None:
     entry_end = values.get("entry_end")
     if entry_start is not None and entry_end is not None and entry_start <= entry_end:
         raise ValueError("entry_start must be greater than entry_end")
-
-    early_start = values.get("early_entry_start")
-    if (
-        early_start is not None
-        and entry_start is not None
-        and early_start < entry_start
-    ):
-        raise ValueError("early_entry_start must be >= entry_start")

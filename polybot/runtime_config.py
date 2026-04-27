@@ -18,7 +18,6 @@ from polybot.runtime_inputs import (
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
 PRESET_PATHS = {
-    "conservative": _REPO_ROOT / "paired_window_cap61_5r_live.yaml",
     "enhanced": _REPO_ROOT / "paired_window_early_entry_dry.yaml",
 }
 
@@ -48,20 +47,6 @@ def add_runtime_config_args(parser: argparse.ArgumentParser) -> None:
             choices=list(field.choices) if field.choices is not None else None,
             help=field.description,
         )
-    parser.add_argument(
-        "--normal-full-cap-guard",
-        dest="normal_full_cap_guard",
-        action="store_true",
-        help="Enable the normal full-cap guard",
-    )
-    parser.add_argument(
-        "--no-normal-full-cap-guard",
-        dest="normal_full_cap_guard",
-        action="store_false",
-        help="Disable the normal full-cap guard",
-    )
-    parser.set_defaults(normal_full_cap_guard=None)
-
 def build_runtime_config(args: argparse.Namespace) -> dict:
     """Build the effective runtime config from preset/config and CLI overrides."""
     if bool(args.config) == bool(args.preset):
@@ -87,13 +72,6 @@ def _apply_cli_overrides(cfg: dict, args: argparse.Namespace) -> None:
     }
     overrides = validate_runtime_inputs(raw_overrides, include_advanced=True)
     apply_runtime_overrides(cfg, overrides)
-
-    if args.normal_full_cap_guard is not None:
-        _set_path(
-            cfg,
-            ("params", "normal_full_cap_guard", "enabled"),
-            args.normal_full_cap_guard,
-        )
 
 
 def apply_runtime_overrides(cfg: dict, overrides: dict[str, Any]) -> None:

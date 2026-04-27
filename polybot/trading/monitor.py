@@ -35,7 +35,6 @@ log = logging.getLogger(__name__)
 _PREOPEN_BUFFER = 10  # seconds before window start to wake up
 _STARTED_SKIP_THRESHOLD = 60  # allow attaching to a window within its first minute
 _SIGNAL_EVAL_LOG_INTERVAL_SEC = 5.0
-_DEPTH_SKIP_LOG_INTERVAL_SEC = 10.0
 _DEPTH_ENTRY_SKIP_LEVELS = 1
 _DEPTH_PREVIEW_LEVELS = 6
 
@@ -124,6 +123,8 @@ def _cap_limited_depth_quote(
     max_age_sec: Optional[float] = None,
     skip_levels: int = _DEPTH_ENTRY_SKIP_LEVELS,
     min_entry_level: int = 1,
+    low_price_threshold: Optional[float] = None,
+    low_price_entry_level: Optional[int] = None,
     buffer_ticks: Optional[float] = None,
 ) -> CapDepthQuote:
     """Return the first ask level where cap-limited depth can cover amount.
@@ -152,6 +153,13 @@ def _cap_limited_depth_quote(
     best_ask_level_1 = levels[0][0] if levels else _best_ask_level_1(ws, token_id)
     preview = levels[:_DEPTH_PREVIEW_LEVELS]
     min_entry_level = max(1, int(min_entry_level))
+    if (
+        best_ask_level_1 is not None
+        and low_price_threshold is not None
+        and low_price_entry_level is not None
+        and best_ask_level_1 < low_price_threshold
+    ):
+        min_entry_level = max(min_entry_level, int(low_price_entry_level))
     min_entry_index = min_entry_level - 1
     if not levels or max_entry_price is None:
         return CapDepthQuote(
@@ -212,25 +220,34 @@ def _log_depth_skip(
     amount: float,
     reason: str,
 ) -> None:
-    now = time.monotonic()
-    price_bucket = None
+    state.depth_skip_count += 1
+    state.depth_skip_last_reason = reason
+    state.depth_skip_max_notional = max(state.depth_skip_max_notional, quote.cap_notional)
     if quote.best_ask_level_1 is not None:
-        price_bucket = round(quote.best_ask_level_1, 2)
-    key = (
-        side,
-        price_bucket,
-        quote.entry_ask_level,
-        round(max_entry_price, 6) if max_entry_price is not None else None,
-        round(amount, 6),
-        reason,
-    )
-    if (
-        state.last_depth_skip_key == key
-        and now - state.last_depth_skip_logged_at < _DEPTH_SKIP_LOG_INTERVAL_SEC
-    ):
+        state.depth_skip_min_best_ask = (
+            quote.best_ask_level_1
+            if state.depth_skip_min_best_ask is None
+            else min(state.depth_skip_min_best_ask, quote.best_ask_level_1)
+        )
+        state.depth_skip_max_best_ask = (
+            quote.best_ask_level_1
+            if state.depth_skip_max_best_ask is None
+            else max(state.depth_skip_max_best_ask, quote.best_ask_level_1)
+        )
+    if quote.price is not None:
+        state.depth_skip_min_entry_ask = (
+            quote.price
+            if state.depth_skip_min_entry_ask is None
+            else min(state.depth_skip_min_entry_ask, quote.price)
+        )
+        state.depth_skip_max_entry_ask = (
+            quote.price
+            if state.depth_skip_max_entry_ask is None
+            else max(state.depth_skip_max_entry_ask, quote.price)
+        )
+    if state.depth_skip_first_logged:
         return
-    state.last_depth_skip_key = key
-    state.last_depth_skip_logged_at = now
+    state.depth_skip_first_logged = True
     _log_signal_eval(
         state,
         side,
@@ -274,9 +291,7 @@ def _price_hint_refresher(
         trade_amount = trade_config.amount_for_signal_strength(
             state.target_signal_strength if state is not None else None
         )
-        entry_ask_level = trade_config.ask_level_for_signal_strength(
-            state.target_signal_strength if state is not None else None
-        )
+        entry_ask_level = trade_config.base_entry_ask_level()
         quote = _cap_limited_depth_quote(
             ws,
             token_id,
@@ -284,6 +299,8 @@ def _price_hint_refresher(
             max_entry_price,
             max_age_sec=config.FAK_RETRY_MAX_BEST_ASK_AGE_SEC,
             min_entry_level=entry_ask_level,
+            low_price_threshold=trade_config.low_price_threshold,
+            low_price_entry_level=trade_config.low_price_entry_ask_level,
             buffer_ticks=config.FAK_RETRY_PRICE_HINT_BUFFER_TICKS,
         )
         if not quote.enough:
@@ -307,21 +324,6 @@ def _price_hint_refresher(
         return quote.price_hint
 
     return refresh
-
-
-def _normal_full_cap_guard_reason(
-    trade_config: TradeConfig,
-    state: MonitorState,
-    best_ask: Optional[float],
-    max_entry_price: Optional[float],
-) -> Optional[str]:
-    return trade_config.normal_full_cap_guard_reason(
-        confidence=state.target_signal_confidence,
-        best_ask=best_ask,
-        max_entry_price=max_entry_price,
-        signal_strength=state.target_signal_strength,
-        remaining_sec=state.target_remaining_sec,
-    )
 
 
 def _log_signal_eval(
@@ -385,63 +387,6 @@ def _best_ask_level_1(ws: PriceStream, token_id: str) -> Optional[float]:
         max_age_sec=config.FAK_RETRY_MAX_BEST_ASK_AGE_SEC,
         level=1,
     )
-
-
-def _log_entry_guard_skip(
-    window: MarketWindow,
-    state: MonitorState,
-    side: str,
-    best_ask: float,
-    max_entry_price: Optional[float],
-    reason: str,
-) -> None:
-    log_event(log, logging.INFO, SIGNAL, {
-        "action": "ENTRY_GUARD_SKIP",
-        "reason": reason,
-        "side": side.upper(),
-        "window": window.short_label,
-        "price": best_ask,
-        "max_entry_price": max_entry_price,
-        "confidence": state.target_signal_confidence,
-        "signal_strength": (
-            round(state.target_signal_strength, 3)
-            if state.target_signal_strength is not None
-            else None
-        ),
-        "remaining_sec": (
-            round(state.target_remaining_sec)
-            if state.target_remaining_sec is not None
-            else None
-        ),
-    })
-
-
-def _should_log_entry_guard_skip(
-    state: MonitorState,
-    side: str,
-    best_ask: float,
-    max_entry_price: Optional[float],
-    reason: str,
-) -> bool:
-    if (
-        state.last_guard_skip_side == side
-        and state.last_guard_skip_best_ask == best_ask
-        and state.last_guard_skip_max_entry_price == max_entry_price
-        and state.last_guard_skip_reason == reason
-    ):
-        return False
-    state.last_guard_skip_side = side
-    state.last_guard_skip_best_ask = best_ask
-    state.last_guard_skip_max_entry_price = max_entry_price
-    state.last_guard_skip_reason = reason
-    return True
-
-
-def _clear_entry_guard_skip_cache(state: MonitorState) -> None:
-    state.last_guard_skip_side = None
-    state.last_guard_skip_best_ask = None
-    state.last_guard_skip_max_entry_price = None
-    state.last_guard_skip_reason = None
 
 
 def _entry_ask_changed(state: MonitorState, side: str, best_ask: Optional[float]) -> bool:
@@ -609,12 +554,23 @@ def _sanitize_next_window(current_window: MarketWindow, next_window: Optional[Ma
 
 def _log_window_summary(state: MonitorState, window: MarketWindow, dry_run: bool) -> None:
     """Emit a compact end-of-window summary."""
-    log_event(log, logging.INFO, WINDOW, {
+    data = {
         "action": "SUMMARY",
         "window": window.short_label,
         "entries": state.entry_count,
         "blocked_window_cap": state.buy_blocked_window_cap,
-    })
+    }
+    if state.depth_skip_count > 0:
+        data.update({
+            "depth_skip_count": state.depth_skip_count,
+            "depth_skip_last_reason": state.depth_skip_last_reason,
+            "depth_skip_min_best_ask": state.depth_skip_min_best_ask,
+            "depth_skip_max_best_ask": state.depth_skip_max_best_ask,
+            "depth_skip_min_entry_ask": state.depth_skip_min_entry_ask,
+            "depth_skip_max_entry_ask": state.depth_skip_max_entry_ask,
+            "depth_skip_max_notional": round(state.depth_skip_max_notional, 4),
+        })
+    log_event(log, logging.INFO, WINDOW, data)
 
 
 def _side_token(window: MarketWindow, side: str) -> tuple[str, str]:
@@ -829,6 +785,14 @@ async def monitor_window(
     state.last_signal_eval_logged_at = 0.0
     state.last_depth_skip_key = None
     state.last_depth_skip_logged_at = 0.0
+    state.depth_skip_count = 0
+    state.depth_skip_first_logged = False
+    state.depth_skip_last_reason = None
+    state.depth_skip_min_best_ask = None
+    state.depth_skip_max_best_ask = None
+    state.depth_skip_min_entry_ask = None
+    state.depth_skip_max_entry_ask = None
+    state.depth_skip_max_notional = 0.0
     state.entry_amount = 0.0
     state.last_entry_check_side = None
     state.last_entry_check_best_ask = None
@@ -910,7 +874,7 @@ async def monitor_window(
                 if state.target_side is not None:
                     buy_token_id, price_token_id = _side_token(window, state.target_side)
                 trade_amount = trade_config.amount_for_signal_strength(state.target_signal_strength)
-                entry_ask_level = trade_config.ask_level_for_signal_strength(state.target_signal_strength)
+                entry_ask_level = trade_config.base_entry_ask_level()
                 max_entry_price = _entry_price_cap(strategy, state)
                 quote = _cap_limited_depth_quote(
                     ws,
@@ -919,16 +883,8 @@ async def monitor_window(
                     max_entry_price,
                     max_age_sec=config.FAK_RETRY_MAX_BEST_ASK_AGE_SEC,
                     min_entry_level=entry_ask_level,
-                )
-                _log_signal_eval(
-                    state,
-                    state.target_side or side,
-                    opening_price,
-                    quote.best_ask_level_1,
-                    quote.price,
-                    max_entry_price,
-                    depth_notional=quote.cap_notional,
-                    depth_levels_used=quote.levels_used,
+                    low_price_threshold=trade_config.low_price_threshold,
+                    low_price_entry_level=trade_config.low_price_entry_ask_level,
                 )
                 if not quote.enough:
                     state.target_entry_price = None
@@ -942,33 +898,19 @@ async def monitor_window(
                         "cap-limited book depth insufficient",
                     )
                 else:
-                    guard_reason = _normal_full_cap_guard_reason(
-                        trade_config,
+                    _log_signal_eval(
                         state,
-                        quote.price_hint,
+                        state.target_side or side,
+                        opening_price,
+                        quote.best_ask_level_1,
+                        quote.price,
                         max_entry_price,
+                        depth_notional=quote.cap_notional,
+                        depth_levels_used=quote.levels_used,
                     )
-                    if guard_reason is not None:
-                        state.target_entry_price = None
-                        if _should_log_entry_guard_skip(
-                            state,
-                            state.target_side or side,
-                            quote.price_hint,
-                            max_entry_price,
-                            guard_reason,
-                        ):
-                            _log_entry_guard_skip(
-                                window,
-                                state,
-                                state.target_side or side,
-                                quote.price_hint,
-                                max_entry_price,
-                                guard_reason,
-                            )
-                    elif not _entry_ask_changed(state, state.target_side or side, quote.price_hint):
+                    if not _entry_ask_changed(state, state.target_side or side, quote.price_hint):
                         state.target_entry_price = None
                     else:
-                        _clear_entry_guard_skip_cache(state)
                         state.target_entry_price = quote.price
                         await _handle_opening_price(
                             window, state, buy_token_id, opening_price, dry_run, trade_config, strategy, state.target_side or side,
@@ -1080,7 +1022,7 @@ async def _on_price_update(
                     effective_side = state.target_side
                     buy_token_id, _ = _side_token(window, effective_side)
                 trade_amount = trade_config.amount_for_signal_strength(state.target_signal_strength)
-                entry_ask_level = trade_config.ask_level_for_signal_strength(state.target_signal_strength)
+                entry_ask_level = trade_config.base_entry_ask_level()
                 max_entry_price = _entry_price_cap(strategy, state)
                 quote = _cap_limited_depth_quote(
                     ws,
@@ -1089,16 +1031,8 @@ async def _on_price_update(
                     max_entry_price,
                     max_age_sec=config.FAK_RETRY_MAX_BEST_ASK_AGE_SEC,
                     min_entry_level=entry_ask_level,
-                )
-                _log_signal_eval(
-                    state,
-                    effective_side,
-                    price,
-                    quote.best_ask_level_1,
-                    quote.price,
-                    max_entry_price,
-                    depth_notional=quote.cap_notional,
-                    depth_levels_used=quote.levels_used,
+                    low_price_threshold=trade_config.low_price_threshold,
+                    low_price_entry_level=trade_config.low_price_entry_ask_level,
                 )
                 if not quote.enough:
                     state.target_entry_price = None
@@ -1112,31 +1046,16 @@ async def _on_price_update(
                         "cap-limited book depth insufficient",
                     )
                     return
-                guard_reason = _normal_full_cap_guard_reason(
-                    trade_config,
+                _log_signal_eval(
                     state,
-                    quote.price_hint,
+                    effective_side,
+                    price,
+                    quote.best_ask_level_1,
+                    quote.price,
                     max_entry_price,
+                    depth_notional=quote.cap_notional,
+                    depth_levels_used=quote.levels_used,
                 )
-                if guard_reason is not None:
-                    state.target_entry_price = None
-                    if _should_log_entry_guard_skip(
-                        state,
-                        effective_side,
-                        quote.price_hint,
-                        max_entry_price,
-                        guard_reason,
-                    ):
-                        _log_entry_guard_skip(
-                            window,
-                            state,
-                            effective_side,
-                            quote.price_hint,
-                            max_entry_price,
-                            guard_reason,
-                        )
-                    return
-                _clear_entry_guard_skip_cache(state)
                 if not _entry_ask_changed(state, effective_side, quote.price_hint):
                     state.target_entry_price = None
                     return

@@ -4,5 +4,10 @@ __pycache__/
 .DS_Store
 .env
 .claude/
+.agents/
+.codex/
+.codex-plugins/
 log/
+trading.log
 /data/
+remote_runs/

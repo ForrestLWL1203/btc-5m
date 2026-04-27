@@ -133,7 +133,7 @@ async def _post_fak_market(
 
     FAK fills as much as possible immediately and cancels the rest.
     Partial fills are accepted — only retries when sizeFilled == 0 (zero depth).
-    Matches Polymarket web UI behavior, avoiding FOK "couldn't be fully filled" 400s.
+    Matches Polymarket web UI behavior and avoids all-or-nothing fill failures.
     """
     side_const = BUY if side == BUY else SELL
     engine_retry = 0

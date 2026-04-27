@@ -1,71 +1,19 @@
 # AGENTS.md - Implementation Guidance
 
-## Project Status (2026-04-26)
+## Project Status
 
-**Polymarket BTC 5-Minute Binary Options Trading Bot**
+Polymarket BTC 5-minute UP/DOWN bot. Status: live-capable.
 
-Status: ✅ **LIVE CAPABLE**
+Current rule: `paired_window` is the only active runtime strategy. Do not
+restore historical strategies, conservative configs, TP/SL, reversal, re-entry,
+dynamic strength caps, early-entry bypass, or theoretical `1 - up_price`
+execution gating unless the user explicitly asks and fresh tests are added.
 
-- Single active runtime strategy: `paired_window`
-- Reference dataset: 96-window / 8-hour capture
-- Current local tests: `135 passed`
-- Risk management integrated
-- Conservative live YAML remains available
-- Latest enhanced YAML uses 45s+ entries + max-only strength-tier caps
+## Current Strategy
 
-## Core Runtime Components
+Active config: `paired_window_early_entry_dry.yaml`.
 
-**Strategy & Execution**
-
-- `polybot/strategies/paired_window.py` — BTC window-open signal,
-  persistence check, direction lock, strength-tier caps
-- `polybot/trading/monitor.py` — window lifecycle, target-leg book-depth
-  gating, buy path, FAK price hints, retry path, risk pauses, shutdown handling
-- `polybot/trading/trading.py` — FAK order execution via Polymarket CLOB
-- `polybot/core/state.py` — `MonitorState` with per-window and daily risk state
-- `polybot/config_loader.py` — YAML loading
-- `polybot/runtime_config.py` — preset/config startup assembly for CLI and future UI/API
-- `polybot/runtime_inputs.py` — shared runtime parameter schema, validation, and config-path mapping
-- `polybot/market/binance.py` — BTC WS feed + REST kline fallback
-
-**Analysis & Tooling**
-
-- `analysis/analyze_paired_strategy.py` — primary backtest tool
-- `tools/collect_data.py` — BTC + Polymarket data collection
-- `tools/probe_post_order_latency.py` — probe `/order` latency with
-  intentionally unfillable orders
-
-## Configs
-
-### Conservative Live Config
-
-Active live YAML:
-`paired_window_cap61_5r_live.yaml`
-
-```yaml
-strategy:
-  type: paired_window
-  theta_pct: 0.03
-  persistence_sec: 10
-  entry_start_remaining_sec: 240
-  entry_end_remaining_sec: 120
-  max_entry_price: 0.65
-  min_move_ratio: 0.7
-
-params:
-  amount: 1.0
-  max_entries_per_window: 1
-```
-
-Execution is max-only by default: enough level-2+ WS book depth must exist
-inside `max_entry_price=0.65`.
-
-### Latest Enhanced Test/Live Config
-
-Enhanced YAML:
-`paired_window_early_entry_dry.yaml`
-
-Despite the filename, it becomes live when run without `--dry`.
+The filename contains `dry`, but live/dry is controlled only by `--dry`.
 
 ```yaml
 strategy:
@@ -74,279 +22,136 @@ strategy:
   persistence_sec: 10
   entry_start_remaining_sec: 255
   entry_end_remaining_sec: 180
-  max_entry_price: 0.68
+  max_entry_price: 0.72
   min_move_ratio: 0.7
-  strength_caps:
-    - threshold: 2.0
-      max_entry_price: 0.72
-    - threshold: 3.5
-      max_entry_price: 0.75
 
 params:
   amount: 1.0
-  entry_ask_level: 6
+  entry_ask_level: 7
+  low_price_threshold: 0.60
+  low_price_entry_ask_level: 9
   amount_tiers:
     - threshold: 2.0
       amount: 1.5
-  normal_full_cap_guard:
-    enabled: true
-    min_signal_strength: 1.05
-    min_remaining_sec: 210
   max_entries_per_window: 1
-
-risk:
-  consecutive_loss_amount: 3.0
-  daily_loss_amount: 5.0
-  consecutive_loss_pause_windows: 2
-  daily_loss_pause_windows: 5
 ```
 
-Enhanced behavior:
+Runtime behavior:
 
-- base cap is `0.68`
-- entries start at `remaining=255s`, i.e. 45 seconds into the 5-minute window
-- no early-entry bypass; strong signals do not enter before 45s
-- entry pricing uses cap-limited WS order-book depth from level 2 onward
-- first BUY hint uses at least ask level 6 (`best ask +5`), then clamps to cap
-- `signal_strength >= 2.0x` -> cap `0.72`
-- `signal_strength >= 3.5x` -> cap `0.75`
-- `signal_strength >= 2.0x` -> amount `1.5`
-- normal full-cap guard: if a normal-confidence entry is priced at the active
-  base cap, skip it when strength `< 1.05x` or remaining time `< 210s`
-- runtime has no lower entry-price floor; low target asks are allowed
+- BTC baseline is the current 5-minute window open.
+- Entry band is `remaining=[255s,180s]`, i.e. 45s to 120s after open.
+- Require `abs(move_pct) >= theta_pct`, same-direction persistence
+  `persistence_sec` ago, and current move >= `min_move_ratio * past_move`.
+- Lock the first valid direction per window.
+- Hard cap is `0.72`; no dynamic cap tiers.
+- Execution uses target-leg WS order-book depth.
+- Level 1 ask is diagnostic only; fillability starts from level 2.
+- First FAK hint uses ask level 7, or ask level 9 when top ask is `<0.60`.
+- All hints are clamped to cap.
+- `signal_strength >= 2.0` uses amount `1.5`; timing does not change.
+- Hold to `window.end_epoch`; no exit logic before resolution.
 
-## Runtime Behavior
+## Core Files
 
-1. Anchor BTC at the current window open.
-2. In the normal entry band `[45s, 180s]` into the window:
-   - require BTC move from open >= `theta_pct`
-   - require same direction to have existed `persistence_sec` ago
-   - require current move >= `min_move_ratio * past_move`
-3. Strong signals do not bypass the 45s timing gate.
-4. Lock the first valid direction for that window.
-5. Keep checking the chosen target leg until WS order book depth from level 2
-   onward has enough notional inside the active cap.
-6. Send a FAK BUY.
-7. Hold to `window.end_epoch`.
-8. Let resolution / auto-redeem settle the outcome.
+- `run.py` — local runner
+- `polybot/strategies/paired_window.py` — BTC signal and direction lock
+- `polybot/trading/monitor.py` — window lifecycle, depth gating, FAK retry, logs, risk
+- `polybot/trading/trading.py` — Polymarket CLOB order execution
+- `polybot/core/state.py` — shared monitor/risk state
+- `polybot/config_loader.py` — YAML loader and object builders
+- `polybot/runtime_config.py` — `--preset` / `--config` assembly
+- `polybot/runtime_inputs.py` — CLI/UI input schema and validation
+- `tools/vpsctl.sh` — bootstrap/run/status/stop/fetch/probe for VPS
+- `tools/remote_start_run.sh` — remote unattended wrapper installed by `vpsctl`
+- `tools/collect_data.py` — collector
+- `tools/probe_post_order_latency.py` — intentional-fail `/order` latency probe
 
-## Execution Gating
+## Commands
 
-- Signal reference uses the UP-leg stream.
-- Final execution gating uses target-leg WS order book depth, not the
-  `best_bid_ask` top quote.
-- Level 1 ask is diagnostic only. Fillability starts from level 2.
-- Sum `price * size` for ask levels `price <= active_cap`; buy only when that
-  cap-limited notional covers the order amount.
-- Do not use theoretical `1 - up_price` for execution permission.
-- `signal_price`, `best_ask_level_1`, `target_entry_ask`, and `price_hint` are distinct.
-
-## FAK Orders
-
-- Runtime uses FAK.
-- Entry permission requires enough level-2+ WS book depth inside
-  `target_max_entry_price`.
-- There is no runtime `min_entry_price`; execution is max-only.
-- Enhanced config applies a normal full-cap guard before `BUY_SIGNAL`.
-- First-attempt hint is at least configured `entry_ask_level`; enhanced uses
-  level 6 (`best ask +5`), plus a small tick buffer, clamped to cap.
-- FAK retry is capped at 3 attempts total.
-- Retry refreshes target-leg WS book depth with the same level-1 skip.
-- Retry aborts if refreshed cap-limited depth is stale or insufficient.
-- Retry hint is recalculated from fresh depth, then clamped to cap.
-- `MATCHED` + `success=true` is treated as filled even if some fill fields are
-  omitted.
-- A 400 `no orders found to match with FAK order` can happen when the book moves
-  before `/order`; the retry guard should prevent chasing above cap.
-
-## Risk Management
-
-- UTC+8 daily reset
-- 5 consecutive losses -> pause 2 windows
-- after 30+ trades, if win rate < 50% -> pause 5 windows
-- enhanced config: consecutive realized losses `>= 3.0` -> pause 2 windows
-- enhanced config: daily realized PnL `<= -5.0` -> pause 5 windows
-
-## Logging
-
-Current runtime logs include:
-
-- `BUY_SIGNAL.best_ask_age_ms`
-- `BUY_PREP.best_ask_age_ms`
-- `BUY_SIGNAL.signal_strength`
-- `BUY_SIGNAL.past_signal_strength`
-- `BUY_SIGNAL.remaining_sec`
-- `BUY_SIGNAL.amount`
-- `BUY_SIGNAL.best_ask_level_1`
-- `BUY_SIGNAL.target_entry_ask`
-- `BUY_SIGNAL.price_hint`
-- `BUY_SIGNAL.depth_levels_used`
-- `BUY_SIGNAL.depth_notional`
-- `BUY_SIGNAL.depth_skipped_levels`
-- `BUY_SIGNAL.book_ask_preview`
-- WS `book` snapshots plus `price_change` deltas maintain local ask depth
-- `FAK_FILLED.create_market_order_ms`
-- `FAK_FILLED.post_order_ms`
-- `FAK_FILLED.attempt_ms`
-- `FAK_FILLED.total_ms`
-- same timing fields on `FAK_ATTEMPT_FAILED`
-
-Note: `BUY_FILLED.price` may reflect target best ask; real fill is
-`FAK_FILLED.avg_price`.
-
-## Window Chaining
-
-- Per-window state resets `started=False` and clears target fields before WS
-  token switch, preventing pre-open trades on reused WS.
-- Prefetched next-window task is awaited before reading result.
-- Final planned round does not prefetch next window. This avoids shutdown hangs
-  caused by unnecessary market discovery.
-
-## Recent Live/Dry Observations
-
-- Fixed-cap dry 6 rounds: 4 entries, 3W/1L, 2 no-entry windows.
-- Enhanced dry 5 rounds: 3 entries, 3W/0L, 2 no-entry windows.
-- Enhanced live 3 monitored rounds: 2 fills, 2W/0L, 1 FAK 400 then retry abort
-  because refreshed ask moved above cap.
-- Enhanced live 24 rounds / 2 hours: 16 fills, 14W/2L, estimated PnL
-  `+4.52 USDC`.
-- Log-level replay of that 2-hour session with current caps `0.68/0.72/0.75`
-  and max-only gating: estimated 21 fills, 19W/2L, estimated PnL
-  `+6.52 USDC`. This is not a full orderbook replay.
-- Enhanced live 108 rounds / 9 hours: 10 fills, 8W/2L, 2 retry-abort misses,
-  total stake `10.5 USDC`, realized PnL about `+1.91 USDC`. The `>=2.0x`
-  amount tier triggered live: 1 strong-signal `1.5x` fill won, and 1
-  strong-signal attempt missed after retry refresh moved above cap.
-
-These are small samples, not backtests.
-
-## What Not To Restore Without Backtest
-
-- TP / SL / re-entry logic
-- theoretical `1 - up_price` execution gating
-- rolling momentum baseline in place of window-open baseline
-- strong-signal defaults in conservative live YAML unless intentionally enabled
-  and documented
-
-## Typical Workflow
-
-**Preset-based startup**
+Local dry:
 
 ```bash
-python3.11 run.py --preset enhanced --dry --rounds 6
-python3.11 run.py --preset enhanced --amount 1.5 --max-entry-price 0.69 --rounds 24
+python3.11 run.py --preset enhanced --dry --rounds 3
 ```
 
-`run.py` now requires exactly one of `--preset` or `--config`.
-
-**Collect data**
+Local live:
 
 ```bash
-PYTHONPATH=/Users/forrestliao/workspace python3.11 tools/collect_data.py \
-  --market btc-updown-5m --windows 96 --no-snap --slim --poly-min-interval-ms 100
+python3.11 run.py --preset enhanced --rounds 3
 ```
 
-**Backtest**
-
-```bash
-python3.11 analysis/analyze_paired_strategy.py data/collect_btc-updown-5m_<TS>.jsonl \
-  --theta 0.03 --persistence 10 --lo 120 --hi 240 \
-  --max-entry-price 0.68 --delays 0,1,2
-```
-
-**Dry-run fixed cap**
-
-```bash
-python3.11 run.py --config paired_window_cap61_5r_live.yaml --dry --rounds 12
-```
-
-**Dry-run enhanced**
-
-```bash
-python3.11 run.py --config paired_window_early_entry_dry.yaml --dry --rounds 6
-```
-
-**Live fixed cap**
-
-```bash
-python3.11 run.py --config paired_window_cap61_5r_live.yaml
-```
-
-**Live enhanced**
-
-```bash
-python3.11 run.py --config paired_window_early_entry_dry.yaml --rounds 3
-```
-
-**Probe `/order` latency**
-
-```bash
-PYTHONPATH=/Users/forrestliao/workspace python3.11 tools/probe_post_order_latency.py \
-  --token-id <TOKEN_ID> --side buy --price 0.01 --size 1 --repeats 3
-```
-
-**Start unattended VPS run**
-
-```bash
-bash tools/vps_start_run.sh --host 70.34.207.45 --preset enhanced --rounds 6
-```
-
-**Fetch latest VPS logs**
-
-```bash
-bash tools/vps_fetch_run.sh --host 70.34.207.45 --run-id latest
-```
-
-**Unified VPS control**
-
-```bash
-bash tools/vpsctl.sh bootstrap --host 70.34.207.45
-bash tools/vpsctl.sh run --host 70.34.207.45 --preset enhanced --rounds 6
-bash tools/vpsctl.sh fetch --host 70.34.207.45 --run-id latest
-```
-
-Prefer `tools/vpsctl.sh` when the VPS host may change. It accepts dynamic
-`host/user` plus local profiles and handles bootstrap, update, run, and log
-fetch.
-
-Profiles:
-
-- VPS profile file: `~/.polybot/vps/<name>.env`
-- account profile file: `~/.polybot/accounts/<name>.json`
-- Use `vpsctl.sh --vps-profile ...` for remote `run`, `status`, `stop`, and
-  `fetch`; do not use raw `ssh` for stop/status unless you also load the
-  profile password.
-- bootstrap can use:
-  - `bash tools/vpsctl.sh bootstrap --vps-profile sweden --account-profile alice`
-- account profile minimum:
-  - `private_key`
-  - `proxy_address`
-- optional defaults:
-  - `chain_id=137`
-  - `signature_type=proxy`
-
-**Run tests**
+Tests:
 
 ```bash
 env -u ALL_PROXY -u all_proxy -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy pytest -q
 ```
 
-## Guidance For Future Agent Sessions
+VPS bootstrap:
 
-**DO**
+```bash
+bash tools/vpsctl.sh bootstrap --vps-profile <vps_name> --account-profile <account_name>
+```
 
-- Treat `paired_window` as the only active runtime strategy.
-- Use `analysis/analyze_paired_strategy.py` for parameter work.
-- Keep docs aligned with the actual YAML and code.
-- Runtime execution is max-only. Do not reintroduce a lower price floor unless
-  explicitly requested.
-- Validate parameter changes on the 96-window dataset before live testing.
-- Distinguish `signal_price`, `best_ask_level_1`, `target_entry_ask`, `price_hint`, and
-  `FAK_FILLED.avg_price`.
+VPS run/status/stop/fetch:
 
-**DON'T**
+```bash
+bash tools/vpsctl.sh run --vps-profile <vps_name> --preset enhanced --rounds 6 --label test6
+bash tools/vpsctl.sh status --vps-profile <vps_name> --run-id latest
+bash tools/vpsctl.sh stop --vps-profile <vps_name> --run-id latest
+bash tools/vpsctl.sh fetch --vps-profile <vps_name> --run-id latest
+```
 
-- Assume removed doc text is still true without checking code.
-- Reintroduce TP/SL/re-entry without fresh backtest evidence.
-- Describe enhanced timing/caps as active in fixed-cap live YAML.
-- Change exit timing away from `window.end_epoch`.
+Always use `--vps-profile` for VPS commands so host/user/password are loaded
+from profile. Do not run raw `ssh`/`scp` for stop/status unless profile password
+is also loaded.
+
+## Profiles
+
+Default paths:
+
+- VPS profile: `~/.polybot/vps/<name>.env`
+- Account profile: `~/.polybot/accounts/<name>.json`
+
+VPS profile fields:
+
+```bash
+HOST=70.34.207.45
+USER_NAME=root
+PASSWORD='your-vps-password'
+REPO_URL=https://github.com/ForrestLWL1203/btc-5m.git
+BRANCH=main
+```
+
+Account profile required fields:
+
+```json
+{
+  "private_key": "0x...",
+  "proxy_address": "0x...",
+  "chain_id": 137,
+  "signature_type": 1
+}
+```
+
+`private_key` and `proxy_address` are required. `chain_id=137` and
+`signature_type=1` are defaults.
+
+## Logging Notes
+
+Important fields:
+
+- `signal_price`: UP-leg signal reference.
+- `best_ask_level_1`: target-leg top ask, diagnostic only.
+- `target_entry_ask`: selected depth level.
+- `price_hint`: FAK hint sent to order builder.
+- `FAK_FILLED.avg_price`: actual average fill.
+- `ENTRY_DEPTH_SKIP` logs first insufficient-depth skip only; repeats aggregate
+  into `SUMMARY`.
+
+## Agent Rules
+
+- Keep docs, config, strategy, monitor, runtime schema, and tests aligned.
+- Do not add new runtime strategy branches for experiments; use a separate
+  branch or ask first.
+- Do not commit logs, `data/`, remote run folders, local profiles, or secrets.
+- Do not change exit timing away from `window.end_epoch`.

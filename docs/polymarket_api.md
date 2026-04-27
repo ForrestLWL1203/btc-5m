@@ -39,7 +39,8 @@ Studied 2026-04-17 from https://docs.polymarket.com
 
 | Type | Behavior | Notes |
 |---|---|---|
-| **FOK** | Fill-or-Kill, entire fill or nothing | Best for immediate execution |
+| **FAK** | Fill-and-Kill, take available liquidity then cancel remainder | Current polybot runtime order type |
+| **FOK** | Fill-or-Kill, entire fill or nothing | Not used by current runtime |
 | **GTC** | Good-Til-Cancelled | Requires heartbeat within 10s or ALL orders cancelled |
 | **GTD** | Good-Til-Date, auto-expires at timestamp | No heartbeat needed, preferred for limit fallback |
 | **Post-Only** | Guaranteed maker placement | Zero fees + rebates, rejected if would take |
@@ -97,6 +98,7 @@ Events:
 
 - `best_bid_ask` — best bid/ask → midpoint = (bid+ask)/2
 - `last_trade_price` — actual trade execution price
+- `book` — full book snapshot used to seed local depth
 - `price_change` — incremental book update
 - `tick_size_change` — tick size update
 
@@ -122,10 +124,15 @@ Tick size determines minimum price increment. Varies by price range:
 - Hong Kong: allowed
 - US: blocked
 
-## Optimal API Strategy for polybot
+## Current API Strategy for polybot
 
-1. **Buy**: FOK market order → query `get_token_balance()` for exact shares
-2. **Sell**: Query `get_token_balance()` first → FOK sell exact amount
-3. **Limit fallback**: GTD (not GTC) — auto-expires, no heartbeat needed
-4. **Price tracking**: WebSocket `best_bid_ask` for real-time, REST `get_midpoint()` as fallback
-5. **Fill verification**: Always query balance after buy, never trust POST /order response
+1. **Signal**: BTC window-open move decides direction; Polymarket UP stream is
+   only a signal reference.
+2. **Entry permission**: Use target-leg WS order-book depth, skip ask level 1
+   for fillability, and require enough cap-limited notional.
+3. **Buy**: FAK market order with a book-depth price hint clamped to the hard
+   cap.
+4. **Retry**: Refresh WS book depth before retry; abort if stale or insufficient.
+5. **Exit**: Hold to window end and let resolution / auto-redeem settle.
+6. **Fill accounting**: Prefer `FAK_FILLED.avg_price` from execution result;
+   balance queries remain useful for reconciliation.

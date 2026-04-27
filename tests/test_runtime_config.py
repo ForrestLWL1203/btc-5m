@@ -23,19 +23,14 @@ def _args(**overrides) -> argparse.Namespace:
         "theta": None,
         "persistence": None,
         "max_entry_price": None,
-        "min_entry_price": None,
         "entry_start": None,
         "entry_end": None,
-        "early_entry_start": None,
-        "early_entry_strength": None,
-        "early_entry_past_strength": None,
         "min_move_ratio": None,
         "amount": None,
         "entry_ask_level": None,
+        "low_price_threshold": None,
+        "low_price_entry_ask_level": None,
         "max_entries": None,
-        "normal_full_cap_guard": None,
-        "normal_full_cap_min_strength": None,
-        "normal_full_cap_min_remaining": None,
         "consecutive_loss_amount": None,
         "daily_loss_amount": None,
         "dry": False,
@@ -47,8 +42,10 @@ def _args(**overrides) -> argparse.Namespace:
 def test_preset_config_loads_enhanced_yaml():
     cfg = preset_config("enhanced")
     assert cfg["market"]["asset"] == "btc"
-    assert cfg["strategy"]["max_entry_price"] == pytest.approx(0.68)
-    assert cfg["params"]["normal_full_cap_guard"]["enabled"] is True
+    assert cfg["strategy"]["max_entry_price"] == pytest.approx(0.72)
+    assert cfg["params"]["entry_ask_level"] == 7
+    assert cfg["params"]["low_price_threshold"] == pytest.approx(0.60)
+    assert cfg["params"]["low_price_entry_ask_level"] == 9
 
 
 def test_build_runtime_config_requires_exactly_one_source():
@@ -66,6 +63,8 @@ def test_build_runtime_config_from_preset_applies_common_overrides():
         rounds=24,
         amount=2.0,
         entry_ask_level=4,
+        low_price_threshold=0.58,
+        low_price_entry_ask_level=8,
         max_entry_price=0.69,
         entry_start=250,
         entry_end=175,
@@ -74,35 +73,11 @@ def test_build_runtime_config_from_preset_applies_common_overrides():
     assert cfg["rounds"] == 24
     assert cfg["params"]["amount"] == pytest.approx(2.0)
     assert cfg["params"]["entry_ask_level"] == 4
+    assert cfg["params"]["low_price_threshold"] == pytest.approx(0.58)
+    assert cfg["params"]["low_price_entry_ask_level"] == 8
     assert cfg["strategy"]["max_entry_price"] == pytest.approx(0.69)
     assert cfg["strategy"]["entry_start_remaining_sec"] == pytest.approx(250)
     assert cfg["strategy"]["entry_end_remaining_sec"] == pytest.approx(175)
-
-
-def test_build_runtime_config_can_toggle_guard_and_guard_thresholds():
-    cfg = build_runtime_config(_args(
-        preset="enhanced",
-        normal_full_cap_guard=False,
-        normal_full_cap_min_strength=1.08,
-        normal_full_cap_min_remaining=215,
-    ))
-    guard = cfg["params"]["normal_full_cap_guard"]
-    assert guard["enabled"] is False
-    assert guard["min_signal_strength"] == pytest.approx(1.08)
-    assert guard["min_remaining_sec"] == pytest.approx(215)
-
-
-def test_build_runtime_config_can_override_early_entry_fields():
-    cfg = build_runtime_config(_args(
-        preset="enhanced",
-        early_entry_start=275,
-        early_entry_strength=2.4,
-        early_entry_past_strength=1.2,
-    ))
-    strat = cfg["strategy"]
-    assert strat["early_entry_start_remaining_sec"] == pytest.approx(275)
-    assert strat["early_entry_strength_threshold"] == pytest.approx(2.4)
-    assert strat["early_entry_past_strength_threshold"] == pytest.approx(1.2)
 
 
 def test_public_runtime_input_schema_only_exposes_frontend_safe_fields():
@@ -117,8 +92,8 @@ def test_advanced_runtime_input_schema_includes_engineering_fields():
     schema = advanced_runtime_input_schema()
     names = {item["name"] for item in schema}
     assert "theta" in names
-    assert "normal_full_cap_min_strength" in names
     assert "entry_ask_level" in names
+    assert "low_price_entry_ask_level" in names
 
 
 def test_validate_runtime_inputs_rejects_bad_ranges_and_relationships():
@@ -127,9 +102,6 @@ def test_validate_runtime_inputs_rejects_bad_ranges_and_relationships():
 
     with pytest.raises(ValueError, match="entry_start must be greater than entry_end"):
         validate_runtime_inputs({"entry_start": 180, "entry_end": 210})
-
-    with pytest.raises(ValueError, match="early_entry_start must be >= entry_start"):
-        validate_runtime_inputs({"entry_start": 240, "early_entry_start": 230})
 
 
 def test_validate_runtime_inputs_rejects_unknown_public_field():

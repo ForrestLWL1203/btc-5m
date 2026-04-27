@@ -65,16 +65,10 @@ def build_strategy(cfg: dict, series: Optional[MarketSeries] = None):
         return PairedWindowStrategy(
             series=series,
             theta_pct=strat_cfg.get("theta_pct", 0.02),
-            entry_start_remaining_sec=strat_cfg.get("entry_start_remaining_sec", 270.0),
-            early_entry_start_remaining_sec=strat_cfg.get("early_entry_start_remaining_sec"),
-            early_entry_strength_threshold=strat_cfg.get("early_entry_strength_threshold"),
-            early_entry_past_strength_threshold=strat_cfg.get("early_entry_past_strength_threshold"),
+            entry_start_remaining_sec=strat_cfg.get("entry_start_remaining_sec", 255.0),
             entry_end_remaining_sec=strat_cfg.get("entry_end_remaining_sec", 120.0),
             persistence_sec=strat_cfg.get("persistence_sec", 10.0),
             max_entry_price=max_entry_price,
-            strong_signal_threshold=strat_cfg.get("strong_signal_threshold"),
-            strong_signal_max_entry_price=strat_cfg.get("strong_signal_max_entry_price"),
-            strength_caps=strat_cfg.get("strength_caps"),
             min_move_ratio=strat_cfg.get("min_move_ratio", 0.7),
             open_price_max_wait_sec=strat_cfg.get("open_price_max_wait_sec", 30.0),
         )
@@ -102,11 +96,19 @@ def build_trade_config(cfg: dict) -> TradeConfig:
     return TradeConfig(
         amount=params.get("amount", 5.0),
         entry_ask_level=max(1, int(params.get("entry_ask_level", 1))),
-        ask_level_tiers=_build_ask_level_tiers(params.get("ask_level_tiers")),
+        low_price_threshold=(
+            float(params["low_price_threshold"])
+            if params.get("low_price_threshold") is not None
+            else None
+        ),
+        low_price_entry_ask_level=(
+            max(1, int(params["low_price_entry_ask_level"]))
+            if params.get("low_price_entry_ask_level") is not None
+            else None
+        ),
         max_entries_per_window=params.get("max_entries_per_window"),
         rounds=int(rounds_val) if rounds_val is not None else None,
         amount_tiers=_build_amount_tiers(params.get("amount_tiers")),
-        **_build_normal_full_cap_guard(params.get("normal_full_cap_guard")),
         consecutive_loss_amount_limit=risk.get("consecutive_loss_amount"),
         daily_loss_amount_limit=risk.get("daily_loss_amount"),
         consecutive_loss_pause_windows=int(risk.get("consecutive_loss_pause_windows", 2)),
@@ -128,41 +130,4 @@ def _build_amount_tiers(raw: Optional[list[dict]]) -> list[tuple[float, float]]:
         tiers.append((float(threshold), float(amount)))
     tiers.sort(key=lambda pair: pair[0])
     return tiers
-
-
-def _build_ask_level_tiers(raw: Optional[list[dict]]) -> list[tuple[float, int]]:
-    """Build sorted signal-strength ask-level tiers from YAML."""
-    tiers: list[tuple[float, int]] = []
-    if not raw:
-        return tiers
-    for item in raw:
-        if not isinstance(item, dict):
-            continue
-        threshold = item.get("threshold")
-        level = item.get("level")
-        if threshold is None or level is None:
-            continue
-        tiers.append((float(threshold), max(1, int(level))))
-    tiers.sort(key=lambda pair: pair[0])
-    return tiers
-
-
-def _build_normal_full_cap_guard(raw: Optional[dict]) -> dict:
-    """Build optional full-cap guard for normal-confidence entries."""
-    if not raw:
-        return {}
-    return {
-        "normal_full_cap_guard_enabled": bool(raw.get("enabled", False)),
-        "normal_full_cap_min_signal_strength": (
-            float(raw["min_signal_strength"])
-            if raw.get("min_signal_strength") is not None
-            else None
-        ),
-        "normal_full_cap_min_remaining_sec": (
-            float(raw["min_remaining_sec"])
-            if raw.get("min_remaining_sec") is not None
-            else None
-        ),
-        "normal_full_cap_price_tolerance": float(raw.get("price_tolerance", 1e-9)),
-    }
 
