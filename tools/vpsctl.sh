@@ -379,8 +379,8 @@ echo "\\\$\\\$" > "\${RUN_DIR}/pgid"
 if ! "\${RUN_DIR}/run.sh" >"\${RUN_DIR}/stdout.log" 2>&1; then
   RC=\\\$?
 fi
-printf '%s\n' "\\\$RC" > "\${RUN_DIR}/exit_code"
-date -u '+%Y-%m-%dT%H:%M:%SZ' > "\${RUN_DIR}/finished_at"
+printf "%s\n" "\\\$RC" > "\${RUN_DIR}/exit_code"
+date -u "+%Y-%m-%dT%H:%M:%SZ" > "\${RUN_DIR}/finished_at"
 WRAP
 chmod +x "\${RUN_DIR}/wrapper.sh"
 nohup setsid "\${RUN_DIR}/wrapper.sh" </dev/null >/dev/null 2>&1 &

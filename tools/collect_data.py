@@ -588,13 +588,33 @@ class DataCollector:
 
     def _print_summary_line(self) -> None:
         s = self._summary
-        btc_chg = ((s.btc_end or 0) - (s.btc_start or 0)) / (s.btc_start or 1) * 100
-        up_chg = ((s.up_end or 0) - (s.up_start or 0)) if s.up_start else 0
-        print(f"  {s.window_label}  BTC={btc_chg:+.3f}%  "
-              f"UP={s.up_start:.3f}→{s.up_end:.3f} ({up_chg:+.3f})  "
-              f"DOWN={s.down_start:.3f}→{s.down_end:.3f}  "
+        btc_chg = (
+            ((s.btc_end - s.btc_start) / s.btc_start * 100)
+            if s.btc_start and s.btc_end is not None
+            else None
+        )
+        up_chg = (
+            (s.up_end - s.up_start)
+            if s.up_start is not None and s.up_end is not None
+            else None
+        )
+        print(f"  {s.window_label}  BTC={self._fmt_pct(btc_chg)}  "
+              f"UP={self._fmt_price(s.up_start)}->{self._fmt_price(s.up_end)} ({self._fmt_delta(up_chg)})  "
+              f"DOWN={self._fmt_price(s.down_start)}->{self._fmt_price(s.down_end)}  "
               f"actual={s.actual_direction}  "
               f"ticks={s.btc_ticks} poly={s.poly_updates}")
+
+    @staticmethod
+    def _fmt_price(value: Optional[float]) -> str:
+        return "n/a" if value is None else f"{value:.3f}"
+
+    @staticmethod
+    def _fmt_delta(value: Optional[float]) -> str:
+        return "n/a" if value is None else f"{value:+.3f}"
+
+    @staticmethod
+    def _fmt_pct(value: Optional[float]) -> str:
+        return "n/a" if value is None else f"{value:+.3f}%"
 
 
 if __name__ == "__main__":
