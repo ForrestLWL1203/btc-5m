@@ -323,7 +323,7 @@ EOF
 run_remote() {
   local extra_args_text=""
   local arg quoted_arg
-  for arg in "${RUN_EXTRA_ARGS[@]}"; do
+  for arg in ${RUN_EXTRA_ARGS[@]+"${RUN_EXTRA_ARGS[@]}"}; do
     printf -v quoted_arg '%q' "$arg"
     extra_args_text+=" ${quoted_arg}"
   done
@@ -334,7 +334,7 @@ run_remote() {
 collect_remote() {
   local collect_args_text=""
   local arg quoted_arg
-  for arg in "${COLLECT_ARGS[@]}"; do
+  for arg in ${COLLECT_ARGS[@]+"${COLLECT_ARGS[@]}"}; do
     printf -v quoted_arg '%q' "$arg"
     collect_args_text+=" ${quoted_arg}"
   done
