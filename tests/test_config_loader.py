@@ -5,6 +5,7 @@ import yaml
 
 from polybot.config_loader import load_config, build_series, build_strategy, build_trade_config
 from polybot.market.series import MarketSeries
+from polybot.strategies.crowd_m1 import CrowdM1Strategy
 from polybot.strategies.paired_window import PairedWindowStrategy
 
 
@@ -103,6 +104,26 @@ class TestBuildStrategy:
         assert strat._entry_start_remaining_sec == pytest.approx(255.0)
         assert strat._entry_end_remaining_sec == pytest.approx(120.0)
 
+    def test_build_crowd_m1_strategy(self):
+        series = MarketSeries.from_known("btc-updown-5m")
+        cfg = {
+            "strategy": {
+                "type": "crowd_m1",
+                "entry_elapsed_sec": 120,
+                "entry_timeout_sec": 60,
+                "min_ask_gap": 0.16,
+                "max_entry_price": 0.75,
+                "btc_direction_confirm": True,
+            }
+        }
+        strat = build_strategy(cfg, series)
+        assert isinstance(strat, CrowdM1Strategy)
+        assert strat._entry_elapsed_sec == pytest.approx(120)
+        assert strat._entry_timeout_sec == pytest.approx(60)
+        assert strat._min_ask_gap == pytest.approx(0.16)
+        assert strat._max_entry_price == pytest.approx(0.75)
+        assert strat._btc_direction_confirm is True
+
     def test_missing_strategy_raises(self):
         series = MarketSeries.from_known("btc-updown-5m")
         with pytest.raises(ValueError, match="Strategy type is required"):
@@ -134,6 +155,11 @@ class TestBuildTradeConfig:
                 "amount_tiers": [
                     {"threshold": 2.0, "amount": 15.0},
                 ],
+                "dynamic_entry_levels": [
+                    {"leading_ask_max": 0.64, "entry_ask_level": 5},
+                    {"leading_ask_max": 0.68, "entry_ask_level": 4},
+                ],
+                "max_slippage_from_best_ask": 0.04,
                 "stop_loss": {
                     "enabled": True,
                     "trigger_price": 0.38,
@@ -160,6 +186,8 @@ class TestBuildTradeConfig:
         assert tc.low_price_entry_ask_level == 9
         assert tc.base_entry_ask_level() == 1
         assert tc.amount_tiers == [(2.0, 15.0)]
+        assert tc.dynamic_entry_levels == [(0.64, 5), (0.68, 4)]
+        assert tc.max_slippage_from_best_ask == pytest.approx(0.04)
         assert tc.amount_for_signal_strength(1.9) == pytest.approx(10.0)
         assert tc.amount_for_signal_strength(2.0) == pytest.approx(15.0)
         assert tc.stop_loss_enabled is True

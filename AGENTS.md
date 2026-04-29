@@ -4,12 +4,13 @@
 
 Polymarket BTC 5-minute UP/DOWN bot. Status: live-capable.
 
-Current rule: BTC 5-minute only and `paired_window` is the only active runtime
-strategy. Do not restore historical strategies, ETH/multi-timeframe support,
-conservative configs, TP, reversal, re-entry, dynamic strength caps,
-early-entry bypass, stop-loss multiplier compatibility, or theoretical
-`1 - up_price` execution gating unless the user explicitly asks and fresh tests
-are added.
+Current rule: BTC 5-minute only. `paired_window` is the maintained live-capable
+runtime strategy. `crowd_m1` is an explicitly requested experimental dry-run
+runtime strategy for VPS testing. Do not restore historical strategies,
+ETH/multi-timeframe support, conservative configs, TP, reversal, re-entry,
+dynamic strength caps, early-entry bypass, stop-loss multiplier compatibility,
+or theoretical `1 - up_price` execution gating unless the user explicitly asks
+and fresh tests are added.
 
 ## Current Strategy
 
@@ -87,11 +88,69 @@ Stop-loss behavior when enabled:
 - SELL FAK retry count defaults to 3.
 - On fill, record realized PnL and exit that window.
 
+## Strategy D Candidate
+
+Strategy D is saved as `paired_window_strategy_d.yaml`. It is the paired-window
+candidate selected from the 102-window merged dataset backtest, not the default
+runtime config.
+
+Use it explicitly:
+
+```bash
+python3.11 run.py --config paired_window_strategy_d.yaml --dry --rounds 3
+python3.11 run.py --config paired_window_strategy_d.yaml --rounds 3
+```
+
+Backtest reference on
+`data/collect_btc-updown-5m_merged_20260427T183011_20260428T005206_102w.jsonl`:
+
+- 34 trades, 24W/10L, win rate 70.59%.
+- Settlement PnL `+5.7399`; mark PnL `+5.5485`.
+- Stop-losses 9; false stop-losses 0.
+- CSV: `analysis/backtest_collect_102w方案D_stop_end30_trades.csv`.
+
+Key differences from `paired_window_early_entry_dry.yaml`:
+
+- `theta_start_pct=0.035`, `theta_end_pct=0.055`.
+- `min_move_ratio=1.0`.
+- Stop-loss enabled with trigger `0.38`, active while remaining `[120s,30s]`.
+
+## Experimental Strategy: crowd_m1
+
+Experimental config: `crowd_m1_dry.yaml`.
+
+Runtime behavior:
+
+- At `entry_elapsed_sec=180`, compare current UP and DOWN best asks; use
+  `entry_timeout_sec=5` to avoid late attach entries.
+- Buy the higher-best-ask side only if its leading ask is at least
+  `min_leading_ask=0.62`; `min_ask_gap=0.0` disables a gap requirement.
+- Do not require BTC direction confirmation; this is a pure crowd-following variant.
+- Use existing target-leg depth-gated execution; do not replace live execution
+  with backtest-only L5 price proxies.
+- Cap final selected entry/hint at `max_entry_price=0.75`.
+- Use dynamic entry depth by leading ask: `<=0.64` uses L5, `<=0.68` uses L4,
+  `<=0.72` uses L2, and `<=0.75` uses L1.
+- Reject entries whose selected ask is more than `0.04` above target-leg best
+  ask.
+- Entry is event-driven: UP or DOWN Polymarket WS updates refresh the cached
+  two-leg snapshot and can trigger entry immediately inside the 5s entry
+  window; the 1s snapshot loop remains only as a fallback.
+- Entry logs include UP/DOWN best-ask cache age for book freshness validation.
+- Stop-loss is enabled with trigger `0.35`, only while remaining time is
+  `[45s,25s]`.
+- After BUY fill, held-token WS updates are ignored until 5s before the
+  stop-loss window; prewarm logs held-leg bid-book age, and active-window
+  updates can trigger stop-loss immediately.
+- Hold to `window.end_epoch` unless stop-loss fills.
+
 ## Core Files
 
 - `run.py` — local runner
 - `polybot/strategies/paired_window.py` — BTC signal and direction lock
-- `polybot/trading/monitor.py` — window lifecycle, depth gating, FAK retry, logs, risk
+- `polybot/trading/monitor.py` — window lifecycle, signal-to-execution wiring, logs, risk
+- `polybot/trading/fak_quotes.py` — reusable entry/stop-loss order-book quote selection
+- `polybot/trading/fak_execution.py` — reusable FAK buy/stop-loss sell gateway
 - `polybot/trading/trading.py` — Polymarket CLOB order execution
 - `polybot/core/state.py` — shared monitor/risk state
 - `polybot/config_loader.py` — YAML loader and object builders
@@ -108,6 +167,7 @@ Local dry:
 
 ```bash
 python3.11 run.py --preset enhanced --dry --rounds 3
+python3.11 run.py --preset crowd_m1 --dry --rounds 3
 ```
 
 Local live:
@@ -122,7 +182,7 @@ Tests:
 env -u ALL_PROXY -u all_proxy -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy pytest -q
 ```
 
-Expected suite size after cleanup: 123 tests.
+Expected suite size after crowd_m1 event-driven entry updates: 157 tests.
 
 VPS bootstrap:
 

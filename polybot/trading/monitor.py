@@ -4,13 +4,11 @@ import asyncio
 import datetime
 import functools
 import logging
-import math
 import time
-from dataclasses import dataclass
 from typing import Optional
 
 from polybot.core import config
-from polybot.core.client import get_midpoint_async, get_tick_size, get_token_balance
+from polybot.core.client import get_midpoint_async, get_token_balance
 from polybot.core.log_formatter import (
     MARKET,
     SIGNAL,
@@ -27,52 +25,24 @@ from polybot.market.series import MarketSeries
 from polybot.core.state import MonitorState
 from polybot.market.stream import PriceStream, PriceUpdate
 from polybot.strategies.base import Strategy
+from polybot.strategies.crowd_m1 import CrowdM1Strategy
+from polybot.strategies.paired_window import PairedWindowStrategy
 from polybot.trade_config import TradeConfig
-from .trading import buy_token, sell_token
+from .fak_execution import place_fak_buy, place_fak_stop_loss_sell
+from .fak_quotes import (
+    BidDepthQuote,
+    CapDepthQuote,
+    cap_limited_depth_quote as _cap_limited_depth_quote,
+    stop_loss_bid_quote as _stop_loss_bid_quote,
+)
 
 log = logging.getLogger(__name__)
 
 _PREOPEN_BUFFER = 10  # seconds before window start to wake up
 _STARTED_SKIP_THRESHOLD = 60  # allow attaching to a window within its first minute
 _SIGNAL_EVAL_LOG_INTERVAL_SEC = 5.0
-_DEPTH_ENTRY_SKIP_LEVELS = 1
-_DEPTH_PREVIEW_LEVELS = 6
-
-
-@dataclass(frozen=True)
-class CapDepthQuote:
-    """Cap-limited book depth quote for target-leg entry."""
-
-    price: Optional[float]
-    price_hint: Optional[float]
-    cap_notional: float
-    levels_used: int
-    total_levels: int
-    skipped_levels: int
-    entry_ask_level: int
-    best_ask_level_1: Optional[float]
-    ask_age_sec: Optional[float]
-    preview: list[tuple[float, float]]
-    enough: bool
-
-
-@dataclass(frozen=True)
-class BidDepthQuote:
-    """Bid-book depth quote for stop-loss SELL execution."""
-
-    price: Optional[float]
-    price_hint: Optional[float]
-    shares_available: float
-    levels_used: int
-    total_levels: int
-    skipped_levels: int
-    sell_bid_level: int
-    best_bid_level_1: Optional[float]
-    bid_age_sec: Optional[float]
-    preview: list[tuple[float, float]]
-    enough: bool
-
-
+_STOP_LOSS_CHECK_LOG_INTERVAL_SEC = 5.0
+_STOP_LOSS_PREWARM_SEC = 5.0
 async def _noop_price_callback(update: PriceUpdate) -> None:
     """Placeholder callback used before a PriceStream is fully wired."""
     return None
@@ -91,238 +61,6 @@ def _entry_price_cap(
     if max_price is None:
         max_price = getattr(strategy, "max_entry_price", getattr(strategy, "_max_entry_price", None))
     return max_price
-
-
-def _buffer_price_hint(
-    token_id: str,
-    best_ask: Optional[float],
-    buffer_ticks: Optional[float] = None,
-    max_price: Optional[float] = None,
-) -> Optional[float]:
-    """Add a small upward tick buffer to the BUY hint."""
-    if best_ask is None:
-        return None
-    tick = get_tick_size(token_id)
-    if tick <= 0:
-        tick = 0.001
-    ticks = config.PRICE_HINT_BUFFER_TICKS if buffer_ticks is None else buffer_ticks
-    buffered = best_ask + tick * ticks
-    if max_price is not None:
-        buffered = min(buffered, max_price)
-    return max(0.0, min(1.0, math.ceil(buffered / tick) * tick))
-
-
-def _buffer_sell_price_hint(
-    token_id: str,
-    bid_price: Optional[float],
-    *,
-    buffer_ticks: Optional[float] = None,
-    min_price: Optional[float] = None,
-) -> Optional[float]:
-    """Move a SELL hint below the selected bid to improve FAK fill odds."""
-    if bid_price is None:
-        return None
-    tick = get_tick_size(token_id)
-    if tick <= 0:
-        tick = 0.001
-    ticks = config.FAK_RETRY_PRICE_HINT_BUFFER_TICKS if buffer_ticks is None else buffer_ticks
-    buffered = bid_price - tick * ticks
-    if min_price is not None:
-        buffered = max(buffered, min_price)
-    return max(0.0, min(1.0, math.floor(buffered / tick) * tick))
-
-
-def _cap_limited_depth_quote(
-    ws: PriceStream,
-    token_id: str,
-    amount: float,
-    max_entry_price: Optional[float],
-    *,
-    max_age_sec: Optional[float] = None,
-    skip_levels: int = _DEPTH_ENTRY_SKIP_LEVELS,
-    min_entry_level: int = 1,
-    low_price_threshold: Optional[float] = None,
-    low_price_entry_level: Optional[int] = None,
-    buffer_ticks: Optional[float] = None,
-) -> CapDepthQuote:
-    """Return the first ask level where cap-limited depth can cover amount.
-
-    Level 1 is deliberately excluded from fillability calculations because it
-    often disappears before the FAK reaches Polymarket. ``min_entry_level`` is
-    the deepest ask level scanned for the first FAK hint, not a mandatory
-    minimum level.
-    """
-    ask_age = ws.get_latest_best_ask_age(token_id, level=1)
-    try:
-        raw_levels = ws.get_latest_ask_levels_with_size(token_id, max_age_sec=max_age_sec)
-    except AttributeError:
-        raw_levels = None
-    if not isinstance(raw_levels, list):
-        fallback_ask = ws.get_latest_best_ask(token_id, max_age_sec=max_age_sec, level=1)
-        # Test doubles may not expose L2 sizes. Real PriceStream returns []
-        # when the book is unavailable, which still blocks live entry.
-        fallback_size = (amount / fallback_ask * 1.01) if fallback_ask and fallback_ask > 0 else amount
-        raw_levels = (
-            [(fallback_ask, fallback_size), (fallback_ask, fallback_size)]
-            if fallback_ask is not None
-            else []
-        )
-
-    levels = [(float(price), float(size)) for price, size in raw_levels if float(size) > 0]
-    best_ask_level_1 = levels[0][0] if levels else _best_ask_level_1(ws, token_id)
-    preview = levels[:_DEPTH_PREVIEW_LEVELS]
-    max_entry_level = max(1, int(min_entry_level))
-    if (
-        best_ask_level_1 is not None
-        and low_price_threshold is not None
-        and low_price_entry_level is not None
-        and best_ask_level_1 < low_price_threshold
-    ):
-        max_entry_level = max(max_entry_level, int(low_price_entry_level))
-    max_entry_index = max(max_entry_level - 1, int(skip_levels))
-    if not levels or max_entry_price is None:
-        return CapDepthQuote(
-            price=None,
-            price_hint=None,
-            cap_notional=0.0,
-            levels_used=0,
-            total_levels=len(levels),
-            skipped_levels=min(skip_levels, len(levels)),
-            entry_ask_level=max_entry_level,
-            best_ask_level_1=best_ask_level_1,
-            ask_age_sec=ask_age,
-            preview=preview,
-            enough=False,
-        )
-
-    cap_notional = 0.0
-    levels_used = 0
-    selected_price = None
-    for index, (ask_price, ask_size) in enumerate(levels):
-        if index > max_entry_index:
-            break
-        if ask_price > max_entry_price:
-            break
-        if index < skip_levels:
-            continue
-        levels_used += 1
-        cap_notional += ask_price * ask_size
-        if cap_notional >= amount:
-            selected_price = ask_price
-            break
-
-    price_hint = _buffer_price_hint(
-        token_id,
-        selected_price,
-        buffer_ticks=buffer_ticks,
-        max_price=max_entry_price,
-    ) if selected_price is not None else None
-    return CapDepthQuote(
-        price=selected_price,
-        price_hint=price_hint,
-        cap_notional=cap_notional,
-        levels_used=levels_used,
-        total_levels=len(levels),
-        skipped_levels=min(skip_levels, len(levels)),
-        entry_ask_level=max_entry_level,
-        best_ask_level_1=best_ask_level_1,
-        ask_age_sec=ask_age,
-        preview=preview,
-        enough=selected_price is not None and price_hint is not None,
-    )
-
-
-def _stop_loss_bid_quote(
-    ws: PriceStream,
-    token_id: str,
-    shares: float,
-    *,
-    max_age_sec: Optional[float],
-    skip_levels: int = _DEPTH_ENTRY_SKIP_LEVELS,
-    min_sell_level: int = 9,
-    min_sell_price: float = 0.20,
-    buffer_ticks: Optional[float] = None,
-) -> BidDepthQuote:
-    """Return the bid level where enough stop-loss sell depth exists."""
-    bid_age = None
-    if hasattr(ws, "get_latest_best_bid_age"):
-        bid_age = ws.get_latest_best_bid_age(token_id, level=1)
-    try:
-        raw_levels = ws.get_latest_bid_levels_with_size(token_id, max_age_sec=max_age_sec)
-    except AttributeError:
-        raw_levels = None
-    if not isinstance(raw_levels, list):
-        fallback_bid = (
-            ws.get_latest_best_bid(token_id, max_age_sec=max_age_sec, level=1)
-            if hasattr(ws, "get_latest_best_bid")
-            else None
-        )
-        raw_levels = (
-            [(fallback_bid, shares), (fallback_bid, shares)]
-            if fallback_bid is not None
-            else []
-        )
-
-    levels = [(float(price), float(size)) for price, size in raw_levels if float(size) > 0]
-    best_bid_level_1 = levels[0][0] if levels else (
-        ws.get_latest_best_bid(token_id, max_age_sec=max_age_sec, level=1)
-        if hasattr(ws, "get_latest_best_bid")
-        else None
-    )
-    preview = levels[:_DEPTH_PREVIEW_LEVELS]
-    max_sell_level = max(1, int(min_sell_level))
-    max_sell_index = max(max_sell_level - 1, int(skip_levels))
-    if not levels or shares <= 0:
-        return BidDepthQuote(
-            price=None,
-            price_hint=None,
-            shares_available=0.0,
-            levels_used=0,
-            total_levels=len(levels),
-            skipped_levels=min(skip_levels, len(levels)),
-            sell_bid_level=max_sell_level,
-            best_bid_level_1=best_bid_level_1,
-            bid_age_sec=bid_age,
-            preview=preview,
-            enough=False,
-        )
-
-    shares_available = 0.0
-    levels_used = 0
-    selected_price = None
-    enough = False
-    for index, (bid_price, bid_size) in enumerate(levels):
-        if index > max_sell_index:
-            break
-        if bid_price < min_sell_price:
-            break
-        if index < skip_levels:
-            continue
-        levels_used += 1
-        shares_available += bid_size
-        selected_price = bid_price
-        if shares_available >= shares:
-            enough = True
-
-    price_hint = _buffer_sell_price_hint(
-        token_id,
-        selected_price,
-        buffer_ticks=buffer_ticks,
-        min_price=min_sell_price,
-    ) if enough and selected_price is not None else None
-    return BidDepthQuote(
-        price=selected_price,
-        price_hint=price_hint,
-        shares_available=shares_available,
-        levels_used=levels_used,
-        total_levels=len(levels),
-        skipped_levels=min(skip_levels, len(levels)),
-        sell_bid_level=max_sell_level,
-        best_bid_level_1=best_bid_level_1,
-        bid_age_sec=bid_age,
-        preview=preview,
-        enough=enough and selected_price is not None and price_hint is not None,
-    )
 
 
 def _log_depth_skip(
@@ -415,6 +153,8 @@ def _price_hint_refresher(
             min_entry_level=entry_ask_level,
             low_price_threshold=trade_config.low_price_threshold,
             low_price_entry_level=trade_config.low_price_entry_ask_level,
+            dynamic_entry_levels=trade_config.dynamic_entry_levels,
+            max_slippage_from_best_ask=trade_config.max_slippage_from_best_ask,
             buffer_ticks=config.FAK_RETRY_PRICE_HINT_BUFFER_TICKS,
         )
         if not quote.enough:
@@ -478,6 +218,81 @@ def _stop_loss_price_hint_refresher(
         return quote.price_hint
 
     return refresh
+
+
+def _log_stop_loss_check(
+    state: MonitorState,
+    *,
+    side: str,
+    window: MarketWindow,
+    remaining: float,
+    entry_price: float,
+    stop_price: float,
+    quote: BidDepthQuote,
+    shares: float,
+    reason: str,
+) -> None:
+    key = (
+        reason,
+        round(quote.best_bid_level_1, 3) if quote.best_bid_level_1 is not None else None,
+        round(quote.price, 3) if quote.price is not None else None,
+        bool(quote.enough),
+    )
+    now = time.time()
+    if (
+        state.last_stop_loss_check_key == key
+        and now - state.last_stop_loss_check_logged_at < _STOP_LOSS_CHECK_LOG_INTERVAL_SEC
+    ):
+        return
+    state.last_stop_loss_check_key = key
+    state.last_stop_loss_check_logged_at = now
+    log_event(log, logging.INFO, TRADE, {
+        "action": "STOP_LOSS_CHECK",
+        "reason": reason,
+        "side": side.upper(),
+        "window": window.short_label,
+        "remaining_sec": round(remaining, 3),
+        "entry_price": round(entry_price, 4),
+        "stop_price": round(stop_price, 4),
+        "best_bid_level_1": quote.best_bid_level_1,
+        "target_sell_bid": quote.price,
+        "price_hint": quote.price_hint,
+        "bid_levels_used": quote.levels_used,
+        "bid_shares_available": round(quote.shares_available, 4),
+        "shares_to_sell": round(shares, 6),
+        "sell_bid_level": quote.sell_bid_level,
+        "bid_age_ms": round(quote.bid_age_sec * 1000) if quote.bid_age_sec is not None else None,
+        "book_bid_preview": quote.preview,
+        "quote_enough": quote.enough,
+    })
+
+
+def _log_stop_loss_book_freshness(
+    state: MonitorState,
+    *,
+    side: str,
+    window: MarketWindow,
+    remaining: float,
+    phase: str,
+    best_bid_age_ms: Optional[int],
+) -> None:
+    key = ("book_freshness", phase)
+    now = time.time()
+    if (
+        state.last_stop_loss_check_key == key
+        and now - state.last_stop_loss_check_logged_at < _STOP_LOSS_CHECK_LOG_INTERVAL_SEC
+    ):
+        return
+    state.last_stop_loss_check_key = key
+    state.last_stop_loss_check_logged_at = now
+    log_event(log, logging.INFO, TRADE, {
+        "action": "STOP_LOSS_BOOK_FRESHNESS",
+        "side": side.upper(),
+        "window": window.short_label,
+        "phase": phase,
+        "remaining_sec": round(remaining, 3),
+        "best_bid_age_ms": best_bid_age_ms,
+    })
 
 
 async def _sync_holding_balance_after_buy(
@@ -592,14 +407,6 @@ def _log_signal_eval(
             else None
         ),
     })
-
-
-def _best_ask_level_1(ws: PriceStream, token_id: str) -> Optional[float]:
-    return ws.get_latest_best_ask(
-        token_id,
-        max_age_sec=config.FAK_RETRY_MAX_BEST_ASK_AGE_SEC,
-        level=1,
-    )
 
 
 def _entry_ask_changed(state: MonitorState, side: str, best_ask: Optional[float]) -> bool:
@@ -770,9 +577,44 @@ async def _maybe_handle_stop_loss(
         min_sell_level=trade_config.stop_loss_bid_level(),
         min_sell_price=trade_config.stop_loss_min_sell_price,
     )
-    if quote.best_bid_level_1 is None or quote.best_bid_level_1 > stop_price:
+    if quote.best_bid_level_1 is None:
+        _log_stop_loss_check(
+            state,
+            side=side,
+            window=window,
+            remaining=remaining,
+            entry_price=entry_price,
+            stop_price=stop_price,
+            quote=quote,
+            shares=shares_to_sell,
+            reason="missing_or_stale_bid",
+        )
+        return
+    if quote.best_bid_level_1 > stop_price:
+        _log_stop_loss_check(
+            state,
+            side=side,
+            window=window,
+            remaining=remaining,
+            entry_price=entry_price,
+            stop_price=stop_price,
+            quote=quote,
+            shares=shares_to_sell,
+            reason="bid_above_stop",
+        )
         return
     if not quote.enough or quote.price is None:
+        _log_stop_loss_check(
+            state,
+            side=side,
+            window=window,
+            remaining=remaining,
+            entry_price=entry_price,
+            stop_price=stop_price,
+            quote=quote,
+            shares=shares_to_sell,
+            reason="insufficient_bid_depth",
+        )
         return
 
     if not dry_run:
@@ -866,7 +708,7 @@ async def _maybe_handle_stop_loss(
         state.stop_loss_triggered = True
         return
 
-    result = await sell_token(
+    result = await place_fak_stop_loss_sell(
         token_id,
         shares_to_sell,
         price_hint=quote.price_hint,
@@ -978,6 +820,242 @@ def _side_token(window: MarketWindow, side: str) -> tuple[str, str]:
     return window.up_token, window.up_token
 
 
+def _is_crowd_m1_strategy(strategy: Optional[Strategy]) -> bool:
+    """Return true for the crowd-following strategy."""
+    return isinstance(strategy, CrowdM1Strategy)
+
+
+def _is_paired_window_strategy(strategy: Optional[Strategy]) -> bool:
+    """Return true for the paired BTC-window strategy."""
+    return isinstance(strategy, PairedWindowStrategy)
+
+
+def _entry_update_allowed(
+    strategy: Optional[Strategy],
+    window: MarketWindow,
+    update: PriceUpdate,
+) -> bool:
+    """Return whether a WS update should trigger entry evaluation."""
+    if _is_crowd_m1_strategy(strategy):
+        return update.token_id in (window.up_token, window.down_token)
+    if _is_paired_window_strategy(strategy):
+        return update.token_id == window.up_token
+    return update.token_id == window.up_token
+
+
+def _stop_loss_remaining_state(
+    window: MarketWindow,
+    trade_config: TradeConfig,
+    now: Optional[float] = None,
+) -> tuple[str, float]:
+    """Return stop-loss timing state and remaining seconds."""
+    remaining = window.end_epoch - (time.time() if now is None else now)
+    if remaining > trade_config.stop_loss_start_remaining_sec + _STOP_LOSS_PREWARM_SEC:
+        return "before", remaining
+    if remaining > trade_config.stop_loss_start_remaining_sec:
+        return "prewarm", remaining
+    if remaining < trade_config.stop_loss_end_remaining_sec:
+        return "after", remaining
+    return "active", remaining
+
+
+def _market_snapshot_from_ws(
+    window: MarketWindow,
+    ws: PriceStream,
+    update: Optional[PriceUpdate] = None,
+) -> tuple[Optional[float], Optional[float], Optional[float], Optional[float]]:
+    """Read UP/DOWN midpoints and best asks, using current update if cache lags."""
+    up_mid = ws.get_latest_price(window.up_token)
+    down_mid = ws.get_latest_price(window.down_token)
+    up_best_ask = ws.get_latest_best_ask(window.up_token)
+    down_best_ask = ws.get_latest_best_ask(window.down_token)
+    if update is not None:
+        if update.token_id == window.up_token:
+            if update.midpoint is not None:
+                up_mid = update.midpoint
+            if update.best_ask is not None:
+                up_best_ask = update.best_ask
+        elif update.token_id == window.down_token:
+            if update.midpoint is not None:
+                down_mid = update.midpoint
+            if update.best_ask is not None:
+                down_best_ask = update.best_ask
+    return up_mid, down_mid, up_best_ask, down_best_ask
+
+
+def _best_ask_age_ms(ws: PriceStream, token_id: str) -> Optional[int]:
+    if not hasattr(ws, "get_latest_best_ask_age"):
+        return None
+    age = ws.get_latest_best_ask_age(token_id)
+    return round(age * 1000) if age is not None else None
+
+
+def _best_bid_age_ms(ws: PriceStream, token_id: str) -> Optional[int]:
+    if not hasattr(ws, "get_latest_best_bid_age"):
+        return None
+    age = ws.get_latest_best_bid_age(token_id)
+    return round(age * 1000) if age is not None else None
+
+
+async def _market_snapshot_with_rest_fallback(
+    window: MarketWindow,
+    ws: PriceStream,
+) -> tuple[Optional[float], Optional[float], Optional[float], Optional[float]]:
+    """Read UP/DOWN snapshot from WS cache, falling back to REST midpoint reads."""
+    up_mid, down_mid, up_best_ask, down_best_ask = _market_snapshot_from_ws(window, ws)
+    if up_mid is None:
+        up_mid = await get_midpoint_async(window.up_token)
+    if down_mid is None:
+        down_mid = await get_midpoint_async(window.down_token)
+    return up_mid, down_mid, up_best_ask, down_best_ask
+
+
+def _snapshot_entry_band_active(strategy: Strategy, window: MarketWindow, now: int) -> bool:
+    """Return true when a snapshot-driven strategy should be actively evaluated."""
+    if not _is_crowd_m1_strategy(strategy):
+        return False
+    if not hasattr(strategy, "set_market_snapshot"):
+        return False
+    start_remaining = getattr(strategy, "entry_start_remaining_sec", None)
+    end_remaining = getattr(strategy, "entry_end_remaining_sec", None)
+    if start_remaining is None or end_remaining is None:
+        return False
+    remaining = window.end_epoch - now
+    return float(end_remaining) <= remaining <= float(start_remaining)
+
+
+async def _attempt_strategy_entry(
+    window: MarketWindow,
+    state: MonitorState,
+    ws: PriceStream,
+    dry_run: bool,
+    trade_config: TradeConfig,
+    strategy: Strategy,
+    side: str,
+    signal_price: float,
+) -> None:
+    """Run the shared strategy entry pipeline once using the given signal price."""
+    effective_side = state.target_side if state.target_side is not None else side
+    buy_token_id, _ = _side_token(window, effective_side)
+
+    if trade_config.max_entries_per_window is not None and state.entry_count >= trade_config.max_entries_per_window:
+        log_event(log, logging.WARNING, SIGNAL, {
+            "action": "BLOCKED_WINDOW_CAP",
+            "window": window.short_label,
+            "entry_count": state.entry_count,
+            "max_entries": trade_config.max_entries_per_window,
+        })
+        state.buy_blocked_window_cap = True
+        return
+
+    if not strategy.should_buy(signal_price, state):
+        return
+
+    if state.target_side is not None:
+        effective_side = state.target_side
+        buy_token_id, _ = _side_token(window, effective_side)
+    trade_amount = trade_config.amount_for_signal_strength(state.target_signal_strength)
+    entry_ask_level = trade_config.base_entry_ask_level()
+    max_entry_price = _entry_price_cap(strategy, state)
+    quote = _cap_limited_depth_quote(
+        ws,
+        buy_token_id,
+        trade_amount,
+        max_entry_price,
+        max_age_sec=config.FAK_RETRY_MAX_BEST_ASK_AGE_SEC,
+        min_entry_level=entry_ask_level,
+        low_price_threshold=trade_config.low_price_threshold,
+        low_price_entry_level=trade_config.low_price_entry_ask_level,
+        dynamic_entry_levels=trade_config.dynamic_entry_levels,
+        max_slippage_from_best_ask=trade_config.max_slippage_from_best_ask,
+    )
+    if not quote.enough:
+        state.target_entry_price = None
+        _log_depth_skip(
+            state,
+            effective_side,
+            signal_price,
+            quote,
+            max_entry_price,
+            trade_amount,
+            "cap-limited book depth insufficient",
+        )
+        return
+    _log_signal_eval(
+        state,
+        effective_side,
+        signal_price,
+        quote.best_ask_level_1,
+        quote.price,
+        max_entry_price,
+        depth_notional=quote.cap_notional,
+        depth_levels_used=quote.levels_used,
+    )
+    if not _entry_ask_changed(state, effective_side, quote.price_hint):
+        state.target_entry_price = None
+        return
+    state.target_entry_price = quote.price
+    log_event(log, logging.INFO, SIGNAL, {
+        "action": "BUY_SIGNAL",
+        "price": quote.price,
+        "target_entry_ask": quote.price,
+        "best_ask_level_1": quote.best_ask_level_1,
+        "price_hint": quote.price_hint,
+        "depth_levels_used": quote.levels_used,
+        "depth_notional": round(quote.cap_notional, 4),
+        "depth_total_levels": quote.total_levels,
+        "depth_skipped_levels": quote.skipped_levels,
+        "entry_ask_level": quote.entry_ask_level,
+        "book_ask_preview": quote.preview,
+        "signal_price": signal_price,
+        "side": effective_side.upper(),
+        "window": window.short_label,
+        "max_entry_price": max_entry_price,
+        "signal_strength": (
+            round(state.target_signal_strength, 3)
+            if state.target_signal_strength is not None
+            else None
+        ),
+        "past_signal_strength": (
+            round(state.target_past_signal_strength, 3)
+            if state.target_past_signal_strength is not None
+            else None
+        ),
+        "active_theta_pct": (
+            round(state.target_active_theta_pct, 4)
+            if state.target_active_theta_pct is not None
+            else None
+        ),
+        "remaining_sec": (
+            round(state.target_remaining_sec)
+            if state.target_remaining_sec is not None
+            else None
+        ),
+        "amount": trade_amount,
+        "best_ask_age_ms": round(quote.ask_age_sec * 1000) if quote.ask_age_sec is not None else None,
+    })
+    await _handle_opening_price(
+        window,
+        state,
+        buy_token_id,
+        signal_price,
+        dry_run,
+        trade_config,
+        strategy,
+        effective_side,
+        best_ask=quote.price_hint,
+        target_entry_ask=quote.price,
+        best_ask_level_1=quote.best_ask_level_1,
+        best_ask_age_sec=quote.ask_age_sec,
+        depth_levels_used=quote.levels_used,
+        depth_notional=quote.cap_notional,
+        depth_skipped_levels=quote.skipped_levels,
+        entry_ask_level=quote.entry_ask_level,
+        book_ask_preview=quote.preview,
+        price_hint_refresher=_price_hint_refresher(ws, buy_token_id, strategy, trade_config, state),
+    )
+
+
 async def _monitor_single_window(
     window: MarketWindow,
     state: MonitorState,
@@ -1065,6 +1143,66 @@ async def _monitor_single_window(
             # Do NOT close ws — reuse across windows
             _log_window_summary(state, window, dry_run)
             return next_win
+
+        if (
+            ws is not None
+            and state.bought
+            and not state.exit_triggered
+            and not state.trade_lock.locked()
+        ):
+            async with state.trade_lock:
+                if state.bought and not state.exit_triggered:
+                    effective_side = state.target_side if state.target_side is not None else side
+                    buy_token_id, _ = _side_token(window, effective_side)
+                    await _maybe_handle_stop_loss(
+                        window,
+                        state,
+                        ws,
+                        buy_token_id,
+                        dry_run,
+                        trade_config,
+                        effective_side,
+                    )
+
+        if (
+            ws is not None
+            and strategy is not None
+            and not state.bought
+            and not state.buy_blocked_window_cap
+            and _snapshot_entry_band_active(strategy, window, now)
+            and not state.trade_lock.locked()
+        ):
+            async with state.trade_lock:
+                if not state.bought and not state.buy_blocked_window_cap:
+                    up_mid, down_mid, up_best_ask, down_best_ask = await _market_snapshot_with_rest_fallback(window, ws)
+                    log_event(log, logging.INFO, SIGNAL, {
+                        "action": "SNAPSHOT_ENTRY_CHECK",
+                        "strategy": strategy.__class__.__name__,
+                        "window": window.short_label,
+                        "remaining_sec": round(window.end_epoch - time.time()),
+                        "up_mid": up_mid,
+                        "down_mid": down_mid,
+                        "up_best_ask": up_best_ask,
+                        "down_best_ask": down_best_ask,
+                        "up_best_ask_age_ms": _best_ask_age_ms(ws, window.up_token),
+                        "down_best_ask_age_ms": _best_ask_age_ms(ws, window.down_token),
+                    })
+                    strategy.set_market_snapshot(
+                        up_mid=up_mid,
+                        down_mid=down_mid,
+                        up_best_ask=up_best_ask,
+                        down_best_ask=down_best_ask,
+                    )
+                    await _attempt_strategy_entry(
+                        window,
+                        state,
+                        ws,
+                        dry_run,
+                        trade_config,
+                        strategy,
+                        side,
+                        up_mid if up_mid is not None else 0.0,
+                    )
 
         await asyncio.sleep(1)
 
@@ -1183,6 +1321,8 @@ async def monitor_window(
     state.stop_loss_triggered = False
     state.stop_loss_attempted = False
     state.stop_loss_price = None
+    state.last_stop_loss_check_key = None
+    state.last_stop_loss_check_logged_at = 0.0
     state.last_signal_eval_key = None
     state.last_signal_eval_logged_at = 0.0
     state.last_depth_skip_key = None
@@ -1287,6 +1427,8 @@ async def monitor_window(
                     min_entry_level=entry_ask_level,
                     low_price_threshold=trade_config.low_price_threshold,
                     low_price_entry_level=trade_config.low_price_entry_ask_level,
+                    dynamic_entry_levels=trade_config.dynamic_entry_levels,
+                    max_slippage_from_best_ask=trade_config.max_slippage_from_best_ask,
                 )
                 if not quote.enough:
                     state.target_entry_price = None
@@ -1389,8 +1531,7 @@ async def _on_price_update(
     if price is None:
         return
 
-    # Entry signals are computed from the UP token reference price.
-    if not state.bought and update.token_id != window.up_token:
+    if not state.bought and not _entry_update_allowed(strategy, window, update):
         return
 
     log.debug(
@@ -1407,6 +1548,14 @@ async def _on_price_update(
             return
 
         if not state.bought:
+            if hasattr(strategy, "set_market_snapshot"):
+                up_mid, down_mid, up_best_ask, down_best_ask = _market_snapshot_from_ws(window, ws, update)
+                strategy.set_market_snapshot(
+                    up_mid=up_mid,
+                    down_mid=down_mid,
+                    up_best_ask=up_best_ask,
+                    down_best_ask=down_best_ask,
+                )
             if (
                 trade_config.max_entries_per_window is not None
                 and state.entry_count >= trade_config.max_entries_per_window
@@ -1435,6 +1584,8 @@ async def _on_price_update(
                     min_entry_level=entry_ask_level,
                     low_price_threshold=trade_config.low_price_threshold,
                     low_price_entry_level=trade_config.low_price_entry_ask_level,
+                    dynamic_entry_levels=trade_config.dynamic_entry_levels,
+                    max_slippage_from_best_ask=trade_config.max_slippage_from_best_ask,
                 )
                 if not quote.enough:
                     state.target_entry_price = None
@@ -1519,6 +1670,21 @@ async def _on_price_update(
         is_held_token_update = update.token_id == buy_token_id
         if is_held_token_update:
             state.latest_midpoint = price
+            stop_timing, stop_remaining = _stop_loss_remaining_state(window, trade_config)
+            if stop_timing == "before":
+                return
+            if stop_timing == "prewarm":
+                _log_stop_loss_book_freshness(
+                    state,
+                    side=effective_side,
+                    window=window,
+                    remaining=stop_remaining,
+                    phase="prewarm",
+                    best_bid_age_ms=_best_bid_age_ms(ws, buy_token_id),
+                )
+                return
+            if stop_timing == "after":
+                return
             await _maybe_handle_stop_loss(
                 window,
                 state,
@@ -1607,7 +1773,7 @@ async def _handle_opening_price(
             ),
             "best_ask_age_ms": round(best_ask_age_sec * 1000) if best_ask_age_sec is not None else None,
         })
-        result = await buy_token(
+        result = await place_fak_buy(
             buy_token_id, trade_amount,
             price_hint=best_ask,
             price_hint_refresher=price_hint_refresher,

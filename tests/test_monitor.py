@@ -10,8 +10,11 @@ import logging
 from polybot.core.state import MonitorState
 from polybot.market.market import MarketWindow
 from polybot.market.stream import PriceUpdate
+from polybot.strategies.crowd_m1 import CrowdM1Strategy
+from polybot.strategies.paired_window import PairedWindowStrategy
 from polybot.trade_config import TradeConfig
 from polybot.trading.monitor import (
+    _cap_limited_depth_quote,
     _handle_opening_price,
     _log_window_summary,
     _maybe_handle_stop_loss,
@@ -68,6 +71,25 @@ def _mock_strategy() -> MagicMock:
     strategy.get_side.return_value = "up"
     strategy.preload_open_btc = AsyncMock()
     strategy.max_entry_price = 0.65
+    return strategy
+
+
+def _mock_crowd_strategy() -> MagicMock:
+    strategy = MagicMock(spec=CrowdM1Strategy)
+    strategy.should_buy = MagicMock(return_value=False)
+    strategy.get_side.return_value = "up"
+    strategy.set_market_snapshot = MagicMock()
+    strategy.preload_open_btc = AsyncMock()
+    strategy.max_entry_price = 0.75
+    return strategy
+
+
+def _mock_paired_strategy() -> MagicMock:
+    strategy = MagicMock(spec=PairedWindowStrategy)
+    strategy.should_buy = MagicMock(return_value=True)
+    strategy.get_side.return_value = "up"
+    strategy.preload_open_btc = AsyncMock()
+    strategy.max_entry_price = 0.75
     return strategy
 
 
@@ -131,9 +153,9 @@ async def test_stop_loss_sells_with_bid_depth_inside_time_band():
         stop_loss_min_sell_price=0.20,
     )
 
-    with patch("polybot.trading.monitor.get_tick_size", return_value=0.01), \
+    with patch("polybot.trading.fak_quotes.get_tick_size", return_value=0.01), \
          patch("polybot.trading.monitor.get_token_balance", return_value=1.522), \
-         patch("polybot.trading.monitor.sell_token", new_callable=AsyncMock) as mock_sell:
+         patch("polybot.trading.monitor.place_fak_stop_loss_sell", new_callable=AsyncMock) as mock_sell:
         mock_sell.return_value = OrderResult(
             success=True,
             order_id="sell-1",
@@ -186,7 +208,7 @@ async def test_stop_loss_does_not_trigger_from_deep_book_price_only():
         stop_loss_trigger_price=0.38,
     )
 
-    with patch("polybot.trading.monitor.sell_token", new_callable=AsyncMock) as mock_sell:
+    with patch("polybot.trading.monitor.place_fak_stop_loss_sell", new_callable=AsyncMock) as mock_sell:
         await _maybe_handle_stop_loss(
             window,
             state,
@@ -199,6 +221,51 @@ async def test_stop_loss_does_not_trigger_from_deep_book_price_only():
 
     mock_sell.assert_not_called()
     assert state.stop_loss_triggered is False
+
+
+@pytest.mark.asyncio
+async def test_stop_loss_logs_check_when_bid_above_trigger(caplog):
+    now = time.time()
+    window = _make_window(start_epoch=int(now) - 240, end_epoch=int(now) + 60)
+    state = _make_state(
+        bought=True,
+        holding_size=1.7,
+        entry_amount=1.0,
+        entry_price=0.66,
+        entry_avg_price=0.66,
+    )
+    ws = MagicMock()
+    ws.get_latest_bid_levels_with_size.return_value = _bid_book(0.56, 20)
+    ws.get_latest_best_bid_age.return_value = 0.01
+    trade_config = _tc(
+        stop_loss_enabled=True,
+        stop_loss_start_remaining_sec=120,
+        stop_loss_end_remaining_sec=15,
+        stop_loss_trigger_price=0.38,
+    )
+
+    with patch("polybot.trading.monitor.place_fak_stop_loss_sell", new_callable=AsyncMock) as mock_sell:
+        with caplog.at_level(logging.INFO, logger="polybot.trading.monitor"):
+            await _maybe_handle_stop_loss(
+                window,
+                state,
+                ws,
+                "down-token-123",
+                False,
+                trade_config,
+                "down",
+            )
+
+    mock_sell.assert_not_called()
+    checks = [
+        record.event_data
+        for record in caplog.records
+        if getattr(record, "event_data", {}).get("action") == "STOP_LOSS_CHECK"
+    ]
+    assert checks
+    assert checks[0]["reason"] == "bid_above_stop"
+    assert checks[0]["best_bid_level_1"] == pytest.approx(0.56)
+    assert checks[0]["stop_price"] == pytest.approx(0.38)
 
 
 @pytest.mark.asyncio
@@ -221,7 +288,7 @@ async def test_stop_loss_disabled_for_low_entry_price():
         stop_loss_disable_below_entry_price=0.45,
     )
 
-    with patch("polybot.trading.monitor.sell_token", new_callable=AsyncMock) as mock_sell:
+    with patch("polybot.trading.monitor.place_fak_stop_loss_sell", new_callable=AsyncMock) as mock_sell:
         await _maybe_handle_stop_loss(
             window,
             state,
@@ -255,7 +322,7 @@ async def test_stop_loss_ignores_early_window():
         stop_loss_end_remaining_sec=15,
     )
 
-    with patch("polybot.trading.monitor.sell_token", new_callable=AsyncMock) as mock_sell:
+    with patch("polybot.trading.monitor.place_fak_stop_loss_sell", new_callable=AsyncMock) as mock_sell:
         await _maybe_handle_stop_loss(
             window,
             state,
@@ -280,11 +347,147 @@ async def test_on_price_buy_in_range():
 
     update = _make_update("up-token-123", midpoint=0.50)
 
-    with patch("polybot.trading.monitor.get_tick_size", return_value=0.01), \
+    with patch("polybot.trading.fak_quotes.get_tick_size", return_value=0.01), \
          patch("polybot.trading.monitor._handle_opening_price", new_callable=AsyncMock) as mock_buy:
         await _on_price_update(update, window, state, ws=ws, dry_run=True, trade_config=_tc(), strategy=strategy, side="up")
         mock_buy.assert_called_once()
         assert mock_buy.await_args.kwargs["best_ask"] == pytest.approx(0.60)
+
+
+@pytest.mark.asyncio
+async def test_on_price_injects_market_snapshot_for_dynamic_strategy():
+    window = _make_window()
+    state = _make_state()
+    strategy = _mock_strategy()
+    strategy.should_buy.return_value = False
+    strategy.set_market_snapshot = MagicMock()
+    ws = MagicMock()
+    ws.get_latest_price.side_effect = lambda token: {
+        "up-token-123": 0.62,
+        "down-token-456": 0.38,
+    }.get(token)
+    ws.get_latest_best_ask.side_effect = lambda token: {
+        "up-token-123": 0.63,
+        "down-token-456": 0.39,
+    }.get(token)
+
+    update = _make_update("up-token-123", midpoint=0.62)
+
+    await _on_price_update(
+        update,
+        window,
+        state,
+        ws=ws,
+        dry_run=True,
+        trade_config=_tc(),
+        strategy=strategy,
+        side="up",
+    )
+
+    strategy.set_market_snapshot.assert_called_once_with(
+        up_mid=pytest.approx(0.62),
+        down_mid=pytest.approx(0.38),
+        up_best_ask=pytest.approx(0.63),
+        down_best_ask=pytest.approx(0.39),
+    )
+
+
+@pytest.mark.asyncio
+async def test_on_price_snapshot_uses_current_update_when_cache_lags():
+    window = _make_window()
+    state = _make_state()
+    strategy = _mock_strategy()
+    strategy.should_buy.return_value = False
+    strategy.set_market_snapshot = MagicMock()
+    ws = MagicMock()
+    ws.get_latest_price.side_effect = lambda token: {
+        "up-token-123": None,
+        "down-token-456": 0.38,
+    }.get(token)
+    ws.get_latest_best_ask.side_effect = lambda token: {
+        "up-token-123": None,
+        "down-token-456": 0.39,
+    }.get(token)
+
+    update = _make_update("up-token-123", midpoint=0.62)
+
+    await _on_price_update(
+        update,
+        window,
+        state,
+        ws=ws,
+        dry_run=True,
+        trade_config=_tc(),
+        strategy=strategy,
+        side="up",
+    )
+
+    strategy.set_market_snapshot.assert_called_once_with(
+        up_mid=pytest.approx(0.62),
+        down_mid=pytest.approx(0.38),
+        up_best_ask=pytest.approx(0.63),
+        down_best_ask=pytest.approx(0.39),
+    )
+
+
+@pytest.mark.asyncio
+async def test_on_price_crowd_strategy_accepts_down_token_update_for_entry_check():
+    window = _make_window()
+    state = _make_state()
+    strategy = _mock_crowd_strategy()
+    ws = MagicMock()
+    ws.get_latest_price.side_effect = lambda token: {
+        "up-token-123": 0.38,
+        "down-token-456": 0.62,
+    }.get(token)
+    ws.get_latest_best_ask.side_effect = lambda token: {
+        "up-token-123": 0.39,
+        "down-token-456": 0.63,
+    }.get(token)
+
+    update = _make_update("down-token-456", midpoint=0.62)
+
+    await _on_price_update(
+        update,
+        window,
+        state,
+        ws=ws,
+        dry_run=True,
+        trade_config=_tc(),
+        strategy=strategy,
+        side="up",
+    )
+
+    strategy.set_market_snapshot.assert_called_once_with(
+        up_mid=pytest.approx(0.38),
+        down_mid=pytest.approx(0.62),
+        up_best_ask=pytest.approx(0.39),
+        down_best_ask=pytest.approx(0.63),
+    )
+    strategy.should_buy.assert_called_once_with(pytest.approx(0.62), state)
+
+
+@pytest.mark.asyncio
+async def test_on_price_paired_strategy_ignores_down_token_before_entry():
+    window = _make_window()
+    state = _make_state()
+    strategy = _mock_paired_strategy()
+    ws = MagicMock()
+
+    update = _make_update("down-token-456", midpoint=0.62)
+
+    await _on_price_update(
+        update,
+        window,
+        state,
+        ws=ws,
+        dry_run=True,
+        trade_config=_tc(),
+        strategy=strategy,
+        side="up",
+    )
+
+    strategy.should_buy.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -327,7 +530,7 @@ async def test_on_price_uses_target_token_best_ask_for_down_entry():
 
     update = _make_update("up-token-123", midpoint=0.395)
 
-    with patch("polybot.trading.monitor.get_tick_size", return_value=0.01), \
+    with patch("polybot.trading.fak_quotes.get_tick_size", return_value=0.01), \
          patch("polybot.trading.monitor._handle_opening_price", new_callable=AsyncMock) as mock_buy:
         await _on_price_update(update, window, state, ws=ws, dry_run=True, trade_config=_tc(amount=1.0), strategy=strategy, side="up")
 
@@ -347,7 +550,7 @@ async def test_buy_signal_logs_target_price_for_down_entry(caplog):
 
     update = _make_update("up-token-123", midpoint=0.385)
 
-    with patch("polybot.trading.monitor.get_tick_size", return_value=0.01), \
+    with patch("polybot.trading.fak_quotes.get_tick_size", return_value=0.01), \
          patch("polybot.trading.monitor._handle_opening_price", new_callable=AsyncMock):
         with caplog.at_level(logging.INFO, logger="polybot.trading.monitor"):
             await _on_price_update(update, window, state, ws=ws, dry_run=True, trade_config=_tc(amount=1.0), strategy=strategy, side="up")
@@ -390,7 +593,7 @@ async def test_on_price_allows_low_target_best_ask():
 
     update = _make_update("up-token-123", midpoint=0.58)
 
-    with patch("polybot.trading.monitor.get_tick_size", return_value=0.01), \
+    with patch("polybot.trading.fak_quotes.get_tick_size", return_value=0.01), \
          patch("polybot.trading.monitor._handle_opening_price", new_callable=AsyncMock) as mock_buy:
         await _on_price_update(update, window, state, ws=ws, dry_run=True, trade_config=_tc(amount=1.0), strategy=strategy, side="up")
 
@@ -439,7 +642,7 @@ async def test_on_price_entry_ask_level_caps_deepest_price_hint_level():
 
     update = _make_update("up-token-123", midpoint=0.58)
 
-    with patch("polybot.trading.monitor.get_tick_size", return_value=0.01), \
+    with patch("polybot.trading.fak_quotes.get_tick_size", return_value=0.01), \
          patch("polybot.trading.monitor._handle_opening_price", new_callable=AsyncMock) as mock_buy:
         await _on_price_update(
             update,
@@ -488,7 +691,7 @@ async def test_on_price_low_top_ask_allows_deeper_max_price_hint_level():
         low_price_entry_ask_level=9,
     )
 
-    with patch("polybot.trading.monitor.get_tick_size", return_value=0.01), \
+    with patch("polybot.trading.fak_quotes.get_tick_size", return_value=0.01), \
          patch("polybot.trading.monitor._handle_opening_price", new_callable=AsyncMock) as mock_buy:
         await _on_price_update(
             update,
@@ -537,7 +740,7 @@ async def test_on_price_non_low_top_ask_uses_base_price_hint_level():
         low_price_entry_ask_level=9,
     )
 
-    with patch("polybot.trading.monitor.get_tick_size", return_value=0.01), \
+    with patch("polybot.trading.fak_quotes.get_tick_size", return_value=0.01), \
          patch("polybot.trading.monitor._handle_opening_price", new_callable=AsyncMock) as mock_buy:
         await _on_price_update(
             update,
@@ -554,6 +757,85 @@ async def test_on_price_non_low_top_ask_uses_base_price_hint_level():
     assert mock_buy.await_args.kwargs["target_entry_ask"] == pytest.approx(0.61)
     assert mock_buy.await_args.kwargs["best_ask"] == pytest.approx(0.62)
     assert mock_buy.await_args.kwargs["entry_ask_level"] == 7
+
+
+def test_cap_depth_quote_uses_dynamic_entry_level_from_leading_ask():
+    ws = MagicMock()
+    ws.get_latest_ask_levels_with_size.return_value = [
+        (0.65, 0.1),
+        (0.66, 0.1),
+        (0.67, 0.1),
+        (0.68, 10.0),
+        (0.69, 10.0),
+    ]
+    ws.get_latest_best_ask.return_value = 0.65
+    ws.get_latest_best_ask_age.return_value = 0.001
+    trade_config = _tc(
+        amount=1.0,
+        entry_ask_level=9,
+        dynamic_entry_levels=[
+            (0.64, 5),
+            (0.68, 4),
+            (0.72, 2),
+            (0.75, 1),
+        ],
+        max_slippage_from_best_ask=0.04,
+    )
+
+    with patch("polybot.trading.fak_quotes.get_tick_size", return_value=0.01):
+        quote = _cap_limited_depth_quote(
+            ws,
+            "up-token-123",
+            trade_config.amount,
+            0.75,
+            min_entry_level=trade_config.base_entry_ask_level(),
+            dynamic_entry_levels=trade_config.dynamic_entry_levels,
+            max_slippage_from_best_ask=trade_config.max_slippage_from_best_ask,
+        )
+
+    assert quote.enough is True
+    assert quote.entry_ask_level == 4
+    assert quote.price == pytest.approx(0.68)
+    assert quote.price_hint == pytest.approx(0.69)
+
+
+def test_cap_depth_quote_skips_when_dynamic_level_exceeds_slippage_cap():
+    ws = MagicMock()
+    ws.get_latest_ask_levels_with_size.return_value = [
+        (0.65, 0.1),
+        (0.66, 0.1),
+        (0.67, 0.1),
+        (0.68, 0.1),
+        (0.70, 10.0),
+    ]
+    ws.get_latest_best_ask.return_value = 0.65
+    ws.get_latest_best_ask_age.return_value = 0.001
+    trade_config = _tc(
+        amount=1.0,
+        entry_ask_level=9,
+        dynamic_entry_levels=[
+            (0.64, 5),
+            (0.68, 4),
+            (0.72, 2),
+            (0.75, 1),
+        ],
+        max_slippage_from_best_ask=0.04,
+    )
+
+    quote = _cap_limited_depth_quote(
+        ws,
+        "up-token-123",
+        trade_config.amount,
+        0.75,
+        min_entry_level=trade_config.base_entry_ask_level(),
+        dynamic_entry_levels=trade_config.dynamic_entry_levels,
+        max_slippage_from_best_ask=trade_config.max_slippage_from_best_ask,
+    )
+
+    assert quote.enough is False
+    assert quote.entry_ask_level == 4
+    assert quote.price is None
+    assert quote.cap_notional == pytest.approx(0.201)
 
 
 @pytest.mark.asyncio
@@ -659,7 +941,7 @@ async def test_on_price_uses_configured_entry_ask_level():
         entry_ask_level=2,
     )
 
-    with patch("polybot.trading.monitor.get_tick_size", return_value=0.01), \
+    with patch("polybot.trading.fak_quotes.get_tick_size", return_value=0.01), \
          patch("polybot.trading.monitor._handle_opening_price", new_callable=AsyncMock) as mock_buy:
         await _on_price_update(
             update,
@@ -728,11 +1010,11 @@ async def test_rechecks_entry_band_only_when_target_best_ask_changes(caplog):
         [(0.64, 0.1), (0.66, 10.0)],
         [(0.64, 0.1), (0.64, 10.0)],
     ]
-    ws.get_latest_best_ask.side_effect = [0.64, 0.64, 0.64]
+    ws.get_latest_best_ask.side_effect = lambda _token, *_, **__: 0.64
     ws.get_latest_best_ask_age.return_value = 0.001
     update = _make_update("up-token-123", midpoint=0.58)
 
-    with patch("polybot.trading.monitor.get_tick_size", return_value=0.01), \
+    with patch("polybot.trading.fak_quotes.get_tick_size", return_value=0.01), \
          patch("polybot.trading.monitor._handle_opening_price", new_callable=AsyncMock) as mock_buy:
         with caplog.at_level(logging.INFO, logger="polybot.trading.monitor"):
             await _on_price_update(update, window, state, ws=ws, dry_run=True, trade_config=_tc(amount=1.0), strategy=strategy, side="up")
@@ -905,6 +1187,181 @@ async def test_monitor_window_resets_started_before_preopen_switch():
     assert next_win is None
     assert returned_ws is mock_ws
     assert monitored is True
+
+
+@pytest.mark.asyncio
+async def test_monitor_single_window_actively_evaluates_snapshot_strategy_at_entry_time(caplog):
+    now = int(time.time())
+    window = _make_window(start_epoch=now - 120, end_epoch=now + 180)
+    state = _make_state()
+    state.started = True
+    ws = MagicMock()
+    ws.get_latest_price.side_effect = lambda token: {
+        "up-token-123": 0.62,
+        "down-token-456": 0.38,
+    }.get(token)
+    ws.get_latest_best_ask.side_effect = lambda token: {
+        "up-token-123": 0.63,
+        "down-token-456": 0.39,
+    }.get(token)
+    ws.get_latest_best_ask_age.side_effect = lambda token: {
+        "up-token-123": 0.12,
+        "down-token-456": 0.34,
+    }.get(token)
+
+    strategy = _mock_crowd_strategy()
+    strategy.entry_start_remaining_sec = 180
+    strategy.entry_end_remaining_sec = 175
+    strategy.should_buy.return_value = False
+
+    fake_now = {"value": now}
+    with patch("polybot.trading.monitor.time.time", side_effect=lambda: fake_now["value"]), \
+         patch("polybot.trading.monitor.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        async def _after_one_sleep(_seconds):
+            fake_now["value"] = window.end_epoch
+
+        mock_sleep.side_effect = _after_one_sleep
+
+        with caplog.at_level(logging.INFO, logger="polybot.trading.monitor"):
+            await _monitor_single_window(
+                window,
+                state,
+                ws,
+                dry_run=True,
+                trade_config=_tc(),
+                strategy=strategy,
+                prefetch_next_window=False,
+            )
+
+    strategy.set_market_snapshot.assert_called_once_with(
+        up_mid=pytest.approx(0.62),
+        down_mid=pytest.approx(0.38),
+        up_best_ask=pytest.approx(0.63),
+        down_best_ask=pytest.approx(0.39),
+    )
+    strategy.should_buy.assert_called_once_with(pytest.approx(0.62), state)
+    checks = [
+        record.event_data
+        for record in caplog.records
+        if getattr(record, "event_data", {}).get("action") == "SNAPSHOT_ENTRY_CHECK"
+    ]
+    assert checks
+    assert checks[0]["up_best_ask"] == pytest.approx(0.63)
+    assert checks[0]["down_best_ask"] == pytest.approx(0.39)
+    assert checks[0]["up_best_ask_age_ms"] == 120
+    assert checks[0]["down_best_ask_age_ms"] == 340
+
+
+@pytest.mark.asyncio
+async def test_monitor_single_window_actively_checks_stop_loss_without_price_update():
+    now = int(time.time())
+    window = _make_window(start_epoch=now - 230, end_epoch=now + 70)
+    state = _make_state(
+        bought=True,
+        holding_size=1.5,
+        entry_amount=1.0,
+        entry_price=0.66,
+        entry_avg_price=0.66,
+        target_side="down",
+    )
+    ws = MagicMock()
+    strategy = _mock_strategy()
+
+    fake_now = {"value": now}
+    with patch("polybot.trading.monitor.time.time", side_effect=lambda: fake_now["value"]), \
+         patch("polybot.trading.monitor.asyncio.sleep", new_callable=AsyncMock) as mock_sleep, \
+         patch("polybot.trading.monitor._maybe_handle_stop_loss", new_callable=AsyncMock) as mock_stop:
+        async def _after_one_sleep(_seconds):
+            fake_now["value"] = window.end_epoch
+
+        mock_sleep.side_effect = _after_one_sleep
+
+        await _monitor_single_window(
+            window,
+            state,
+            ws,
+            dry_run=True,
+            trade_config=_tc(stop_loss_enabled=True),
+            strategy=strategy,
+            prefetch_next_window=False,
+        )
+
+    mock_stop.assert_awaited()
+    assert mock_stop.await_args.args[:4] == (window, state, ws, window.down_token)
+    assert mock_stop.await_args.args[6] == "down"
+
+
+@pytest.mark.asyncio
+async def test_on_price_bought_position_skips_stop_loss_before_time_band():
+    now = int(time.time())
+    window = _make_window(start_epoch=now - 100, end_epoch=now + 200)
+    state = _make_state(
+        bought=True,
+        holding_size=1.5,
+        entry_amount=1.0,
+        entry_price=0.66,
+        entry_avg_price=0.66,
+        target_side="down",
+    )
+    strategy = _mock_crowd_strategy()
+    update = _make_update("down-token-456", midpoint=0.62)
+
+    with patch("polybot.trading.monitor.time.time", return_value=now), \
+         patch("polybot.trading.monitor._maybe_handle_stop_loss", new_callable=AsyncMock) as mock_stop:
+        await _on_price_update(
+            update,
+            window,
+            state,
+            ws=MagicMock(),
+            dry_run=True,
+            trade_config=_tc(stop_loss_enabled=True),
+            strategy=strategy,
+            side="up",
+        )
+
+    mock_stop.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_on_price_bought_position_logs_stop_loss_prewarm_freshness(caplog):
+    now = int(time.time())
+    window = _make_window(start_epoch=now - 176, end_epoch=now + 124)
+    state = _make_state(
+        bought=True,
+        holding_size=1.5,
+        entry_amount=1.0,
+        entry_price=0.66,
+        entry_avg_price=0.66,
+        target_side="down",
+    )
+    strategy = _mock_crowd_strategy()
+    update = _make_update("down-token-456", midpoint=0.62)
+    ws = MagicMock()
+    ws.get_latest_best_bid_age.return_value = 0.456
+
+    with patch("polybot.trading.monitor.time.time", return_value=now), \
+         patch("polybot.trading.monitor._maybe_handle_stop_loss", new_callable=AsyncMock) as mock_stop:
+        with caplog.at_level(logging.INFO, logger="polybot.trading.monitor"):
+            await _on_price_update(
+                update,
+                window,
+                state,
+                ws=ws,
+                dry_run=True,
+                trade_config=_tc(stop_loss_enabled=True),
+                strategy=strategy,
+                side="up",
+            )
+
+    mock_stop.assert_not_called()
+    events = [
+        record.event_data
+        for record in caplog.records
+        if getattr(record, "event_data", {}).get("action") == "STOP_LOSS_BOOK_FRESHNESS"
+    ]
+    assert events
+    assert events[0]["phase"] == "prewarm"
+    assert events[0]["best_bid_age_ms"] == 456
 
 
 @pytest.mark.asyncio

@@ -8,6 +8,7 @@ __pycache__/
 .codex/
 .codex-plugins/
 log/
+analysis/
 trading.log
 /data/
 remote_runs/

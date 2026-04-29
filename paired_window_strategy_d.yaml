@@ -1,0 +1,39 @@
+market:
+  asset: btc
+  timeframe: 5m
+
+strategy:
+  type: paired_window
+  theta_pct: 0.036
+  theta_start_pct: 0.035
+  theta_end_pct: 0.055
+  persistence_sec: 10
+  entry_start_remaining_sec: 255
+  entry_end_remaining_sec: 180
+  max_entry_price: 0.75
+  min_move_ratio: 1.0
+
+params:
+  amount: 1.0
+  entry_ask_level: 9
+  low_price_threshold: 0.60
+  low_price_entry_ask_level: 11
+  amount_tiers:
+    - threshold: 2.0
+      amount: 1.5
+  max_entries_per_window: 1
+  stop_loss:
+    enabled: true
+    trigger_price: 0.38
+    disable_below_entry_price: 0.45
+    start_remaining_sec: 120
+    end_remaining_sec: 30
+    sell_bid_level: 10
+    retry_count: 3
+    min_sell_price: 0.20
+
+risk:
+  consecutive_loss_amount: 3.0
+  daily_loss_amount: 5.0
+  consecutive_loss_pause_windows: 2
+  daily_loss_pause_windows: 5

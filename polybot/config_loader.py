@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Optional
 
 from polybot.market.series import ACTIVE_SERIES_KEY, MarketSeries
+from polybot.strategies.crowd_m1 import CrowdM1Strategy
 from polybot.strategies.paired_window import PairedWindowStrategy
 from .trade_config import TradeConfig
 
@@ -68,9 +69,23 @@ def build_strategy(cfg: dict, series: Optional[MarketSeries] = None):
             open_price_max_wait_sec=strat_cfg.get("open_price_max_wait_sec", 30.0),
         )
 
+    if strat_type == "crowd_m1":
+        if series is None:
+            raise ValueError("CrowdM1Strategy requires a market series")
+        return CrowdM1Strategy(
+            series=series,
+            entry_elapsed_sec=strat_cfg.get("entry_elapsed_sec", 120.0),
+            entry_timeout_sec=strat_cfg.get("entry_timeout_sec", 60.0),
+            min_leading_ask=strat_cfg.get("min_leading_ask", 0.0),
+            min_ask_gap=strat_cfg.get("min_ask_gap", 0.16),
+            max_entry_price=strat_cfg.get("max_entry_price", 0.75),
+            btc_direction_confirm=bool(strat_cfg.get("btc_direction_confirm", True)),
+            open_price_max_wait_sec=strat_cfg.get("open_price_max_wait_sec", 30.0),
+        )
+
     if strat_type:
-        raise ValueError(f"Unknown strategy type: {strat_type}. Available: paired_window")
-    raise ValueError("Strategy type is required. Available strategies: paired_window")
+        raise ValueError(f"Unknown strategy type: {strat_type}. Available: paired_window, crowd_m1")
+    raise ValueError("Strategy type is required. Available strategies: paired_window, crowd_m1")
 
 
 def build_trade_config(cfg: dict) -> TradeConfig:
@@ -93,6 +108,12 @@ def build_trade_config(cfg: dict) -> TradeConfig:
         low_price_entry_ask_level=(
             max(1, int(params["low_price_entry_ask_level"]))
             if params.get("low_price_entry_ask_level") is not None
+            else None
+        ),
+        dynamic_entry_levels=_build_dynamic_entry_levels(params.get("dynamic_entry_levels")),
+        max_slippage_from_best_ask=(
+            float(params["max_slippage_from_best_ask"])
+            if params.get("max_slippage_from_best_ask") is not None
             else None
         ),
         max_entries_per_window=params.get("max_entries_per_window"),
@@ -120,6 +141,23 @@ def _build_amount_tiers(raw: Optional[list[dict]]) -> list[tuple[float, float]]:
         tiers.append((float(threshold), float(amount)))
     tiers.sort(key=lambda pair: pair[0])
     return tiers
+
+
+def _build_dynamic_entry_levels(raw: Optional[list[dict]]) -> list[tuple[float, int]]:
+    """Build sorted best-ask threshold to ask-book level rules."""
+    levels: list[tuple[float, int]] = []
+    if not raw:
+        return levels
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        threshold = item.get("leading_ask_max")
+        level = item.get("entry_ask_level")
+        if threshold is None or level is None:
+            continue
+        levels.append((float(threshold), max(1, int(level))))
+    levels.sort(key=lambda pair: pair[0])
+    return levels
 
 
 def _build_stop_loss(raw: Optional[dict]) -> dict:

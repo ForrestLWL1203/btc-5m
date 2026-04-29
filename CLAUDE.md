@@ -1,11 +1,14 @@
 # CLAUDE.md - Current Runtime State
 
-One active runtime strategy: `paired_window`. One active market: BTC 5-minute.
+Maintained live-capable runtime strategy: `paired_window`. Experimental
+dry-run runtime strategy: `crowd_m1`. One active market: BTC 5-minute.
 
 Historical strategy configs/scripts/tests, non-BTC/non-5m series support, and
 legacy stop-loss multiplier compatibility have been removed. Treat
-`paired_window_early_entry_dry.yaml` as the only maintained runtime config.
-The filename contains `dry`, but `--dry` controls dry/live mode.
+`paired_window_early_entry_dry.yaml` as the maintained live-capable runtime
+config. `crowd_m1_dry.yaml` is for the explicitly requested M1 dry-run
+experiment. Filenames containing `dry` do not control dry/live mode; `--dry`
+does.
 
 ## Strategy
 
@@ -64,13 +67,108 @@ Rules:
 - Hold to `window.end_epoch` unless optional stop-loss is enabled and fills.
 - No TP, reversal, or re-entry.
 
+## Strategy D Candidate
+
+Saved config: `paired_window_strategy_d.yaml`.
+
+Strategy D is a paired-window candidate from the 102-window merged dataset
+backtest. It is not the default runtime config; use `--config` explicitly.
+
+```bash
+python3.11 run.py --config paired_window_strategy_d.yaml --dry --rounds 3
+python3.11 run.py --config paired_window_strategy_d.yaml --rounds 3
+```
+
+Reference result on
+`data/collect_btc-updown-5m_merged_20260427T183011_20260428T005206_102w.jsonl`:
+
+- 34 trades, 24W/10L, win rate 70.59%.
+- Settlement PnL `+5.7399`; mark PnL `+5.5485`.
+- Stop-losses 9; false stop-losses 0.
+- CSV: `analysis/backtest_collect_102w方案D_stop_end30_trades.csv`.
+
+Key parameters:
+
+```yaml
+strategy:
+  theta_start_pct: 0.035
+  theta_end_pct: 0.055
+  min_move_ratio: 1.0
+
+params:
+  stop_loss:
+    enabled: true
+    trigger_price: 0.38
+    start_remaining_sec: 120
+    end_remaining_sec: 30
+```
+
+## Experimental crowd_m1
+
+```yaml
+strategy:
+  type: crowd_m1
+  entry_elapsed_sec: 180
+  entry_timeout_sec: 5
+  min_ask_gap: 0.0
+  min_leading_ask: 0.62
+  max_entry_price: 0.75
+  btc_direction_confirm: false
+
+params:
+  amount: 1.0
+  entry_ask_level: 9
+  low_price_threshold: 0.60
+  low_price_entry_ask_level: 11
+  max_slippage_from_best_ask: 0.04
+  dynamic_entry_levels:
+    - leading_ask_max: 0.64
+      entry_ask_level: 5
+    - leading_ask_max: 0.68
+      entry_ask_level: 4
+    - leading_ask_max: 0.72
+      entry_ask_level: 2
+    - leading_ask_max: 0.75
+      entry_ask_level: 1
+  max_entries_per_window: 1
+  stop_loss:
+    enabled: true
+    trigger_price: 0.35
+    disable_below_entry_price: 0.45
+    start_remaining_sec: 45
+    end_remaining_sec: 25
+    sell_bid_level: 10
+    retry_count: 3
+    min_sell_price: 0.20
+```
+
+Rules:
+
+- At 180s after open, buy the higher-best-ask Polymarket side only if the
+  leading ask is at least 0.62; gap requirement is disabled with
+  `min_ask_gap=0.0`.
+- Do not require BTC direction from window open to match the selected side.
+- Use existing target-leg order-book depth gating; do not use backtest-only L5
+  price proxies for live execution.
+- Dynamic entry depth lowers slippage: leading ask `<=0.64` uses L5, `<=0.68`
+  uses L4, `<=0.72` uses L2, and `<=0.75` uses L1.
+- Selected entry ask must stay within 0.04 of target-leg best ask.
+- Entry is event-driven: UP or DOWN Polymarket WS updates refresh the cached
+  two-leg snapshot and can trigger entry immediately inside the 5s entry window;
+  the 1s snapshot loop is only a fallback.
+- Entry logs include UP/DOWN best-ask cache age for book freshness validation.
+- Hold to `window.end_epoch` unless the narrow stop-loss window fills.
+
 Stop-loss when enabled:
 
 - Entries below 0.45 do not use stop-loss.
-- Trigger price is `max(min_sell_price, trigger_price=0.38)`.
+- Trigger price is `max(min_sell_price, trigger_price=0.35)`.
 - Active only while `start_remaining_sec >= remaining >= end_remaining_sec`.
 - Uses held-leg bid book, skips level 1, and defaults to scanning up to bid
   level 10.
+- After BUY fill, held-token WS updates are ignored until 5s before the
+  stop-loss window; prewarm logs held-leg bid-book age, and active-window
+  updates can trigger stop-loss immediately.
 - Live runs sync actual CLOB token balance about 8 seconds after BUY fill, then
   check balance again before stop-loss SELL.
 - SELL FAK retries up to 3 times.
@@ -81,6 +179,8 @@ Stop-loss when enabled:
 - `run.py`
 - `polybot/strategies/paired_window.py`
 - `polybot/trading/monitor.py`
+- `polybot/trading/fak_quotes.py`
+- `polybot/trading/fak_execution.py`
 - `polybot/trading/trading.py`
 - `polybot/core/state.py`
 - `polybot/config_loader.py`
@@ -95,11 +195,12 @@ Stop-loss when enabled:
 
 ```bash
 python3.11 run.py --preset enhanced --dry --rounds 3
+python3.11 run.py --preset crowd_m1 --dry --rounds 3
 python3.11 run.py --preset enhanced --rounds 3
 env -u ALL_PROXY -u all_proxy -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy pytest -q
 ```
 
-Expected suite size after cleanup: 123 tests.
+Expected suite size after crowd_m1 event-driven entry updates: 157 tests.
 
 VPS:
 

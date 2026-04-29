@@ -347,6 +347,49 @@ async def test_switch_tokens_clears_price_cache():
 
 
 @pytest.mark.asyncio
+async def test_connect_retries_initial_connection_reset():
+    """Initial connect should retry transient handshake failures."""
+    callback = AsyncMock()
+    stream = PriceStream(on_price=callback)
+
+    class FakeWS:
+        def __init__(self):
+            self.sent = 0
+
+        async def send(self, _msg):
+            self.sent += 1
+
+        async def close(self):
+            pass
+
+    connected_ws = FakeWS()
+    attempts = {"count": 0}
+
+    async def connect(_url):
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise ConnectionResetError()
+        return connected_ws
+    sleeps = {"count": 0}
+
+    async def sleep(_seconds):
+        sleeps["count"] += 1
+
+    with patch("polybot.market.stream.websockets.connect", new=connect), \
+         patch("polybot.market.stream.asyncio.sleep", new=sleep), \
+         patch.object(PriceStream, "_ping_loop", new=MagicMock(return_value=object())), \
+         patch.object(PriceStream, "_recv_loop", new=MagicMock(return_value=object())), \
+         patch("polybot.market.stream.asyncio.create_task", return_value=MagicMock()):
+        await stream.connect(["new-token-1", "new-token-2"])
+
+    assert attempts["count"] == 2
+    assert sleeps["count"] == 1
+    assert connected_ws.sent == 1
+    assert stream._ws is connected_ws
+    assert stream._connected_tokens == ["new-token-1", "new-token-2"]
+
+
+@pytest.mark.asyncio
 async def test_switch_tokens_reconnects_when_ws_is_closed():
     """switch_tokens should reconnect instead of bubbling a closed-WS error."""
     callback = AsyncMock()

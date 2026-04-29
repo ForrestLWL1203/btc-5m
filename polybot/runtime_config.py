@@ -18,6 +18,7 @@ from polybot.runtime_inputs import (
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
 PRESET_PATHS = {
+    "crowd_m1": _REPO_ROOT / "crowd_m1_dry.yaml",
     "enhanced": _REPO_ROOT / "paired_window_early_entry_dry.yaml",
 }
 

@@ -1,0 +1,303 @@
+"""Mid-window crowd-following strategy for BTC 5-minute markets."""
+
+from __future__ import annotations
+
+import logging
+import time
+from typing import Optional
+
+from polybot.core.state import MonitorState
+from polybot.market.binance import BinancePriceFeed
+from polybot.market.series import MarketSeries
+from .base import Strategy
+
+log = logging.getLogger(__name__)
+
+
+class CrowdM1Strategy(Strategy):
+    """Buy the higher-best-ask Polymarket leg during the mid-window band.
+
+    The strategy scans between ``entry_elapsed_sec`` and
+    ``entry_elapsed_sec + entry_timeout_sec``. It buys the side with the higher
+    best ask only when the higher ask leads the lower ask by at least
+    ``min_ask_gap``. Optional BTC confirmation is retained for compatibility,
+    but the active M1 config keeps it disabled.
+    """
+
+    dynamic_side = True
+    snapshot_entry = True
+
+    def __init__(
+        self,
+        series: MarketSeries,
+        entry_elapsed_sec: float = 120.0,
+        entry_timeout_sec: float = 60.0,
+        min_leading_ask: float = 0.0,
+        min_ask_gap: float = 0.16,
+        max_entry_price: float = 0.75,
+        btc_direction_confirm: bool = True,
+        open_price_max_wait_sec: float = 30.0,
+    ):
+        self._series = series
+        self._entry_elapsed_sec = entry_elapsed_sec
+        self._entry_timeout_sec = entry_timeout_sec
+        self._min_leading_ask = min_leading_ask
+        self._min_ask_gap = min_ask_gap
+        self._max_entry_price = max_entry_price
+        self._btc_direction_confirm = btc_direction_confirm
+        self._open_price_max_wait_sec = open_price_max_wait_sec
+
+        self._feed = BinancePriceFeed(symbol="btcusdt")
+        self._window_start_epoch: float = 0.0
+        self._window_open_btc: Optional[float] = None
+        self._started = False
+        self._evaluated = False
+        self._up_mid: Optional[float] = None
+        self._down_mid: Optional[float] = None
+        self._up_best_ask: Optional[float] = None
+        self._down_best_ask: Optional[float] = None
+        self._logged_skip_reasons: set[str] = set()
+
+    @property
+    def entry_start_remaining_sec(self) -> float:
+        return max(0.0, self._series.slug_step - self._entry_elapsed_sec)
+
+    @property
+    def entry_end_remaining_sec(self) -> float:
+        return max(0.0, self._series.slug_step - self._entry_elapsed_sec - self._entry_timeout_sec)
+
+    @property
+    def max_entry_price(self) -> float:
+        return self._max_entry_price
+
+    async def start(self) -> None:
+        await self._feed.start()
+        self._started = True
+        log.debug(
+            "CrowdM1Strategy started | entry_elapsed=%.0fs timeout=%.0fs | "
+            "min_ask_gap=%.3f min_leading_ask=%.3f | max_entry=%.2f | btc_confirm=%s",
+            self._entry_elapsed_sec,
+            self._entry_timeout_sec,
+            self._min_ask_gap,
+            self._min_leading_ask,
+            self._max_entry_price,
+            self._btc_direction_confirm,
+        )
+
+    async def stop(self) -> None:
+        await self._feed.stop()
+        self._started = False
+
+    def set_window_start(self, epoch: float) -> None:
+        self._window_start_epoch = epoch
+        self._window_open_btc = None
+        self._evaluated = False
+        self._up_mid = None
+        self._down_mid = None
+        self._up_best_ask = None
+        self._down_best_ask = None
+        self._logged_skip_reasons = set()
+
+    async def preload_open_btc(self, epoch: float) -> None:
+        if self._window_open_btc is not None:
+            return
+        cached = self._feed.first_price_at_or_after(
+            epoch,
+            max_forward_sec=self._open_price_max_wait_sec,
+        )
+        if cached is not None:
+            return
+        price = await self._feed.fetch_open_at(epoch)
+        if price is not None:
+            self._window_open_btc = price
+            log.debug("OPEN_BTC_REST_SEEDED: epoch=%.0f price=%.2f", epoch, price)
+
+    def set_market_snapshot(
+        self,
+        *,
+        up_mid: Optional[float],
+        down_mid: Optional[float],
+        up_best_ask: Optional[float] = None,
+        down_best_ask: Optional[float] = None,
+    ) -> None:
+        self._up_mid = up_mid
+        self._down_mid = down_mid
+        self._up_best_ask = up_best_ask
+        self._down_best_ask = down_best_ask
+
+    def get_side(self, candles: Optional[list] = None) -> Optional[str]:
+        return "up"
+
+    def should_buy(self, price: float, state: MonitorState) -> bool:
+        if not self._started or state.bought or self._evaluated:
+            return False
+        if self._window_start_epoch <= 0:
+            return False
+
+        now = time.time()
+        elapsed = now - self._window_start_epoch
+        if elapsed < self._entry_elapsed_sec:
+            return False
+        if elapsed > self._entry_elapsed_sec + self._entry_timeout_sec:
+            self._evaluated = True
+            self._log_decision_skip(reason="entry_timeout", elapsed=elapsed)
+            return False
+
+        if self._up_best_ask is None or self._down_best_ask is None:
+            self._log_decision_skip(reason="missing_market_snapshot", elapsed=elapsed)
+            return False
+
+        up_mid = float(self._up_mid) if self._up_mid is not None else None
+        down_mid = float(self._down_mid) if self._down_mid is not None else None
+        up_best_ask = float(self._up_best_ask)
+        down_best_ask = float(self._down_best_ask)
+        direction = "up" if up_best_ask >= down_best_ask else "down"
+        leading_ask = up_best_ask if direction == "up" else down_best_ask
+        ask_gap = abs(up_best_ask - down_best_ask)
+        if ask_gap < self._min_ask_gap:
+            self._log_decision_skip(
+                reason="ask_gap_below_min",
+                elapsed=elapsed,
+                direction=direction,
+                up_mid=up_mid,
+                down_mid=down_mid,
+                up_best_ask=up_best_ask,
+                down_best_ask=down_best_ask,
+                ask_gap=ask_gap,
+                leading_ask=leading_ask,
+            )
+            return False
+
+        if leading_ask < self._min_leading_ask:
+            self._log_decision_skip(
+                reason="leading_ask_below_min",
+                elapsed=elapsed,
+                direction=direction,
+                up_mid=up_mid,
+                down_mid=down_mid,
+                up_best_ask=up_best_ask,
+                down_best_ask=down_best_ask,
+                ask_gap=ask_gap,
+                leading_ask=leading_ask,
+            )
+            return False
+
+        current_btc = self._feed.latest_price
+        open_btc = self._ensure_window_open_btc()
+        if self._btc_direction_confirm:
+            if current_btc is None or open_btc is None or open_btc <= 0:
+                self._log_decision_skip(
+                    reason="missing_btc_reference",
+                    elapsed=elapsed,
+                    direction=direction,
+                    up_mid=up_mid,
+                    down_mid=down_mid,
+                    up_best_ask=up_best_ask,
+                    down_best_ask=down_best_ask,
+                    ask_gap=ask_gap,
+                    leading_ask=leading_ask,
+                    open_btc=open_btc,
+                    current_btc=current_btc,
+                )
+                return False
+            btc_up = current_btc > open_btc
+            if (direction == "up") != btc_up:
+                self._log_decision_skip(
+                    reason="btc_direction_mismatch",
+                    elapsed=elapsed,
+                    direction=direction,
+                    up_mid=up_mid,
+                    down_mid=down_mid,
+                    up_best_ask=up_best_ask,
+                    down_best_ask=down_best_ask,
+                    ask_gap=ask_gap,
+                    leading_ask=leading_ask,
+                    open_btc=open_btc,
+                    current_btc=current_btc,
+                )
+                return False
+
+        remaining = self._series.slug_step - elapsed
+        state.target_side = direction
+        state.signal_reference_price = leading_ask
+        state.target_max_entry_price = self._max_entry_price
+        state.target_signal_strength = ask_gap / self._min_ask_gap if self._min_ask_gap > 0 else 0.0
+        state.target_past_signal_strength = None
+        state.target_active_theta_pct = self._min_ask_gap
+        state.target_remaining_sec = remaining
+
+        log.info(
+            "CROWD_M1_SIGNAL: dir=%s up_best_ask=%.3f down_best_ask=%.3f leading_ask=%.3f "
+            "ask_gap=%.3f min_gap=%.3f up_mid=%s down_mid=%s strength=%.2fx btc_open=%s btc_now=%s "
+            "max_entry=%.3f remaining=%.0fs",
+            direction.upper(),
+            up_best_ask,
+            down_best_ask,
+            leading_ask,
+            ask_gap,
+            self._min_ask_gap,
+            self._fmt_price(up_mid, digits=3),
+            self._fmt_price(down_mid, digits=3),
+            state.target_signal_strength,
+            f"{open_btc:.1f}" if open_btc is not None else None,
+            f"{current_btc:.1f}" if current_btc is not None else None,
+            self._max_entry_price,
+            remaining,
+        )
+        return True
+
+    def _log_decision_skip(
+        self,
+        *,
+        reason: str,
+        elapsed: float,
+        direction: Optional[str] = None,
+        up_mid: Optional[float] = None,
+        down_mid: Optional[float] = None,
+        up_best_ask: Optional[float] = None,
+        down_best_ask: Optional[float] = None,
+        ask_gap: Optional[float] = None,
+        leading_ask: Optional[float] = None,
+        open_btc: Optional[float] = None,
+        current_btc: Optional[float] = None,
+    ) -> None:
+        if reason in self._logged_skip_reasons:
+            return
+        self._logged_skip_reasons.add(reason)
+
+        remaining = self._series.slug_step - elapsed
+        log.info(
+            "M1_DECISION_SKIP: reason=%s elapsed=%.1fs remaining=%.1fs dir=%s "
+            "up_best_ask=%s down_best_ask=%s leading_ask=%s ask_gap=%s min_ask_gap=%.3f min_leading_ask=%.3f "
+            "up_mid=%s down_mid=%s btc_open=%s btc_now=%s max_entry=%.3f",
+            reason,
+            elapsed,
+            remaining,
+            direction.upper() if direction else None,
+            self._fmt_price(up_best_ask, digits=3),
+            self._fmt_price(down_best_ask, digits=3),
+            self._fmt_price(leading_ask, digits=3),
+            self._fmt_price(ask_gap, digits=3),
+            self._min_ask_gap,
+            self._min_leading_ask,
+            self._fmt_price(up_mid, digits=3),
+            self._fmt_price(down_mid, digits=3),
+            self._fmt_price(open_btc, digits=1),
+            self._fmt_price(current_btc, digits=1),
+            self._max_entry_price,
+        )
+
+    @staticmethod
+    def _fmt_price(value: Optional[float], *, digits: int) -> Optional[str]:
+        if value is None:
+            return None
+        return f"{float(value):.{digits}f}"
+
+    def _ensure_window_open_btc(self) -> Optional[float]:
+        if self._window_open_btc is not None:
+            return self._window_open_btc
+        self._window_open_btc = self._feed.first_price_at_or_after(
+            self._window_start_epoch,
+            max_forward_sec=self._open_price_max_wait_sec,
+        )
+        return self._window_open_btc

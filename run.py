@@ -151,6 +151,26 @@ Examples:
             strategy._persistence_sec,
             trade_config.max_entries_per_window,
         )
+    if hasattr(strategy, '_min_leading_ask'):
+        log.info(
+            "Params: crowd_m1 entry_band=%ds-%ds | min_ask_gap=%.3f | min_leading_ask=%.3f | max_entry=%.2f | "
+            "btc_confirm=%s | max_slippage=%s | dynamic_levels=%s | stop_loss=%s [remaining %.0f->%.0fs]",
+            int(strategy._entry_elapsed_sec),
+            int(strategy._entry_elapsed_sec + strategy._entry_timeout_sec),
+            strategy._min_ask_gap,
+            strategy._min_leading_ask,
+            strategy._max_entry_price,
+            strategy._btc_direction_confirm,
+            (
+                f"{trade_config.max_slippage_from_best_ask:.3f}"
+                if trade_config.max_slippage_from_best_ask is not None
+                else None
+            ),
+            trade_config.dynamic_entry_levels,
+            trade_config.stop_loss_enabled,
+            trade_config.stop_loss_start_remaining_sec,
+            trade_config.stop_loss_end_remaining_sec,
+        )
 
     ws = None
     completed = 0

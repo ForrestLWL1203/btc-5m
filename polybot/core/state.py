@@ -32,6 +32,8 @@ class MonitorState:
     stop_loss_triggered: bool = False
     stop_loss_attempted: bool = False
     stop_loss_price: Optional[float] = None
+    last_stop_loss_check_key: Optional[tuple] = None
+    last_stop_loss_check_logged_at: float = 0.0
     last_entry_check_side: Optional[str] = None  # target side for the last entry-band check
     last_entry_check_best_ask: Optional[float] = None  # target ask used by the last entry-band check
     last_signal_eval_key: Optional[tuple] = None

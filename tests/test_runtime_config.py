@@ -61,6 +61,24 @@ def test_preset_config_loads_enhanced_yaml():
     assert cfg["params"]["stop_loss"]["enabled"] is False
 
 
+def test_preset_config_loads_crowd_m1_yaml():
+    cfg = preset_config("crowd_m1")
+    assert cfg["market"]["asset"] == "btc"
+    assert cfg["strategy"]["type"] == "crowd_m1"
+    assert cfg["strategy"]["entry_elapsed_sec"] == pytest.approx(180)
+    assert cfg["strategy"]["entry_timeout_sec"] == pytest.approx(5)
+    assert cfg["strategy"]["min_ask_gap"] == pytest.approx(0.0)
+    assert cfg["strategy"]["min_leading_ask"] == pytest.approx(0.62)
+    assert cfg["strategy"]["max_entry_price"] == pytest.approx(0.75)
+    assert cfg["strategy"]["btc_direction_confirm"] is False
+    assert cfg["params"]["entry_ask_level"] == 9
+    assert cfg["params"]["low_price_entry_ask_level"] == 11
+    assert cfg["params"]["stop_loss"]["enabled"] is True
+    assert cfg["params"]["stop_loss"]["trigger_price"] == pytest.approx(0.35)
+    assert cfg["params"]["stop_loss"]["start_remaining_sec"] == pytest.approx(45)
+    assert cfg["params"]["stop_loss"]["end_remaining_sec"] == pytest.approx(25)
+
+
 def test_build_runtime_config_requires_exactly_one_source():
     with pytest.raises(ValueError, match="exactly one of --config or --preset"):
         build_runtime_config(_args())

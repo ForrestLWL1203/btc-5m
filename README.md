@@ -2,8 +2,9 @@
 
 Polymarket BTC 5-minute UP/DOWN trading bot.
 
-Current repo policy: BTC 5-minute only, one runtime strategy only:
-`paired_window`. Historical strategies, extra market/timeframe support,
+Current repo policy: BTC 5-minute only. The maintained live-capable runtime is
+`paired_window`; `crowd_m1` is an explicitly requested experimental dry-run
+strategy for VPS testing. Historical strategies, extra market/timeframe support,
 conservative configs, old backtest scripts, and retired VPS wrappers have been
 removed.
 
@@ -75,11 +76,87 @@ Behavior:
 - Removed legacy stop-loss multiplier/config compatibility path; stop-loss uses
   fixed trigger fields only.
 
+## Strategy D Candidate
+
+Config:
+[paired_window_strategy_d.yaml](/Users/forrestliao/workspace/paired_window_strategy_d.yaml)
+
+Strategy D is a paired-window candidate selected from the 102-window merged
+dataset backtest. It is saved separately so it can be run explicitly without
+overwriting the maintained default config.
+
+Run dry:
+
+```bash
+python3.11 run.py --config paired_window_strategy_d.yaml --dry --rounds 3
+```
+
+Run live:
+
+```bash
+python3.11 run.py --config paired_window_strategy_d.yaml --rounds 3
+```
+
+Backtest reference:
+
+- Input:
+  `data/collect_btc-updown-5m_merged_20260427T183011_20260428T005206_102w.jsonl`
+- Result: 34 trades, 24W/10L, win rate 70.59%.
+- Settlement PnL `+5.7399`; mark PnL `+5.5485`.
+- Stop-losses 9; false stop-losses 0.
+- CSV: `analysis/backtest_collect_102w方案D_stop_end30_trades.csv`.
+
+Key parameters:
+
+```yaml
+strategy:
+  theta_start_pct: 0.035
+  theta_end_pct: 0.055
+  min_move_ratio: 1.0
+
+params:
+  stop_loss:
+    enabled: true
+    trigger_price: 0.38
+    start_remaining_sec: 120
+    end_remaining_sec: 30
+```
+
+## Experimental Strategy: crowd_m1
+
+Config:
+[crowd_m1_dry.yaml](/Users/forrestliao/workspace/crowd_m1_dry.yaml)
+
+`crowd_m1` is a simple dry-run candidate:
+
+- At 180s after window open, compare UP and DOWN best ask; the runtime entry
+  timeout is 5s to avoid late attach entries.
+- Buy the higher-best-ask side only when the leading ask is at least `0.62`;
+  `min_ask_gap=0.0` disables a gap requirement.
+- Do not require BTC direction confirmation; this is a pure crowd-following variant.
+- Use the same target-leg depth-gated execution path as `paired_window`.
+- Hard max entry cap is `0.75`.
+- Dynamic entry depth is selected by leading ask: `<=0.64` uses L5, `<=0.68`
+  uses L4, `<=0.72` uses L2, and `<=0.75` uses L1.
+- Selected entry ask must stay within `0.04` of the target-leg best ask.
+- Entry checks are event-driven: UP or DOWN Polymarket WS updates refresh the
+  cached two-leg snapshot and can trigger entry immediately inside the 5s entry
+  window; the 1s snapshot loop remains only as a fallback.
+- Entry logs include UP/DOWN best-ask cache age so dry-runs can verify book
+  freshness before FAK.
+- Stop-loss is enabled only while remaining time is `[45s,25s]`, with trigger
+  `0.35`; otherwise hold to `window.end_epoch`.
+- After BUY fill, held-token WS updates are ignored until 5s before the
+  stop-loss window; prewarm logs held-leg bid-book age, and active-window
+  updates can trigger stop-loss immediately.
+
 ## Core Files
 
 - [run.py](/Users/forrestliao/workspace/run.py) — local dry/live runner
 - [polybot/strategies/paired_window.py](/Users/forrestliao/workspace/polybot/strategies/paired_window.py) — BTC signal and direction lock
-- [polybot/trading/monitor.py](/Users/forrestliao/workspace/polybot/trading/monitor.py) — window lifecycle, book-depth gate, FAK retry, logging, risk
+- [polybot/trading/monitor.py](/Users/forrestliao/workspace/polybot/trading/monitor.py) — window lifecycle, signal-to-execution wiring, logging, risk
+- [polybot/trading/fak_quotes.py](/Users/forrestliao/workspace/polybot/trading/fak_quotes.py) — reusable entry/stop-loss order-book quote selection
+- [polybot/trading/fak_execution.py](/Users/forrestliao/workspace/polybot/trading/fak_execution.py) — reusable FAK buy/stop-loss sell gateway
 - [polybot/trading/trading.py](/Users/forrestliao/workspace/polybot/trading/trading.py) — Polymarket CLOB order execution
 - [polybot/runtime_config.py](/Users/forrestliao/workspace/polybot/runtime_config.py) — preset/config startup assembly
 - [polybot/runtime_inputs.py](/Users/forrestliao/workspace/polybot/runtime_inputs.py) — CLI/UI input schema and validation
@@ -94,6 +171,7 @@ Run dry:
 
 ```bash
 python3.11 run.py --preset enhanced --dry --rounds 3
+python3.11 run.py --preset crowd_m1 --dry --rounds 3
 ```
 
 Run live:
@@ -114,7 +192,7 @@ Run tests:
 env -u ALL_PROXY -u all_proxy -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy pytest -q
 ```
 
-Current expected test suite size: 123 tests.
+Current expected test suite size: 157 tests.
 
 Collect data:
 

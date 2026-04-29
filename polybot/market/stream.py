@@ -293,6 +293,38 @@ class PriceStream:
 
         Caller must hold ``_connection_lock``.
         """
+        reconnect_delay = config.WS_RECONNECT_DELAY
+        last_error: Optional[Exception] = None
+        for attempt in range(1, config.WS_RECONNECT_MAX_RETRIES + 1):
+            try:
+                await self._connect_once_locked(log_reconnect=log_reconnect)
+                return
+            except Exception as e:
+                last_error = e
+                self._ws = None
+                if attempt >= config.WS_RECONNECT_MAX_RETRIES:
+                    break
+                log.warning(
+                    "WS connect failed: %s; retrying in %.1fs (attempt %d/%d)",
+                    e,
+                    reconnect_delay,
+                    attempt,
+                    config.WS_RECONNECT_MAX_RETRIES,
+                )
+                await asyncio.sleep(reconnect_delay)
+                reconnect_delay = min(reconnect_delay * 2, config.WS_RECONNECT_MAX_DELAY)
+
+        log_event(log, logging.ERROR, WS, {
+            "action": "CONNECT_FAILED",
+            "attempts": config.WS_RECONNECT_MAX_RETRIES,
+            "error": str(last_error) if last_error is not None else None,
+        })
+        if last_error is not None:
+            raise last_error
+        raise ConnectionError("WebSocket connect failed")
+
+    async def _connect_once_locked(self, log_reconnect: bool = True) -> None:
+        """Open one WS connection attempt and subscribe to current tokens."""
         if self._ws is not None:
             try:
                 await self._ws.close()

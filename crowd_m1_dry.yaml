@@ -1,0 +1,45 @@
+market:
+  asset: btc
+  timeframe: 5m
+
+strategy:
+  type: crowd_m1
+  entry_elapsed_sec: 180
+  entry_timeout_sec: 5
+  min_ask_gap: 0.0
+  min_leading_ask: 0.62
+  max_entry_price: 0.75
+  btc_direction_confirm: false
+
+params:
+  amount: 1.0
+  entry_ask_level: 9
+  low_price_threshold: 0.60
+  low_price_entry_ask_level: 11
+  max_slippage_from_best_ask: 0.04
+  dynamic_entry_levels:
+    - leading_ask_max: 0.64
+      entry_ask_level: 5
+    - leading_ask_max: 0.68
+      entry_ask_level: 4
+    - leading_ask_max: 0.72
+      entry_ask_level: 2
+    - leading_ask_max: 0.75
+      entry_ask_level: 1
+  amount_tiers: []
+  max_entries_per_window: 1
+  stop_loss:
+    enabled: true
+    trigger_price: 0.35
+    disable_below_entry_price: 0.45
+    start_remaining_sec: 45
+    end_remaining_sec: 25
+    sell_bid_level: 10
+    retry_count: 3
+    min_sell_price: 0.20
+
+risk:
+  consecutive_loss_amount: 3.0
+  daily_loss_amount: 5.0
+  consecutive_loss_pause_windows: 2
+  daily_loss_pause_windows: 5
