@@ -34,6 +34,13 @@ def test_should_buy_higher_best_ask_side_when_gap_and_btc_confirm_match():
     assert state.target_max_entry_price == pytest.approx(0.75)
     assert state.signal_reference_price == pytest.approx(0.61)
     assert state.target_signal_strength == pytest.approx(0.18 / 0.16)
+    assert strat.should_buy(0.59, MonitorState()) is False
+
+
+def test_get_side_defers_direction_to_market_snapshot():
+    strat = _strategy()
+
+    assert strat.get_side() is None
 
 
 def test_should_buy_rejects_if_btc_direction_disagrees():
@@ -45,6 +52,50 @@ def test_should_buy_rejects_if_btc_direction_disagrees():
     strat.set_market_snapshot(up_mid=0.59, down_mid=0.41, up_best_ask=0.61, down_best_ask=0.43)
 
     assert strat.should_buy(0.59, MonitorState()) is False
+
+
+def test_should_buy_rejects_btc_recent_reverse_move_for_up_entry(caplog):
+    strat = _strategy(
+        entry_elapsed_sec=120,
+        min_ask_gap=0.0,
+        min_leading_ask=0.62,
+        btc_direction_confirm=False,
+        btc_reverse_filter_enabled=True,
+        btc_reverse_lookback_sec=20,
+        btc_reverse_min_move_pct=0.02,
+    )
+    now = time.time()
+    strat._window_start_epoch = now - 121
+    strat._feed.price_at_or_before.side_effect = [100.0, 99.97]
+    strat._feed.latest_price = 99.97
+    strat.set_market_snapshot(up_mid=0.66, down_mid=0.34, up_best_ask=0.67, down_best_ask=0.35)
+
+    caplog.set_level(logging.INFO, logger="polybot.strategies.crowd_m1")
+
+    assert strat.should_buy(0.66, MonitorState()) is False
+    assert "M1_DECISION_SKIP: reason=btc_recent_reverse_move" in caplog.text
+
+
+def test_should_buy_allows_btc_recent_move_below_reverse_threshold():
+    strat = _strategy(
+        entry_elapsed_sec=120,
+        min_ask_gap=0.0,
+        min_leading_ask=0.62,
+        btc_direction_confirm=False,
+        btc_reverse_filter_enabled=True,
+        btc_reverse_lookback_sec=20,
+        btc_reverse_min_move_pct=0.02,
+    )
+    now = time.time()
+    strat._window_start_epoch = now - 121
+    strat._feed.price_at_or_before.side_effect = [100.0, 99.99]
+    strat._feed.latest_price = 99.99
+    strat.set_market_snapshot(up_mid=0.66, down_mid=0.34, up_best_ask=0.67, down_best_ask=0.35)
+
+    state = MonitorState()
+
+    assert strat.should_buy(0.66, state) is True
+    assert state.target_side == "up"
 
 
 def test_should_buy_rejects_gap_below_min_without_consuming_window():
@@ -135,3 +186,95 @@ def test_should_buy_logs_missing_market_snapshot_once(caplog):
     assert strat.should_buy(0.0, MonitorState()) is False
     assert strat.should_buy(0.0, MonitorState()) is False
     assert caplog.text.count("M1_DECISION_SKIP: reason=missing_market_snapshot") == 1
+
+
+def test_should_buy_rejects_leading_ask_above_cap_without_signal_log(caplog):
+    strat = _strategy(
+        entry_elapsed_sec=120,
+        entry_timeout_sec=5,
+        min_ask_gap=0.0,
+        min_leading_ask=0.62,
+        max_entry_price=0.75,
+        btc_direction_confirm=False,
+    )
+    now = time.time()
+    strat._window_start_epoch = now - 121
+    strat._window_open_btc = 100.0
+    strat._feed.latest_price = 100.05
+    strat.set_market_snapshot(up_mid=0.955, down_mid=0.045, up_best_ask=0.96, down_best_ask=0.05)
+
+    caplog.set_level(logging.INFO, logger="polybot.strategies.crowd_m1")
+
+    assert strat.should_buy(0.955, MonitorState()) is False
+    assert strat.should_buy(0.955, MonitorState()) is False
+    assert caplog.text.count("M1_DECISION_SKIP: reason=leading_ask_above_max_entry") == 1
+    assert "CROWD_M1_SIGNAL" not in caplog.text
+
+
+def test_should_buy_does_not_log_actionable_signal(caplog):
+    strat = _strategy(
+        entry_elapsed_sec=120,
+        min_ask_gap=0.0,
+        min_leading_ask=0.62,
+        max_entry_price=0.75,
+        btc_direction_confirm=False,
+    )
+    now = time.time()
+    strat._window_start_epoch = now - 121
+    strat._window_open_btc = 100.0
+    strat._feed.latest_price = 100.05
+    strat.set_market_snapshot(up_mid=0.66, down_mid=0.34, up_best_ask=0.67, down_best_ask=0.35)
+
+    caplog.set_level(logging.INFO, logger="polybot.strategies.crowd_m1")
+
+    assert strat.should_buy(0.66, MonitorState()) is True
+    assert "CROWD_M1_SIGNAL" not in caplog.text
+
+
+def test_should_buy_rejects_stale_cross_leg_best_ask(caplog):
+    strat = _strategy(
+        entry_elapsed_sec=120,
+        min_ask_gap=0.0,
+        min_leading_ask=0.62,
+        max_entry_price=0.75,
+        btc_direction_confirm=False,
+    )
+    now = time.time()
+    strat._window_start_epoch = now - 121
+    strat._window_open_btc = 100.0
+    strat._feed.latest_price = 100.05
+    strat.set_market_snapshot(
+        up_mid=0.66,
+        down_mid=0.34,
+        up_best_ask=0.67,
+        down_best_ask=0.35,
+        up_best_ask_age_sec=0.2,
+        down_best_ask_age_sec=1.5,
+    )
+
+    caplog.set_level(logging.INFO, logger="polybot.strategies.crowd_m1")
+
+    assert strat.should_buy(0.66, MonitorState()) is False
+    assert "M1_DECISION_SKIP: reason=stale_cross_leg_book" in caplog.text
+    assert "down_best_ask_age_ms=1500" in caplog.text
+
+
+def test_should_buy_leaves_paired_theta_field_empty_for_crowd_gapless_signal():
+    strat = _strategy(
+        entry_elapsed_sec=120,
+        min_ask_gap=0.0,
+        min_leading_ask=0.62,
+        max_entry_price=0.75,
+        btc_direction_confirm=False,
+    )
+    now = time.time()
+    strat._window_start_epoch = now - 121
+    strat._window_open_btc = 100.0
+    strat._feed.latest_price = 100.05
+    strat.set_market_snapshot(up_mid=0.66, down_mid=0.34, up_best_ask=0.67, down_best_ask=0.35)
+
+    state = MonitorState()
+
+    assert strat.should_buy(0.66, state) is True
+    assert state.target_signal_strength is None
+    assert state.target_active_theta_pct is None

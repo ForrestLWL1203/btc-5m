@@ -338,6 +338,7 @@ async def buy_token(
     amount: float,
     price_hint: Optional[float] = None,
     price_hint_refresher: Optional[Callable[[], Optional[float]]] = None,
+    retry_count: Optional[int] = None,
 ) -> OrderResult:
     """
     Buy a token using FAK market order with retry.
@@ -352,7 +353,7 @@ async def buy_token(
         token_id=token_id,
         amount=amount,
         side=BUY,
-        retry_count=config.FAK_RETRY_COUNT,
+        retry_count=retry_count or config.FAK_RETRY_COUNT,
         retry_interval=config.FAK_RETRY_INTERVAL,
         price_hint=price_hint,
         price_hint_refresher=price_hint_refresher,

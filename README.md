@@ -134,17 +134,25 @@ Config:
 - Buy the higher-best-ask side only when the leading ask is at least `0.62`;
   `min_ask_gap=0.0` disables a gap requirement.
 - Do not require BTC direction confirmation; this is a pure crowd-following variant.
+- A separate BTC reverse soft filter is enabled: if the selected side is UP and
+  BTC fell at least `0.02%` over the last 20s, or the selected side is DOWN and
+  BTC rose at least `0.02%` over the last 20s, skip that entry.
 - Use the same target-leg depth-gated execution path as `paired_window`.
 - Hard max entry cap is `0.75`.
+- If the leading ask is above `0.75`, the strategy rejects the candidate before
+  entering the depth/FAK pipeline.
 - Dynamic entry depth is selected by leading ask: `<=0.64` uses L5, `<=0.68`
   uses L4, `<=0.72` uses L2, and `<=0.75` uses L1.
 - Selected entry ask must stay within `0.04` of the target-leg best ask.
 - Entry checks are event-driven: UP or DOWN Polymarket WS updates refresh the
   cached two-leg snapshot and can trigger entry immediately inside the 5s entry
   window; the 1s snapshot loop remains only as a fallback.
+- Entry requires both UP and DOWN best-ask caches to be fresh; stale cross-leg
+  books are skipped before direction selection.
 - Entry logs include UP/DOWN best-ask cache age so dry-runs can verify book
-  freshness before FAK.
-- Stop-loss is enabled only while remaining time is `[45s,25s]`, with trigger
+  freshness before FAK. For crowd entries, `signal_price` is the leading ask,
+  and `active_theta_pct` remains empty because BTC theta is not used.
+- Stop-loss is enabled only while remaining time is `[65s,45s]`, with trigger
   `0.35`; otherwise hold to `window.end_epoch`.
 - After BUY fill, held-token WS updates are ignored until 5s before the
   stop-loss window; prewarm logs held-leg bid-book age, and active-window
@@ -192,7 +200,7 @@ Run tests:
 env -u ALL_PROXY -u all_proxy -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy pytest -q
 ```
 
-Current expected test suite size: 157 tests.
+Current expected test suite size: 165 tests.
 
 Collect data:
 
@@ -228,6 +236,8 @@ Execution constraints:
 - Default trigger is around `0.38`; entries below `0.45` do not use stop-loss.
 - Uses held-leg bid book, not ask book.
 - Level 1 bid is skipped; sell depth scans up to `sell_bid_level=10` by default.
+- SELL hint uses the first bid level where cumulative depth can cover the
+  actual sell size, not the deepest scanned level.
 - Live runs sync actual CLOB token balance about 8 seconds after BUY fill, and
   check balance again before stop-loss SELL.
 - SELL FAK price hint is placed below the selected bid level and retried up to
@@ -370,7 +380,8 @@ Important events:
 
 Key price fields:
 
-- `signal_price`: UP-leg signal reference price.
+- `signal_price`: UP-leg signal reference price for `paired_window`; leading
+  ask for `crowd_m1`.
 - `best_ask_level_1`: target-leg top ask, diagnostic only.
 - `target_entry_ask`: selected depth level price.
 - `price_hint`: FAK price hint, clamped to cap.

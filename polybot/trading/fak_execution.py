@@ -11,6 +11,7 @@ async def place_fak_buy(
     *,
     price_hint: Optional[float] = None,
     price_hint_refresher: Optional[Callable[[], Optional[float]]] = None,
+    retry_count: Optional[int] = None,
 ) -> OrderResult:
     """Place a BUY FAK order through the shared trading implementation."""
     return await buy_token(
@@ -18,6 +19,7 @@ async def place_fak_buy(
         amount,
         price_hint=price_hint,
         price_hint_refresher=price_hint_refresher,
+        retry_count=retry_count,
     )
 
 

@@ -6,6 +6,7 @@ import logging
 import time
 from typing import Optional
 
+from polybot.core import config
 from polybot.core.state import MonitorState
 from polybot.market.binance import BinancePriceFeed
 from polybot.market.series import MarketSeries
@@ -36,7 +37,11 @@ class CrowdM1Strategy(Strategy):
         min_ask_gap: float = 0.16,
         max_entry_price: float = 0.75,
         btc_direction_confirm: bool = True,
+        btc_reverse_filter_enabled: bool = False,
+        btc_reverse_lookback_sec: float = 20.0,
+        btc_reverse_min_move_pct: float = 0.02,
         open_price_max_wait_sec: float = 30.0,
+        max_book_age_sec: Optional[float] = config.FAK_RETRY_MAX_BEST_ASK_AGE_SEC,
     ):
         self._series = series
         self._entry_elapsed_sec = entry_elapsed_sec
@@ -45,7 +50,11 @@ class CrowdM1Strategy(Strategy):
         self._min_ask_gap = min_ask_gap
         self._max_entry_price = max_entry_price
         self._btc_direction_confirm = btc_direction_confirm
+        self._btc_reverse_filter_enabled = btc_reverse_filter_enabled
+        self._btc_reverse_lookback_sec = btc_reverse_lookback_sec
+        self._btc_reverse_min_move_pct = btc_reverse_min_move_pct
         self._open_price_max_wait_sec = open_price_max_wait_sec
+        self._max_book_age_sec = max_book_age_sec
 
         self._feed = BinancePriceFeed(symbol="btcusdt")
         self._window_start_epoch: float = 0.0
@@ -56,6 +65,8 @@ class CrowdM1Strategy(Strategy):
         self._down_mid: Optional[float] = None
         self._up_best_ask: Optional[float] = None
         self._down_best_ask: Optional[float] = None
+        self._up_best_ask_age_sec: Optional[float] = None
+        self._down_best_ask_age_sec: Optional[float] = None
         self._logged_skip_reasons: set[str] = set()
 
     @property
@@ -75,13 +86,17 @@ class CrowdM1Strategy(Strategy):
         self._started = True
         log.debug(
             "CrowdM1Strategy started | entry_elapsed=%.0fs timeout=%.0fs | "
-            "min_ask_gap=%.3f min_leading_ask=%.3f | max_entry=%.2f | btc_confirm=%s",
+            "min_ask_gap=%.3f min_leading_ask=%.3f | max_entry=%.2f | "
+            "btc_confirm=%s btc_reverse_filter=%s lookback=%.0fs min_reverse=%.3f%%",
             self._entry_elapsed_sec,
             self._entry_timeout_sec,
             self._min_ask_gap,
             self._min_leading_ask,
             self._max_entry_price,
             self._btc_direction_confirm,
+            self._btc_reverse_filter_enabled,
+            self._btc_reverse_lookback_sec,
+            self._btc_reverse_min_move_pct,
         )
 
     async def stop(self) -> None:
@@ -96,9 +111,13 @@ class CrowdM1Strategy(Strategy):
         self._down_mid = None
         self._up_best_ask = None
         self._down_best_ask = None
+        self._up_best_ask_age_sec = None
+        self._down_best_ask_age_sec = None
         self._logged_skip_reasons = set()
 
     async def preload_open_btc(self, epoch: float) -> None:
+        if not self._btc_direction_confirm:
+            return
         if self._window_open_btc is not None:
             return
         cached = self._feed.first_price_at_or_after(
@@ -119,14 +138,18 @@ class CrowdM1Strategy(Strategy):
         down_mid: Optional[float],
         up_best_ask: Optional[float] = None,
         down_best_ask: Optional[float] = None,
+        up_best_ask_age_sec: Optional[float] = None,
+        down_best_ask_age_sec: Optional[float] = None,
     ) -> None:
         self._up_mid = up_mid
         self._down_mid = down_mid
         self._up_best_ask = up_best_ask
         self._down_best_ask = down_best_ask
+        self._up_best_ask_age_sec = up_best_ask_age_sec
+        self._down_best_ask_age_sec = down_best_ask_age_sec
 
     def get_side(self, candles: Optional[list] = None) -> Optional[str]:
-        return "up"
+        return None
 
     def should_buy(self, price: float, state: MonitorState) -> bool:
         if not self._started or state.bought or self._evaluated:
@@ -151,6 +174,19 @@ class CrowdM1Strategy(Strategy):
         down_mid = float(self._down_mid) if self._down_mid is not None else None
         up_best_ask = float(self._up_best_ask)
         down_best_ask = float(self._down_best_ask)
+        if self._is_stale_book_age(self._up_best_ask_age_sec) or self._is_stale_book_age(self._down_best_ask_age_sec):
+            self._log_decision_skip(
+                reason="stale_cross_leg_book",
+                elapsed=elapsed,
+                up_mid=up_mid,
+                down_mid=down_mid,
+                up_best_ask=up_best_ask,
+                down_best_ask=down_best_ask,
+                up_best_ask_age_sec=self._up_best_ask_age_sec,
+                down_best_ask_age_sec=self._down_best_ask_age_sec,
+            )
+            return False
+
         direction = "up" if up_best_ask >= down_best_ask else "down"
         leading_ask = up_best_ask if direction == "up" else down_best_ask
         ask_gap = abs(up_best_ask - down_best_ask)
@@ -171,6 +207,20 @@ class CrowdM1Strategy(Strategy):
         if leading_ask < self._min_leading_ask:
             self._log_decision_skip(
                 reason="leading_ask_below_min",
+                elapsed=elapsed,
+                direction=direction,
+                up_mid=up_mid,
+                down_mid=down_mid,
+                up_best_ask=up_best_ask,
+                down_best_ask=down_best_ask,
+                ask_gap=ask_gap,
+                leading_ask=leading_ask,
+            )
+            return False
+
+        if leading_ask > self._max_entry_price:
+            self._log_decision_skip(
+                reason="leading_ask_above_max_entry",
                 elapsed=elapsed,
                 direction=direction,
                 up_mid=up_mid,
@@ -217,33 +267,33 @@ class CrowdM1Strategy(Strategy):
                 )
                 return False
 
+        reverse_move_pct = self._recent_btc_reverse_move_pct(now, direction)
+        if reverse_move_pct is not None:
+            self._log_decision_skip(
+                reason="btc_recent_reverse_move",
+                elapsed=elapsed,
+                direction=direction,
+                up_mid=up_mid,
+                down_mid=down_mid,
+                up_best_ask=up_best_ask,
+                down_best_ask=down_best_ask,
+                ask_gap=ask_gap,
+                leading_ask=leading_ask,
+                current_btc=current_btc,
+                btc_reverse_move_pct=reverse_move_pct,
+            )
+            return False
+
         remaining = self._series.slug_step - elapsed
         state.target_side = direction
         state.signal_reference_price = leading_ask
         state.target_max_entry_price = self._max_entry_price
-        state.target_signal_strength = ask_gap / self._min_ask_gap if self._min_ask_gap > 0 else 0.0
+        state.target_signal_strength = ask_gap / self._min_ask_gap if self._min_ask_gap > 0 else None
         state.target_past_signal_strength = None
-        state.target_active_theta_pct = self._min_ask_gap
+        state.target_active_theta_pct = None
         state.target_remaining_sec = remaining
+        self._evaluated = True
 
-        log.info(
-            "CROWD_M1_SIGNAL: dir=%s up_best_ask=%.3f down_best_ask=%.3f leading_ask=%.3f "
-            "ask_gap=%.3f min_gap=%.3f up_mid=%s down_mid=%s strength=%.2fx btc_open=%s btc_now=%s "
-            "max_entry=%.3f remaining=%.0fs",
-            direction.upper(),
-            up_best_ask,
-            down_best_ask,
-            leading_ask,
-            ask_gap,
-            self._min_ask_gap,
-            self._fmt_price(up_mid, digits=3),
-            self._fmt_price(down_mid, digits=3),
-            state.target_signal_strength,
-            f"{open_btc:.1f}" if open_btc is not None else None,
-            f"{current_btc:.1f}" if current_btc is not None else None,
-            self._max_entry_price,
-            remaining,
-        )
         return True
 
     def _log_decision_skip(
@@ -260,6 +310,9 @@ class CrowdM1Strategy(Strategy):
         leading_ask: Optional[float] = None,
         open_btc: Optional[float] = None,
         current_btc: Optional[float] = None,
+        up_best_ask_age_sec: Optional[float] = None,
+        down_best_ask_age_sec: Optional[float] = None,
+        btc_reverse_move_pct: Optional[float] = None,
     ) -> None:
         if reason in self._logged_skip_reasons:
             return
@@ -269,7 +322,8 @@ class CrowdM1Strategy(Strategy):
         log.info(
             "M1_DECISION_SKIP: reason=%s elapsed=%.1fs remaining=%.1fs dir=%s "
             "up_best_ask=%s down_best_ask=%s leading_ask=%s ask_gap=%s min_ask_gap=%.3f min_leading_ask=%.3f "
-            "up_mid=%s down_mid=%s btc_open=%s btc_now=%s max_entry=%.3f",
+            "up_mid=%s down_mid=%s btc_open=%s btc_now=%s max_entry=%.3f "
+            "up_best_ask_age_ms=%s down_best_ask_age_ms=%s btc_reverse_move_pct=%s",
             reason,
             elapsed,
             remaining,
@@ -285,6 +339,9 @@ class CrowdM1Strategy(Strategy):
             self._fmt_price(open_btc, digits=1),
             self._fmt_price(current_btc, digits=1),
             self._max_entry_price,
+            self._fmt_age_ms(up_best_ask_age_sec),
+            self._fmt_age_ms(down_best_ask_age_sec),
+            self._fmt_price(btc_reverse_move_pct, digits=4),
         )
 
     @staticmethod
@@ -292,6 +349,19 @@ class CrowdM1Strategy(Strategy):
         if value is None:
             return None
         return f"{float(value):.{digits}f}"
+
+    def _is_stale_book_age(self, age_sec: Optional[float]) -> bool:
+        return (
+            self._max_book_age_sec is not None
+            and age_sec is not None
+            and age_sec > self._max_book_age_sec
+        )
+
+    @staticmethod
+    def _fmt_age_ms(value: Optional[float]) -> Optional[int]:
+        if value is None:
+            return None
+        return round(float(value) * 1000)
 
     def _ensure_window_open_btc(self) -> Optional[float]:
         if self._window_open_btc is not None:
@@ -301,3 +371,21 @@ class CrowdM1Strategy(Strategy):
             max_forward_sec=self._open_price_max_wait_sec,
         )
         return self._window_open_btc
+
+    def _recent_btc_reverse_move_pct(self, now: float, direction: str) -> Optional[float]:
+        if not self._btc_reverse_filter_enabled:
+            return None
+        if self._btc_reverse_lookback_sec <= 0 or self._btc_reverse_min_move_pct <= 0:
+            return None
+
+        past_btc = self._feed.price_at_or_before(now - self._btc_reverse_lookback_sec)
+        current_btc = self._feed.price_at_or_before(now)
+        if past_btc is None or current_btc is None or past_btc <= 0:
+            return None
+
+        move_pct = (float(current_btc) / float(past_btc) - 1.0) * 100.0
+        if direction == "up" and move_pct <= -self._btc_reverse_min_move_pct:
+            return move_pct
+        if direction == "down" and move_pct >= self._btc_reverse_min_move_pct:
+            return move_pct
+        return None

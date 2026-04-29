@@ -114,6 +114,11 @@ class TestBuildStrategy:
                 "min_ask_gap": 0.16,
                 "max_entry_price": 0.75,
                 "btc_direction_confirm": True,
+                "btc_reverse_filter": {
+                    "enabled": True,
+                    "lookback_sec": 20,
+                    "min_reverse_move_pct": 0.02,
+                },
             }
         }
         strat = build_strategy(cfg, series)
@@ -123,6 +128,9 @@ class TestBuildStrategy:
         assert strat._min_ask_gap == pytest.approx(0.16)
         assert strat._max_entry_price == pytest.approx(0.75)
         assert strat._btc_direction_confirm is True
+        assert strat._btc_reverse_filter_enabled is True
+        assert strat._btc_reverse_lookback_sec == pytest.approx(20)
+        assert strat._btc_reverse_min_move_pct == pytest.approx(0.02)
 
     def test_missing_strategy_raises(self):
         series = MarketSeries.from_known("btc-updown-5m")

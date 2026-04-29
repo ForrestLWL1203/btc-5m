@@ -72,6 +72,7 @@ def build_strategy(cfg: dict, series: Optional[MarketSeries] = None):
     if strat_type == "crowd_m1":
         if series is None:
             raise ValueError("CrowdM1Strategy requires a market series")
+        btc_reverse_filter = strat_cfg.get("btc_reverse_filter") or {}
         return CrowdM1Strategy(
             series=series,
             entry_elapsed_sec=strat_cfg.get("entry_elapsed_sec", 120.0),
@@ -80,6 +81,9 @@ def build_strategy(cfg: dict, series: Optional[MarketSeries] = None):
             min_ask_gap=strat_cfg.get("min_ask_gap", 0.16),
             max_entry_price=strat_cfg.get("max_entry_price", 0.75),
             btc_direction_confirm=bool(strat_cfg.get("btc_direction_confirm", True)),
+            btc_reverse_filter_enabled=bool(btc_reverse_filter.get("enabled", False)),
+            btc_reverse_lookback_sec=float(btc_reverse_filter.get("lookback_sec", 20.0)),
+            btc_reverse_min_move_pct=float(btc_reverse_filter.get("min_reverse_move_pct", 0.02)),
             open_price_max_wait_sec=strat_cfg.get("open_price_max_wait_sec", 30.0),
         )
 

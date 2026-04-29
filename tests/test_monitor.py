@@ -174,7 +174,7 @@ async def test_stop_loss_sells_with_bid_depth_inside_time_band():
 
     mock_sell.assert_awaited_once()
     assert mock_sell.await_args.args[:2] == ("up-token-123", pytest.approx(1.522))
-    assert mock_sell.await_args.kwargs["price_hint"] == pytest.approx(0.27)
+    assert mock_sell.await_args.kwargs["price_hint"] == pytest.approx(0.35)
     assert mock_sell.await_args.kwargs["retry_count"] == 3
     assert state.stop_loss_triggered is True
     assert state.exit_triggered is True
@@ -389,6 +389,8 @@ async def test_on_price_injects_market_snapshot_for_dynamic_strategy():
         down_mid=pytest.approx(0.38),
         up_best_ask=pytest.approx(0.63),
         down_best_ask=pytest.approx(0.39),
+        up_best_ask_age_sec=0.0,
+        down_best_ask_age_sec=None,
     )
 
 
@@ -427,6 +429,8 @@ async def test_on_price_snapshot_uses_current_update_when_cache_lags():
         down_mid=pytest.approx(0.38),
         up_best_ask=pytest.approx(0.63),
         down_best_ask=pytest.approx(0.39),
+        up_best_ask_age_sec=0.0,
+        down_best_ask_age_sec=None,
     )
 
 
@@ -463,6 +467,8 @@ async def test_on_price_crowd_strategy_accepts_down_token_update_for_entry_check
         down_mid=pytest.approx(0.62),
         up_best_ask=pytest.approx(0.39),
         down_best_ask=pytest.approx(0.63),
+        up_best_ask_age_sec=None,
+        down_best_ask_age_sec=0.0,
     )
     strategy.should_buy.assert_called_once_with(pytest.approx(0.62), state)
 
@@ -488,6 +494,43 @@ async def test_on_price_paired_strategy_ignores_down_token_before_entry():
     )
 
     strategy.should_buy.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_monitor_window_allows_dynamic_strategy_without_initial_side():
+    import datetime
+
+    now = int(time.time())
+    utc = datetime.timezone.utc
+    window = MarketWindow(
+        question="Test Window",
+        up_token="up-tok",
+        down_token="down-tok",
+        start_time=datetime.datetime.fromtimestamp(now - 100, tz=utc),
+        end_time=datetime.datetime.fromtimestamp(now + 200, tz=utc),
+        slug="test",
+    )
+
+    mock_ws = MagicMock()
+    mock_ws.set_on_price = MagicMock()
+    mock_ws.switch_tokens = AsyncMock()
+    mock_ws.get_latest_price = MagicMock(return_value=0.50)
+
+    strategy = _mock_crowd_strategy()
+    strategy.get_side.return_value = None
+    strategy.dynamic_side = True
+
+    with patch("polybot.trading.monitor.prefetch_order_params", create=True, new=MagicMock()), \
+         patch("polybot.trading.monitor._monitor_single_window", new_callable=AsyncMock, return_value=None), \
+         patch("polybot.trading.monitor.find_next_window", return_value=None):
+        next_win, returned_ws, monitored = await monitor_window(
+            window, dry_run=True, preopened=True, existing_ws=mock_ws,
+            trade_config=_tc(), strategy=strategy,
+        )
+
+    assert next_win is None
+    assert returned_ws is mock_ws
+    assert monitored is True
 
 
 @pytest.mark.asyncio
@@ -561,6 +604,50 @@ async def test_buy_signal_logs_target_price_for_down_entry(caplog):
     assert buy_signal.event_data["target_entry_ask"] == pytest.approx(0.61)
     assert buy_signal.event_data["best_ask_level_1"] == pytest.approx(0.61)
     assert buy_signal.event_data["signal_price"] == pytest.approx(0.385)
+
+
+@pytest.mark.asyncio
+async def test_crowd_buy_signal_uses_leading_ask_as_signal_price(caplog):
+    window = _make_window()
+    state = _make_state()
+    strategy = _mock_crowd_strategy()
+    ws = MagicMock()
+    ws.get_latest_price.side_effect = lambda token: {
+        "up-token-123": 0.38,
+        "down-token-456": 0.62,
+    }.get(token)
+    ws.get_latest_best_ask.side_effect = lambda token, **_kwargs: {
+        "up-token-123": 0.39,
+        "down-token-456": 0.63,
+    }.get(token)
+    ws.get_latest_best_ask_age.return_value = 0.05
+    strategy.should_buy.side_effect = (
+        lambda _price, state_obj:
+        setattr(state_obj, "target_side", "down")
+        or setattr(state_obj, "signal_reference_price", 0.63)
+        or setattr(state_obj, "target_max_entry_price", 0.75)
+        or True
+    )
+
+    update = _make_update("down-token-456", midpoint=0.62)
+
+    with patch("polybot.trading.fak_quotes.get_tick_size", return_value=0.01), \
+         patch("polybot.trading.monitor._handle_opening_price", new_callable=AsyncMock):
+        with caplog.at_level(logging.INFO, logger="polybot.trading.monitor"):
+            await _on_price_update(
+                update,
+                window,
+                state,
+                ws=ws,
+                dry_run=True,
+                trade_config=_tc(amount=1.0),
+                strategy=strategy,
+                side="up",
+            )
+
+    buy_signal = next(record for record in caplog.records if getattr(record, "event_data", {}).get("action") == "BUY_SIGNAL")
+    assert buy_signal.event_data["side"] == "DOWN"
+    assert buy_signal.event_data["signal_price"] == pytest.approx(0.63)
 
 
 @pytest.mark.asyncio
@@ -788,7 +875,7 @@ def test_cap_depth_quote_uses_dynamic_entry_level_from_leading_ask():
             "up-token-123",
             trade_config.amount,
             0.75,
-            min_entry_level=trade_config.base_entry_ask_level(),
+            max_entry_level=trade_config.base_entry_ask_level(),
             dynamic_entry_levels=trade_config.dynamic_entry_levels,
             max_slippage_from_best_ask=trade_config.max_slippage_from_best_ask,
         )
@@ -827,7 +914,7 @@ def test_cap_depth_quote_skips_when_dynamic_level_exceeds_slippage_cap():
         "up-token-123",
         trade_config.amount,
         0.75,
-        min_entry_level=trade_config.base_entry_ask_level(),
+        max_entry_level=trade_config.base_entry_ask_level(),
         dynamic_entry_levels=trade_config.dynamic_entry_levels,
         max_slippage_from_best_ask=trade_config.max_slippage_from_best_ask,
     )
@@ -1238,6 +1325,8 @@ async def test_monitor_single_window_actively_evaluates_snapshot_strategy_at_ent
         down_mid=pytest.approx(0.38),
         up_best_ask=pytest.approx(0.63),
         down_best_ask=pytest.approx(0.39),
+        up_best_ask_age_sec=0.12,
+        down_best_ask_age_sec=0.34,
     )
     strategy.should_buy.assert_called_once_with(pytest.approx(0.62), state)
     checks = [

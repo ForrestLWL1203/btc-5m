@@ -12,11 +12,18 @@ async def test_place_fak_buy_uses_shared_buy_gateway():
 
     with patch("polybot.trading.fak_execution.buy_token", new_callable=AsyncMock) as mock_buy:
         mock_buy.return_value = expected
-        result = await place_fak_buy("token-1", 1.0, price_hint=0.62, price_hint_refresher=lambda: 0.63)
+        result = await place_fak_buy(
+            "token-1",
+            1.0,
+            price_hint=0.62,
+            price_hint_refresher=lambda: 0.63,
+            retry_count=2,
+        )
 
     assert result is expected
     assert mock_buy.await_args.args == ("token-1", 1.0)
     assert mock_buy.await_args.kwargs["price_hint"] == pytest.approx(0.62)
+    assert mock_buy.await_args.kwargs["retry_count"] == 2
 
 
 @pytest.mark.asyncio

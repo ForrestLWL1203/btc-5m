@@ -21,7 +21,7 @@ def test_cap_limited_depth_quote_scans_entry_book_independently():
             "token-1",
             amount=1.0,
             max_entry_price=0.75,
-            min_entry_level=3,
+            max_entry_level=3,
         )
 
     assert quote.enough is True
@@ -52,4 +52,30 @@ def test_stop_loss_bid_quote_scans_sell_book_independently():
     assert quote.enough is True
     assert quote.price == pytest.approx(0.36)
     assert quote.price_hint == pytest.approx(0.33)
+    assert quote.levels_used == 2
+
+
+def test_stop_loss_bid_quote_stops_at_first_sufficient_bid_depth():
+    ws = MagicMock()
+    ws.get_latest_bid_levels_with_size.return_value = [
+        (0.40, 0.1),
+        (0.39, 0.4),
+        (0.38, 0.7),
+        (0.37, 10.0),
+    ]
+    ws.get_latest_best_bid_age.return_value = 0.01
+
+    with patch("polybot.trading.fak_quotes.get_tick_size", return_value=0.01):
+        quote = stop_loss_bid_quote(
+            ws,
+            "token-1",
+            shares=1.0,
+            max_age_sec=1.0,
+            min_sell_level=4,
+            min_sell_price=0.20,
+        )
+
+    assert quote.enough is True
+    assert quote.price == pytest.approx(0.38)
+    assert quote.price_hint == pytest.approx(0.36)
     assert quote.levels_used == 2

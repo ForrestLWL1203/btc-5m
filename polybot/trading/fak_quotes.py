@@ -121,7 +121,7 @@ def cap_limited_depth_quote(
     *,
     max_age_sec: Optional[float] = None,
     skip_levels: int = DEPTH_ENTRY_SKIP_LEVELS,
-    min_entry_level: int = 1,
+    max_entry_level: int = 1,
     low_price_threshold: Optional[float] = None,
     low_price_entry_level: Optional[int] = None,
     dynamic_entry_levels: Optional[list[tuple[float, int]]] = None,
@@ -131,9 +131,8 @@ def cap_limited_depth_quote(
     """Return the first ask level where cap-limited depth can cover amount.
 
     Level 1 is deliberately excluded from fillability calculations because it
-    often disappears before the FAK reaches Polymarket. ``min_entry_level`` is
-    the deepest ask level scanned for the first FAK hint, not a mandatory
-    minimum level.
+    often disappears before the FAK reaches Polymarket. ``max_entry_level`` is
+    the deepest ask level scanned for the first FAK hint.
     """
     ask_age = ws.get_latest_best_ask_age(token_id, level=1)
     try:
@@ -152,9 +151,9 @@ def cap_limited_depth_quote(
     levels = [(float(price), float(size)) for price, size in raw_levels if float(size) > 0]
     best_ask_level_1 = levels[0][0] if levels else _best_ask_level_1(ws, token_id)
     preview = levels[:DEPTH_PREVIEW_LEVELS]
-    max_entry_level = dynamic_entry_level(
+    selected_max_entry_level = dynamic_entry_level(
         best_ask_level_1,
-        min_entry_level,
+        max_entry_level,
         dynamic_entry_levels,
     )
     if (
@@ -164,8 +163,8 @@ def cap_limited_depth_quote(
         and low_price_entry_level is not None
         and best_ask_level_1 < low_price_threshold
     ):
-        max_entry_level = max(max_entry_level, int(low_price_entry_level))
-    max_entry_index = max(max_entry_level - 1, int(skip_levels))
+        selected_max_entry_level = max(selected_max_entry_level, int(low_price_entry_level))
+    max_entry_index = max(selected_max_entry_level - 1, int(skip_levels))
     if not levels or max_entry_price is None:
         return CapDepthQuote(
             price=None,
@@ -174,7 +173,7 @@ def cap_limited_depth_quote(
             levels_used=0,
             total_levels=len(levels),
             skipped_levels=min(skip_levels, len(levels)),
-            entry_ask_level=max_entry_level,
+            entry_ask_level=selected_max_entry_level,
             best_ask_level_1=best_ask_level_1,
             ask_age_sec=ask_age,
             preview=preview,
@@ -223,7 +222,7 @@ def cap_limited_depth_quote(
         levels_used=levels_used,
         total_levels=len(levels),
         skipped_levels=min(skip_levels, len(levels)),
-        entry_ask_level=max_entry_level,
+        entry_ask_level=selected_max_entry_level,
         best_ask_level_1=best_ask_level_1,
         ask_age_sec=ask_age,
         preview=preview,
@@ -302,6 +301,7 @@ def stop_loss_bid_quote(
         selected_price = bid_price
         if shares_available >= shares:
             enough = True
+            break
 
     price_hint = (
         buffer_sell_price_hint(

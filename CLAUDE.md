@@ -114,6 +114,10 @@ strategy:
   min_leading_ask: 0.62
   max_entry_price: 0.75
   btc_direction_confirm: false
+  btc_reverse_filter:
+    enabled: true
+    lookback_sec: 20
+    min_reverse_move_pct: 0.02
 
 params:
   amount: 1.0
@@ -134,9 +138,8 @@ params:
   stop_loss:
     enabled: true
     trigger_price: 0.35
-    disable_below_entry_price: 0.45
-    start_remaining_sec: 45
-    end_remaining_sec: 25
+    start_remaining_sec: 65
+    end_remaining_sec: 45
     sell_bid_level: 10
     retry_count: 3
     min_sell_price: 0.20
@@ -148,15 +151,23 @@ Rules:
   leading ask is at least 0.62; gap requirement is disabled with
   `min_ask_gap=0.0`.
 - Do not require BTC direction from window open to match the selected side.
+- Use a BTC recent-reverse soft filter: skip UP if BTC fell at least 0.02% over
+  the last 20s, and skip DOWN if BTC rose at least 0.02% over the last 20s.
 - Use existing target-leg order-book depth gating; do not use backtest-only L5
   price proxies for live execution.
+- Reject candidates whose leading ask is above `max_entry_price=0.75` before
+  entering the depth/FAK pipeline.
 - Dynamic entry depth lowers slippage: leading ask `<=0.64` uses L5, `<=0.68`
   uses L4, `<=0.72` uses L2, and `<=0.75` uses L1.
 - Selected entry ask must stay within 0.04 of target-leg best ask.
 - Entry is event-driven: UP or DOWN Polymarket WS updates refresh the cached
   two-leg snapshot and can trigger entry immediately inside the 5s entry window;
   the 1s snapshot loop is only a fallback.
+- Entry requires both UP and DOWN best-ask caches to be fresh; stale cross-leg
+  books are skipped before direction selection.
 - Entry logs include UP/DOWN best-ask cache age for book freshness validation.
+- Crowd entry `signal_price` is the leading ask, and `active_theta_pct` remains
+  empty because BTC theta is not used.
 - Hold to `window.end_epoch` unless the narrow stop-loss window fills.
 
 Stop-loss when enabled:
@@ -166,6 +177,8 @@ Stop-loss when enabled:
 - Active only while `start_remaining_sec >= remaining >= end_remaining_sec`.
 - Uses held-leg bid book, skips level 1, and defaults to scanning up to bid
   level 10.
+- SELL hint uses the first bid level where cumulative depth can cover the
+  actual sell size, not the deepest scanned level.
 - After BUY fill, held-token WS updates are ignored until 5s before the
   stop-loss window; prewarm logs held-leg bid-book age, and active-window
   updates can trigger stop-loss immediately.
@@ -200,7 +213,7 @@ python3.11 run.py --preset enhanced --rounds 3
 env -u ALL_PROXY -u all_proxy -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy pytest -q
 ```
 
-Expected suite size after crowd_m1 event-driven entry updates: 157 tests.
+Expected suite size after crowd_m1 cleanup fixes: 165 tests.
 
 VPS:
 
@@ -272,7 +285,8 @@ Never commit profiles, `log/`, `data/`, or `remote_runs/`.
 
 Price fields:
 
-- `signal_price`: UP-leg signal reference.
+- `signal_price`: UP-leg signal reference for `paired_window`; leading ask for
+  `crowd_m1`.
 - `best_ask_level_1`: target-leg top ask, diagnostic only.
 - `target_entry_ask`: selected depth level price.
 - `price_hint`: clamped FAK hint.

@@ -10,6 +10,10 @@ strategy:
   min_leading_ask: 0.62
   max_entry_price: 0.75
   btc_direction_confirm: false
+  btc_reverse_filter:
+    enabled: true
+    lookback_sec: 20
+    min_reverse_move_pct: 0.02
 
 params:
   amount: 1.0
@@ -31,9 +35,8 @@ params:
   stop_loss:
     enabled: true
     trigger_price: 0.35
-    disable_below_entry_price: 0.45
-    start_remaining_sec: 45
-    end_remaining_sec: 25
+    start_remaining_sec: 65
+    end_remaining_sec: 45
     sell_bid_level: 10
     retry_count: 3
     min_sell_price: 0.20

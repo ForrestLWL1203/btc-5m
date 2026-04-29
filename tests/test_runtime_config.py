@@ -71,12 +71,15 @@ def test_preset_config_loads_crowd_m1_yaml():
     assert cfg["strategy"]["min_leading_ask"] == pytest.approx(0.62)
     assert cfg["strategy"]["max_entry_price"] == pytest.approx(0.75)
     assert cfg["strategy"]["btc_direction_confirm"] is False
+    assert cfg["strategy"]["btc_reverse_filter"]["enabled"] is True
+    assert cfg["strategy"]["btc_reverse_filter"]["lookback_sec"] == pytest.approx(20)
+    assert cfg["strategy"]["btc_reverse_filter"]["min_reverse_move_pct"] == pytest.approx(0.02)
     assert cfg["params"]["entry_ask_level"] == 9
     assert cfg["params"]["low_price_entry_ask_level"] == 11
     assert cfg["params"]["stop_loss"]["enabled"] is True
     assert cfg["params"]["stop_loss"]["trigger_price"] == pytest.approx(0.35)
-    assert cfg["params"]["stop_loss"]["start_remaining_sec"] == pytest.approx(45)
-    assert cfg["params"]["stop_loss"]["end_remaining_sec"] == pytest.approx(25)
+    assert cfg["params"]["stop_loss"]["start_remaining_sec"] == pytest.approx(65)
+    assert cfg["params"]["stop_loss"]["end_remaining_sec"] == pytest.approx(45)
 
 
 def test_build_runtime_config_requires_exactly_one_source():
