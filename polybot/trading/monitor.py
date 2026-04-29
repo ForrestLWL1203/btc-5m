@@ -32,6 +32,8 @@ from .fak_execution import place_fak_buy, place_fak_stop_loss_sell
 from .fak_quotes import (
     BidDepthQuote,
     CapDepthQuote,
+    buffer_buy_price_hint,
+    buffer_sell_price_hint,
     cap_limited_depth_quote as _cap_limited_depth_quote,
     stop_loss_bid_quote as _stop_loss_bid_quote,
 )
@@ -43,6 +45,9 @@ _STARTED_SKIP_THRESHOLD = 60  # allow attaching to a window within its first min
 _SIGNAL_EVAL_LOG_INTERVAL_SEC = 5.0
 _STOP_LOSS_CHECK_LOG_INTERVAL_SEC = 5.0
 _STOP_LOSS_PREWARM_SEC = 5.0
+_SETTLEMENT_MARK_FRESH_SEC = 5.0
+
+
 async def _noop_price_callback(update: PriceUpdate) -> None:
     """Placeholder callback used before a PriceStream is fully wired."""
     return None
@@ -409,6 +414,67 @@ def _log_signal_eval(
     })
 
 
+async def _simulated_dry_buy_fill_price(
+    ws: Optional[PriceStream],
+    token_id: str,
+    *,
+    fallback_price: float,
+    max_entry_price: Optional[float],
+) -> Optional[float]:
+    """Return a pessimistic dry BUY fill after simulated FAK latency."""
+    if ws is None:
+        return fallback_price
+    await asyncio.sleep(config.DRY_RUN_SIMULATED_FAK_LATENCY_SEC)
+    try:
+        latest_ask = ws.get_latest_best_ask(
+            token_id,
+            max_age_sec=config.FAK_RETRY_MAX_BEST_ASK_AGE_SEC,
+            level=1,
+        )
+    except TypeError:
+        latest_ask = ws.get_latest_best_ask(token_id)
+    if latest_ask is None:
+        return fallback_price
+    latest_ask = float(latest_ask)
+    if max_entry_price is not None and latest_ask > max_entry_price:
+        return None
+    return buffer_buy_price_hint(
+        token_id,
+        latest_ask,
+        buffer_ticks=config.DRY_RUN_SIMULATED_PRICE_BUFFER_TICKS,
+        max_price=max_entry_price,
+    )
+
+
+async def _simulated_dry_sell_fill_price(
+    ws: PriceStream,
+    token_id: str,
+    *,
+    fallback_price: Optional[float],
+    min_sell_price: Optional[float],
+) -> Optional[float]:
+    """Return a pessimistic dry SELL fill after simulated FAK latency."""
+    await asyncio.sleep(config.DRY_RUN_SIMULATED_FAK_LATENCY_SEC)
+    try:
+        latest_bid = ws.get_latest_best_bid(
+            token_id,
+            max_age_sec=config.FAK_RETRY_MAX_BEST_ASK_AGE_SEC,
+            level=1,
+        )
+    except TypeError:
+        latest_bid = ws.get_latest_best_bid(token_id)
+    except AttributeError:
+        latest_bid = None
+    if latest_bid is None:
+        return fallback_price
+    return buffer_sell_price_hint(
+        token_id,
+        float(latest_bid),
+        buffer_ticks=config.DRY_RUN_SIMULATED_PRICE_BUFFER_TICKS,
+        min_price=min_sell_price,
+    )
+
+
 def _entry_ask_changed(state: MonitorState, side: str, best_ask: Optional[float]) -> bool:
     """Return True once for each changed target ask checked for entry."""
     if best_ask is None:
@@ -689,7 +755,14 @@ async def _maybe_handle_stop_loss(
     })
 
     if dry_run:
-        sell_price = quote.price_hint or quote.price
+        sell_price = await _simulated_dry_sell_fill_price(
+            ws,
+            token_id,
+            fallback_price=quote.price_hint or quote.price,
+            min_sell_price=trade_config.stop_loss_min_sell_price,
+        )
+        if sell_price is None:
+            sell_price = quote.price_hint or quote.price or 0.0
         realized_pnl = state.holding_size * sell_price - state.entry_amount
         _process_trade_result(state, realized_pnl >= 0, realized_pnl, trade_config)
         log_event(log, logging.WARNING, TRADE, {
@@ -700,6 +773,8 @@ async def _maybe_handle_stop_loss(
             "shares": state.holding_size,
             "realized_pnl": round(realized_pnl, 4),
             "daily_realized_pnl": round(state.daily_realized_pnl, 4),
+            "simulated_latency_ms": round(config.DRY_RUN_SIMULATED_FAK_LATENCY_SEC * 1000),
+            "simulated_price_buffer_ticks": config.DRY_RUN_SIMULATED_PRICE_BUFFER_TICKS,
             "dry_run": True,
         })
         state.holding_size = 0.0
@@ -1090,20 +1165,41 @@ async def _monitor_single_window(
                 # Post-window-end phase: record trade result and await auto-redeem
                 # Polymarket has auto-redeem enabled, so position will be automatically
                 # redeemed and funds returned to account. No manual sell needed.
-                token_price = state.latest_midpoint
-                direction_correct = token_price is not None and token_price > 0.5
+                mark_price = state.latest_midpoint
+                mark_price_age_sec = (
+                    time.time() - state.latest_midpoint_received_at
+                    if state.latest_midpoint_received_at is not None
+                    else None
+                )
+                mark_price_fresh = (
+                    mark_price is not None
+                    and mark_price_age_sec is not None
+                    and mark_price_age_sec <= _SETTLEMENT_MARK_FRESH_SEC
+                )
+                direction_correct = mark_price_fresh and mark_price > 0.5
+                settlement_price = 1.0 if direction_correct else 0.0 if mark_price_fresh else None
 
                 entry_amount = state.entry_amount or state.entry_price * state.holding_size
                 realized_pnl = (
-                    state.holding_size * token_price - entry_amount
-                    if token_price is not None
-                    else 0.0
+                    state.holding_size * settlement_price - entry_amount
+                    if settlement_price is not None
+                    else (
+                        state.holding_size * mark_price - entry_amount
+                        if mark_price is not None
+                        else 0.0
+                    )
+                )
+                trade_result_win = direction_correct if mark_price_fresh else realized_pnl > 0
+                result_label = (
+                    "WIN" if direction_correct else
+                    "LOSS" if mark_price_fresh else
+                    "MARK_STALE"
                 )
 
                 # Process trade result for risk management
                 _process_trade_result(
                     state,
-                    direction_correct,
+                    trade_result_win,
                     realized_pnl,
                     trade_config,
                 )
@@ -1112,9 +1208,12 @@ async def _monitor_single_window(
                 log_event(log, logging.INFO, TRADE, {
                     "action": "TRADE_RESOLVED",
                     "window": window.short_label,
-                    "result": "WIN" if direction_correct else "LOSS",
+                    "result": result_label,
                     "shares": state.holding_size,
-                    "price": token_price,
+                    "price": settlement_price if settlement_price is not None else mark_price,
+                    "mark_price": mark_price,
+                    "mark_price_age_sec": round(mark_price_age_sec, 3) if mark_price_age_sec is not None else None,
+                    "mark_price_fresh": mark_price_fresh,
                     "amount": entry_amount,
                     "realized_pnl": round(realized_pnl, 4),
                     "daily_realized_pnl": round(state.daily_realized_pnl, 4),
@@ -1286,7 +1385,8 @@ async def monitor_window(
     Args:
         window: The window to monitor.
         dry_run: If True, log actions but don't place orders.
-        preopened: If True, skip the stale check.
+        preopened: If True, skip the generic stale check. Snapshot-entry
+            strategies still skip windows whose entry band has already elapsed.
         existing_ws: Reuse this WS connection instead of creating a new one.
         trade_config: Common execution parameters (amount, per-window cap, rounds).
         strategy: Strategy handling direction + buy decision.
@@ -1329,6 +1429,7 @@ async def monitor_window(
     state.entry_count = 0
     state.entry_timestamps = []
     state.latest_midpoint = None
+    state.latest_midpoint_received_at = None
     state.target_side = None
     state.target_entry_price = None
     state.target_max_entry_price = None
@@ -1369,15 +1470,16 @@ async def monitor_window(
     now_epoch = int(time.time())
     elapsed_since_start = now_epoch - window.start_epoch
 
-    # Skip stale windows on fresh attach. For strategies with a delayed entry
-    # band, keep monitoring until that band has actually elapsed.
+    # Skip stale windows before subscribing. A preopened crowd snapshot window
+    # can become stale if next-window discovery or WS switching stalls.
     skip_threshold, skip_reason = _strategy_attach_skip_threshold(strategy, window)
-    if not preopened and elapsed_since_start > skip_threshold:
+    if elapsed_since_start > skip_threshold and (not preopened or _is_crowd_m1_strategy(strategy)):
         log_event(log, logging.INFO, WINDOW, {
             "action": "SKIP",
             "window": window.short_label,
             "elapsed": elapsed_since_start,
             "reason": skip_reason,
+            "preopened": preopened,
         })
         next_win = _find_and_preopen_next_window(window, series)
         return next_win, ws, False
@@ -1486,6 +1588,7 @@ async def monitor_window(
                             entry_ask_level=quote.entry_ask_level,
                             book_ask_preview=quote.preview,
                             price_hint_refresher=_price_hint_refresher(ws, buy_token_id, strategy, trade_config, state),
+                            ws=ws,
                         )
                         # Re-resolve token if strategy set target_side during opening buy
                         if state.target_side is not None:
@@ -1691,12 +1794,14 @@ async def _on_price_update(
                     entry_ask_level=quote.entry_ask_level,
                     book_ask_preview=quote.preview,
                     price_hint_refresher=_price_hint_refresher(ws, buy_token_id, strategy, trade_config, state),
+                    ws=ws,
                 )
             return
 
         is_held_token_update = update.token_id == buy_token_id
         if is_held_token_update:
             state.latest_midpoint = price
+            state.latest_midpoint_received_at = time.time()
             stop_timing, stop_remaining = _stop_loss_remaining_state(window, trade_config)
             if stop_timing == "before":
                 return
@@ -1743,6 +1848,7 @@ async def _handle_opening_price(
     entry_ask_level: Optional[int] = None,
     book_ask_preview: Optional[list[tuple[float, float]]] = None,
     price_hint_refresher=None,
+    ws: Optional[PriceStream] = None,
 ) -> None:
     """Handle the opening price check and buy decision."""
     if state.bought:
@@ -1856,6 +1962,29 @@ async def _handle_opening_price(
                 })
                 raise RuntimeError(result.message)
     else:
+        simulated_buy_price = await _simulated_dry_buy_fill_price(
+            ws,
+            buy_token_id,
+            fallback_price=buy_price,
+            max_entry_price=_entry_price_cap(strategy, state),
+        )
+        if simulated_buy_price is None:
+            state.exit_triggered = True
+            state.buy_blocked_window_cap = True
+            log_event(log, logging.WARNING, TRADE, {
+                "action": "BUY_FAILED",
+                "side": side.upper(),
+                "price": buy_price,
+                "amount": trade_amount,
+                "message": "dry-run simulated FAK ask above cap after latency",
+                "window": window.short_label,
+                "dry_run": True,
+                "simulated_latency_ms": round(config.DRY_RUN_SIMULATED_FAK_LATENCY_SEC * 1000),
+            })
+            state.target_entry_price = None
+            state.target_side = None
+            return
+        buy_price = simulated_buy_price
         state.bought = True
         state.entry_count += 1
         state.entry_timestamps.append(time.time())
@@ -1872,6 +2001,8 @@ async def _handle_opening_price(
             "target_entry_ask": target_entry_ask,
             "best_ask_level_1": best_ask_level_1,
             "price_hint": best_ask,
+            "simulated_latency_ms": round(config.DRY_RUN_SIMULATED_FAK_LATENCY_SEC * 1000) if ws is not None else None,
+            "simulated_price_buffer_ticks": config.DRY_RUN_SIMULATED_PRICE_BUFFER_TICKS if ws is not None else None,
             "depth_levels_used": depth_levels_used,
             "depth_notional": round(depth_notional, 4) if depth_notional is not None else None,
             "depth_skipped_levels": depth_skipped_levels,
@@ -1908,6 +2039,9 @@ async def _handle_opening_price(
             "amount": trade_amount,
             "shares": state.holding_size,
             "window": window.short_label,
+            "avg_price": buy_price,
+            "simulated_latency_ms": round(config.DRY_RUN_SIMULATED_FAK_LATENCY_SEC * 1000) if ws is not None else None,
+            "simulated_price_buffer_ticks": config.DRY_RUN_SIMULATED_PRICE_BUFFER_TICKS if ws is not None else None,
             "dry_run": True,
         })
         if strategy is not None:

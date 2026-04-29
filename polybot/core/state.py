@@ -18,6 +18,7 @@ class MonitorState:
     entry_count: int = 0  # total successful entries this window
     entry_timestamps: list[float] = field(default_factory=list)  # confirmed entry times (epoch seconds)
     latest_midpoint: Optional[float] = None
+    latest_midpoint_received_at: Optional[float] = None
     buy_blocked_window_cap: bool = False  # blocked because max_entries_per_window was reached
     target_side: Optional[str] = None  # optional strategy-specific side override ("up"/"down")
     target_entry_price: Optional[float] = None  # strategy-computed token price to use for fills/logging

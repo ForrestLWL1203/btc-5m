@@ -376,7 +376,7 @@ cat > "\${RUN_DIR}/wrapper.sh" <<WRAP
 set -euo pipefail
 RC=0
 echo "\\\$\\\$" > "\${RUN_DIR}/pgid"
-if ! "\${RUN_DIR}/run.sh" >"\${RUN_DIR}/stdout.log" 2>&1; then
+if ! "\${RUN_DIR}/run.sh" >"\${RUN_DIR}/stdout.log" 2>"\${RUN_DIR}/stderr.log"; then
   RC=\\\$?
 fi
 printf "%s\n" "\\\$RC" > "\${RUN_DIR}/exit_code"
@@ -406,6 +406,11 @@ if [ -f "\${RUN_DIR}/stdout.log" ]; then
   echo "STDOUT_TAIL_BEGIN"
   tail -n 20 "\${RUN_DIR}/stdout.log" || true
   echo "STDOUT_TAIL_END"
+fi
+if [ -f "\${RUN_DIR}/stderr.log" ]; then
+  echo "STDERR_TAIL_BEGIN"
+  tail -n 20 "\${RUN_DIR}/stderr.log" || true
+  echo "STDERR_TAIL_END"
 fi
 '
 EOF

@@ -131,6 +131,17 @@ Runtime behavior:
 - Enable the BTC recent-reverse soft filter: skip UP entries if BTC dropped at
   least `0.02%` over the last 20s, and skip DOWN entries if BTC rose at least
   `0.02%` over the last 20s.
+- `btc_reverse_filter.min_reverse_move_pct` is in percent units:
+  `0.02` means `0.02%`, not `2%`.
+- The reverse filter uses Polymarket RTDS `crypto_prices` for `btcusdt` by
+  default. Keep the Binance feed available as a fallback option until RTDS has
+  proven stable in dry-run.
+- The reverse filter logs `BTC_REVERSE_FILTER_CHECK` once per
+  `(history_ready, triggered)` state per window, so a temporary history-missing
+  check does not hide a later ready check.
+- Polymarket RTDS feed handling ignores malformed/non-finite crypto price
+  values, preserves inner item symbols when batch payloads include both outer
+  and inner symbols, and appends ordered ticks on the hot path.
 - Use existing target-leg depth-gated execution; do not replace live execution
   with backtest-only L5 price proxies.
 - Cap final selected entry/hint at `max_entry_price=0.75`.
@@ -148,8 +159,11 @@ Runtime behavior:
 - Entry logs include UP/DOWN best-ask cache age for book freshness validation.
 - Crowd entry `signal_price` is the leading ask, and `active_theta_pct` remains
   empty because BTC theta is not used.
+- Dry-run BUY/SELL simulates FAK latency and a tick buffer; if a dry BUY fails
+  after the latency recheck because the ask moved above cap, the window is
+  locked and target entry state is cleared.
 - Stop-loss is enabled with trigger `0.35`, only while remaining time is
-  `[65s,45s]`.
+  `[60s,45s]`.
 - After BUY fill, held-token WS updates are ignored until 5s before the
   stop-loss window; prewarm logs held-leg bid-book age, and active-window
   updates can trigger stop-loss immediately.
@@ -193,7 +207,7 @@ Tests:
 env -u ALL_PROXY -u all_proxy -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy pytest -q
 ```
 
-Expected suite size after crowd_m1 cleanup fixes: 165 tests.
+Expected suite size after RTDS/reverse-filter bugfixes: 185 tests.
 
 VPS bootstrap:
 
@@ -273,10 +287,15 @@ artifacts and should stay out of git.
 
 ## Logging Notes
 
-Each runtime execution writes one structured analysis log under
-`log/runs/<run_id>/<market>_trade.jsonl`.
+Each runtime execution writes separate structured JSONL files under
+`log/runs/<run_id>/`:
+
+- `<market>_trade.jsonl`: normal business records below `WARNING`.
+- `<market>_error.jsonl`: abnormal records at `WARNING` and above.
+
 Human-readable logs are stdout/stderr only and are captured in remote
-`stdout.log`; do not reintroduce persistent `*_trade.log` files.
+`stdout.log` for normal output and `stderr.log` for abnormal output; do not
+reintroduce persistent `*_trade.log` files.
 
 Important fields:
 
@@ -288,6 +307,10 @@ Important fields:
 - `FAK_FILLED.avg_price`: actual average fill.
 - `ENTRY_DEPTH_SKIP` logs first insufficient-depth skip only; repeats aggregate
   into `SUMMARY`.
+- `TRADE_RESOLVED` uses binary `1.0/0.0` settlement only when the held-leg mark
+  is fresh. If the cached mark is stale, it records mark-to-mid PnL with
+  `result=MARK_STALE`, `mark_price_age_sec`, and `mark_price_fresh=false`
+  instead of converting a stale mark above `0.5` into a fake settlement win.
 
 ## Agent Rules
 

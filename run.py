@@ -33,19 +33,53 @@ root_log.setLevel(logging.INFO)
 for noisy_logger in ("httpx", "httpcore", "websockets", "urllib3"):
     logging.getLogger(noisy_logger).setLevel(logging.WARNING)
 
-# Console — human-readable with [EVENT_TYPE] prefix
-console = logging.StreamHandler()
-console.setFormatter(ConsoleFormatter(
-    "%(asctime)s.%(msecs)03d %(levelname)s %(name)s — %(message)s",
-    datefmt="%H:%M:%S",
-))
-root_log.addHandler(console)
+
+class _BelowLevelFilter(logging.Filter):
+    """Allow records below the configured level."""
+
+    def __init__(self, max_level: int):
+        super().__init__()
+        self._max_level = max_level
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.levelno < self._max_level
+
+
+class _AtOrAboveLevelFilter(logging.Filter):
+    """Allow records at or above the configured level."""
+
+    def __init__(self, min_level: int):
+        super().__init__()
+        self._min_level = min_level
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.levelno >= self._min_level
+
+
+def _console_formatter() -> ConsoleFormatter:
+    return ConsoleFormatter(
+        "%(asctime)s.%(msecs)03d %(levelname)s %(name)s — %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
+
+# Console — split normal business output from abnormal output by stream.
+stdout_console = logging.StreamHandler(sys.stdout)
+stdout_console.setFormatter(_console_formatter())
+stdout_console.addFilter(_BelowLevelFilter(logging.WARNING))
+root_log.addHandler(stdout_console)
+
+stderr_console = logging.StreamHandler(sys.stderr)
+stderr_console.setFormatter(_console_formatter())
+stderr_console.addFilter(_AtOrAboveLevelFilter(logging.WARNING))
+root_log.addHandler(stderr_console)
 
 log = logging.getLogger(__name__)
 _LAST_DRY_RUN = False
 
-# JSONL handler — initialized lazily once we know the market series
-_run_jsonl_handler = None
+# JSONL handlers — initialized lazily once we know the market series
+_run_trade_jsonl_handler = None
+_run_error_jsonl_handler = None
 
 
 def _remove_historical_logs(run_dir: Path) -> None:
@@ -67,8 +101,8 @@ def _remove_historical_logs(run_dir: Path) -> None:
 
 def _setup_file_logging(slug_prefix: str, run_id: str) -> None:
     """Set up the per-run structured JSONL log."""
-    global _run_jsonl_handler
-    if _run_jsonl_handler is not None:
+    global _run_trade_jsonl_handler, _run_error_jsonl_handler
+    if _run_trade_jsonl_handler is not None and _run_error_jsonl_handler is not None:
         return  # Already set up
 
     run_dir_override = os.environ.get("POLYBOT_RUN_DIR")
@@ -76,12 +110,21 @@ def _setup_file_logging(slug_prefix: str, run_id: str) -> None:
     _remove_historical_logs(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    _run_jsonl_handler = logging.FileHandler(
+    _run_trade_jsonl_handler = logging.FileHandler(
         run_dir / f"{slug_prefix}_trade.jsonl",
         encoding="utf-8",
     )
-    _run_jsonl_handler.setFormatter(JsonFormatter())
-    root_log.addHandler(_run_jsonl_handler)
+    _run_trade_jsonl_handler.setFormatter(JsonFormatter())
+    _run_trade_jsonl_handler.addFilter(_BelowLevelFilter(logging.WARNING))
+    root_log.addHandler(_run_trade_jsonl_handler)
+
+    _run_error_jsonl_handler = logging.FileHandler(
+        run_dir / f"{slug_prefix}_error.jsonl",
+        encoding="utf-8",
+    )
+    _run_error_jsonl_handler.setFormatter(JsonFormatter())
+    _run_error_jsonl_handler.addFilter(_AtOrAboveLevelFilter(logging.WARNING))
+    root_log.addHandler(_run_error_jsonl_handler)
 
 async def main() -> None:
     global _LAST_DRY_RUN

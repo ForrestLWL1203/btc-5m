@@ -16,7 +16,7 @@ def test_backtest_candidate_marks_false_stop_when_side_would_win():
     rows = [
         {"ts": 1119.0, "src": "poly", "token": "down", "bid": 0.29, "ask": 0.30},
         {"ts": 1120.0, "src": "poly", "token": "up", "bid": 0.69, "ask": 0.70},
-        {"ts": 1260.0, "src": "poly", "token": "up", "bid": 0.34, "ask": 0.35},
+        {"ts": 1245.0, "src": "poly", "token": "up", "bid": 0.34, "ask": 0.35},
     ]
     candidate = Candidate(
         name="test",
@@ -39,7 +39,7 @@ def test_backtest_candidate_ignores_stop_bid_below_min_sell_price():
     rows = [
         {"ts": 1119.0, "src": "poly", "token": "down", "bid": 0.29, "ask": 0.30},
         {"ts": 1120.0, "src": "poly", "token": "up", "bid": 0.69, "ask": 0.70},
-        {"ts": 1260.0, "src": "poly", "token": "up", "bid": 0.19, "ask": 0.20},
+        {"ts": 1245.0, "src": "poly", "token": "up", "bid": 0.19, "ask": 0.20},
     ]
     candidate = Candidate(
         name="test",
@@ -71,3 +71,10 @@ def test_default_candidate_names_use_rounded_threshold_labels():
 
     assert "live_120_l058_slnone" in names
     assert "live_120_l057_slnone" not in names
+
+
+def test_default_candidates_use_current_stop_loss_window():
+    candidate = default_candidates()[0]
+
+    assert candidate.stop_loss_start_remaining_sec == pytest.approx(60)
+    assert candidate.stop_loss_end_remaining_sec == pytest.approx(45)

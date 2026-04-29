@@ -9,6 +9,7 @@ import logging
 
 from polybot.core.state import MonitorState
 from polybot.market.market import MarketWindow
+from polybot.market.series import MarketSeries
 from polybot.market.stream import PriceUpdate
 from polybot.strategies.crowd_m1 import CrowdM1Strategy
 from polybot.strategies.paired_window import PairedWindowStrategy
@@ -81,6 +82,8 @@ def _mock_crowd_strategy() -> MagicMock:
     strategy.set_market_snapshot = MagicMock()
     strategy.preload_open_btc = AsyncMock()
     strategy.max_entry_price = 0.75
+    strategy.entry_start_remaining_sec = 120
+    strategy.entry_end_remaining_sec = 115
     return strategy
 
 
@@ -184,6 +187,47 @@ async def test_stop_loss_sells_with_bid_depth_inside_time_band():
 
 
 @pytest.mark.asyncio
+async def test_stop_loss_dry_run_simulates_latency_and_buffered_bid():
+    now = time.time()
+    window = _make_window(start_epoch=int(now) - 240, end_epoch=int(now) + 60)
+    state = _make_state(
+        bought=True,
+        holding_size=2.0,
+        entry_amount=1.0,
+        entry_price=0.70,
+        entry_avg_price=0.70,
+    )
+    ws = MagicMock()
+    ws.get_latest_bid_levels_with_size.return_value = _bid_book(0.34, 12)
+    ws.get_latest_best_bid_age.return_value = 0.01
+    ws.get_latest_best_bid.return_value = 0.33
+    trade_config = _tc(
+        stop_loss_enabled=True,
+        stop_loss_start_remaining_sec=120,
+        stop_loss_end_remaining_sec=15,
+        stop_loss_trigger_price=0.35,
+        stop_loss_min_sell_price=0.20,
+    )
+
+    with patch("polybot.trading.monitor.asyncio.sleep", new_callable=AsyncMock) as mock_sleep, \
+         patch("polybot.trading.fak_quotes.get_tick_size", return_value=0.01):
+        await _maybe_handle_stop_loss(
+            window,
+            state,
+            ws,
+            "up-token-123",
+            True,
+            trade_config,
+            "up",
+        )
+
+    mock_sleep.assert_awaited_once_with(0.4)
+    assert state.stop_loss_triggered is True
+    assert state.exit_triggered is True
+    assert state.daily_realized_pnl == pytest.approx((2.0 * 0.28) - 1.0)
+
+
+@pytest.mark.asyncio
 async def test_stop_loss_does_not_trigger_from_deep_book_price_only():
     now = time.time()
     window = _make_window(start_epoch=int(now) - 240, end_epoch=int(now) + 60)
@@ -208,7 +252,8 @@ async def test_stop_loss_does_not_trigger_from_deep_book_price_only():
         stop_loss_trigger_price=0.38,
     )
 
-    with patch("polybot.trading.monitor.place_fak_stop_loss_sell", new_callable=AsyncMock) as mock_sell:
+    with patch("polybot.trading.fak_quotes.get_tick_size", return_value=0.01), \
+         patch("polybot.trading.monitor.place_fak_stop_loss_sell", new_callable=AsyncMock) as mock_sell:
         await _maybe_handle_stop_loss(
             window,
             state,
@@ -244,7 +289,8 @@ async def test_stop_loss_logs_check_when_bid_above_trigger(caplog):
         stop_loss_trigger_price=0.38,
     )
 
-    with patch("polybot.trading.monitor.place_fak_stop_loss_sell", new_callable=AsyncMock) as mock_sell:
+    with patch("polybot.trading.fak_quotes.get_tick_size", return_value=0.01), \
+         patch("polybot.trading.monitor.place_fak_stop_loss_sell", new_callable=AsyncMock) as mock_sell:
         with caplog.at_level(logging.INFO, logger="polybot.trading.monitor"):
             await _maybe_handle_stop_loss(
                 window,
@@ -520,7 +566,7 @@ async def test_monitor_window_allows_dynamic_strategy_without_initial_side():
     strategy.get_side.return_value = None
     strategy.dynamic_side = True
 
-    with patch("polybot.trading.monitor.prefetch_order_params", create=True, new=MagicMock()), \
+    with patch("polybot.core.client.prefetch_order_params", new=MagicMock()), \
          patch("polybot.trading.monitor._monitor_single_window", new_callable=AsyncMock, return_value=None), \
          patch("polybot.trading.monitor.find_next_window", return_value=None):
         next_win, returned_ws, monitored = await monitor_window(
@@ -1166,6 +1212,67 @@ async def test_handle_opening_price_uses_strength_amount_tier():
 
 
 @pytest.mark.asyncio
+async def test_handle_opening_price_dry_run_simulates_latency_and_buffered_ask():
+    window = _make_window()
+    state = MonitorState()
+    state.target_side = "up"
+    state.target_entry_price = 0.65
+    strategy = _mock_strategy()
+    strategy.max_entry_price = 0.75
+    ws = MagicMock()
+    ws.get_latest_best_ask.return_value = 0.67
+
+    with patch("polybot.trading.monitor.asyncio.sleep", new_callable=AsyncMock) as mock_sleep, \
+         patch("polybot.trading.fak_quotes.get_tick_size", return_value=0.01):
+        await _handle_opening_price(
+            window,
+            state,
+            "up-token-123",
+            0.65,
+            dry_run=True,
+            trade_config=_tc(amount=1.0),
+            strategy=strategy,
+            side="up",
+            ws=ws,
+        )
+
+    mock_sleep.assert_awaited_once_with(0.4)
+    assert state.entry_price == pytest.approx(0.72)
+    assert state.entry_avg_price == pytest.approx(0.72)
+    assert state.holding_size == pytest.approx(1.0 / 0.72)
+
+
+@pytest.mark.asyncio
+async def test_handle_opening_price_dry_run_cap_failure_clears_target_side():
+    window = _make_window()
+    state = MonitorState()
+    state.target_side = "up"
+    state.target_entry_price = 0.65
+    strategy = _mock_strategy()
+    strategy.max_entry_price = 0.75
+    ws = MagicMock()
+    ws.get_latest_best_ask.return_value = 0.76
+
+    with patch("polybot.trading.monitor.asyncio.sleep", new_callable=AsyncMock):
+        await _handle_opening_price(
+            window,
+            state,
+            "up-token-123",
+            0.65,
+            dry_run=True,
+            trade_config=_tc(amount=1.0),
+            strategy=strategy,
+            side="up",
+            ws=ws,
+        )
+
+    assert state.exit_triggered is True
+    assert state.buy_blocked_window_cap is True
+    assert state.target_entry_price is None
+    assert state.target_side is None
+
+
+@pytest.mark.asyncio
 async def test_sync_holding_balance_after_buy_updates_live_shares():
     window = _make_window()
     state = _make_state(
@@ -1205,14 +1312,16 @@ async def test_monitor_window_reuses_existing_ws():
     mock_ws = MagicMock()
     mock_ws.set_on_price = MagicMock()
     mock_ws.switch_tokens = AsyncMock()
-    mock_ws.get_latest_price = MagicMock(return_value=None)
+    mock_ws.get_latest_price = MagicMock(return_value=0.50)
+    strategy = _mock_strategy()
+    strategy.should_buy.return_value = False
 
-    with patch("polybot.trading.monitor.prefetch_order_params", create=True, new=MagicMock()), \
+    with patch("polybot.core.client.prefetch_order_params", new=MagicMock()), \
          patch("polybot.trading.monitor._monitor_single_window", new_callable=AsyncMock, return_value=None), \
          patch("polybot.trading.monitor.find_next_window", return_value=None):
         _, returned_ws, _ = await monitor_window(
             window, dry_run=True, preopened=True, existing_ws=mock_ws,
-            strategy=_mock_strategy(),
+            strategy=strategy,
         )
 
     mock_ws.set_on_price.assert_called_once()
@@ -1262,7 +1371,7 @@ async def test_monitor_window_resets_started_before_preopen_switch():
     strategy = _mock_strategy()
     strategy.should_buy.return_value = False
 
-    with patch("polybot.trading.monitor.prefetch_order_params", create=True, new=MagicMock()), \
+    with patch("polybot.core.client.prefetch_order_params", new=MagicMock()), \
          patch("polybot.trading.monitor._monitor_single_window", new_callable=AsyncMock, return_value=None), \
          patch("polybot.trading.monitor.find_next_window", return_value=None):
         next_win, returned_ws, monitored = await monitor_window(
@@ -1381,6 +1490,86 @@ async def test_monitor_single_window_actively_checks_stop_loss_without_price_upd
 
 
 @pytest.mark.asyncio
+async def test_monitor_single_window_settles_winning_dry_run_at_one(caplog):
+    now = int(time.time())
+    window = _make_window(start_epoch=now - 300, end_epoch=now)
+    state = _make_state(
+        bought=True,
+        holding_size=1.25,
+        entry_amount=1.0,
+        entry_price=0.80,
+        entry_avg_price=0.80,
+        latest_midpoint=0.695,
+        latest_midpoint_received_at=window.end_epoch - 1,
+    )
+
+    with patch("polybot.trading.monitor.time.time", return_value=window.end_epoch):
+        with caplog.at_level(logging.INFO, logger="polybot.trading.monitor"):
+            await _monitor_single_window(
+                window,
+                state,
+                ws=None,
+                dry_run=True,
+                trade_config=_tc(),
+                strategy=None,
+                prefetch_next_window=False,
+            )
+
+    resolved = [
+        record.event_data
+        for record in caplog.records
+        if getattr(record, "event_data", {}).get("action") == "TRADE_RESOLVED"
+    ]
+    assert resolved
+    assert resolved[0]["result"] == "WIN"
+    assert resolved[0]["price"] == pytest.approx(1.0)
+    assert resolved[0]["mark_price"] == pytest.approx(0.695)
+    assert resolved[0]["mark_price_fresh"] is True
+    assert resolved[0]["realized_pnl"] == pytest.approx(0.25)
+    assert state.daily_realized_pnl == pytest.approx(0.25)
+
+
+@pytest.mark.asyncio
+async def test_monitor_single_window_does_not_binary_win_stale_mark(caplog):
+    now = int(time.time())
+    window = _make_window(start_epoch=now - 300, end_epoch=now)
+    state = _make_state(
+        bought=True,
+        holding_size=1.25,
+        entry_amount=1.0,
+        entry_price=0.80,
+        entry_avg_price=0.80,
+        latest_midpoint=0.695,
+        latest_midpoint_received_at=window.end_epoch - 30,
+    )
+
+    with patch("polybot.trading.monitor.time.time", return_value=window.end_epoch):
+        with caplog.at_level(logging.INFO, logger="polybot.trading.monitor"):
+            await _monitor_single_window(
+                window,
+                state,
+                ws=None,
+                dry_run=True,
+                trade_config=_tc(),
+                strategy=None,
+                prefetch_next_window=False,
+            )
+
+    resolved = [
+        record.event_data
+        for record in caplog.records
+        if getattr(record, "event_data", {}).get("action") == "TRADE_RESOLVED"
+    ]
+    assert resolved
+    assert resolved[0]["result"] == "MARK_STALE"
+    assert resolved[0]["price"] == pytest.approx(0.695)
+    assert resolved[0]["mark_price_fresh"] is False
+    assert resolved[0]["mark_price_age_sec"] == pytest.approx(30)
+    assert resolved[0]["realized_pnl"] == pytest.approx(round((1.25 * 0.695) - 1.0, 4))
+    assert state.daily_realized_pnl == pytest.approx((1.25 * 0.695) - 1.0)
+
+
+@pytest.mark.asyncio
 async def test_on_price_bought_position_skips_stop_loss_before_time_band():
     now = int(time.time())
     window = _make_window(start_epoch=now - 100, end_epoch=now + 200)
@@ -1476,7 +1665,7 @@ async def test_monitor_window_opening_price_does_not_buy_without_signal():
     strategy = _mock_strategy()
     strategy.should_buy.return_value = False
 
-    with patch("polybot.trading.monitor.prefetch_order_params", create=True, new=MagicMock()), \
+    with patch("polybot.core.client.prefetch_order_params", new=MagicMock()), \
          patch("polybot.trading.monitor._monitor_single_window", new_callable=AsyncMock, return_value=None), \
          patch("polybot.trading.monitor.find_next_window", return_value=None), \
          patch("polybot.trading.monitor._handle_opening_price", new_callable=AsyncMock) as mock_buy:
@@ -1516,7 +1705,7 @@ async def test_monitor_window_does_not_skip_inside_strategy_entry_band():
     strategy.should_buy.return_value = False
     strategy.entry_end_remaining_sec = 120
 
-    with patch("polybot.trading.monitor.prefetch_order_params", create=True, new=MagicMock()), \
+    with patch("polybot.core.client.prefetch_order_params", new=MagicMock()), \
          patch("polybot.trading.monitor._monitor_single_window", new_callable=AsyncMock, return_value=None), \
          patch("polybot.trading.monitor.find_next_window", return_value=None):
         next_win, returned_ws, monitored = await monitor_window(
@@ -1559,6 +1748,51 @@ async def test_monitor_window_skips_after_strategy_entry_band_ends():
 
 
 @pytest.mark.asyncio
+async def test_monitor_window_skips_stale_preopened_after_strategy_entry_band_ends(caplog):
+    import datetime
+
+    now = int(time.time())
+    utc = datetime.timezone.utc
+    window = MarketWindow(
+        question="Test Window",
+        up_token="up-tok",
+        down_token="down-tok",
+        start_time=datetime.datetime.fromtimestamp(now - 240, tz=utc),
+        end_time=datetime.datetime.fromtimestamp(now + 60, tz=utc),
+        slug="test",
+    )
+
+    mock_ws = MagicMock()
+    mock_ws.set_on_price = MagicMock()
+    mock_ws.switch_tokens = AsyncMock()
+
+    strategy = CrowdM1Strategy(
+        MarketSeries.from_known("btc-updown-5m"),
+        entry_elapsed_sec=180,
+        entry_timeout_sec=5,
+    )
+
+    with caplog.at_level(logging.INFO), \
+         patch("polybot.trading.monitor._find_and_preopen_next_window", return_value=None), \
+         patch("polybot.trading.monitor._monitor_single_window", new_callable=AsyncMock) as monitor_single:
+        next_win, returned_ws, monitored = await monitor_window(
+            window, dry_run=True, preopened=True, existing_ws=mock_ws,
+            trade_config=_tc(), strategy=strategy,
+        )
+
+    assert monitored is False
+    assert returned_ws is mock_ws
+    assert next_win is None
+    mock_ws.switch_tokens.assert_not_called()
+    monitor_single.assert_not_called()
+    assert any(
+        getattr(record, "event_data", {}).get("action") == "SKIP"
+        and getattr(record, "event_data", {}).get("preopened") is True
+        for record in caplog.records
+    )
+
+
+@pytest.mark.asyncio
 async def test_monitor_window_final_round_skips_fallback_lookup():
     import datetime
 
@@ -1582,7 +1816,7 @@ async def test_monitor_window_final_round_skips_fallback_lookup():
     strategy = _mock_strategy()
     strategy.should_buy.return_value = False
 
-    with patch("polybot.trading.monitor.prefetch_order_params", create=True, new=MagicMock()), \
+    with patch("polybot.core.client.prefetch_order_params", new=MagicMock()), \
          patch("polybot.trading.monitor._monitor_single_window", new_callable=AsyncMock, return_value=None), \
          patch("polybot.trading.monitor.find_next_window", side_effect=AssertionError("should not fetch next window")):
         next_win, returned_ws, monitored = await monitor_window(

@@ -15,9 +15,9 @@ does.
 ```yaml
 strategy:
   type: paired_window
-  theta_pct: 0.03
-  theta_start_pct: 0.025
-  theta_end_pct: 0.04
+  theta_pct: 0.036
+  theta_start_pct: 0.03
+  theta_end_pct: 0.048
   persistence_sec: 10
   entry_start_remaining_sec: 255
   entry_end_remaining_sec: 180
@@ -50,8 +50,8 @@ Rules:
   `--timeframe=5m` are the only accepted runtime values.
 - BTC baseline is current window open.
 - Entry band is 45s to 120s after window start.
-- Dynamic theta is active: 0.025% at 45s after open, linearly rising to 0.04%
-  at 120s. `theta_pct=0.03%` is fallback only.
+- Dynamic theta is active: 0.03% at 45s after open, linearly rising to 0.048%
+  at 120s. `theta_pct=0.036%` is fallback only.
 - Need persistence, same direction, and non-fading move.
 - Direction locks once per window.
 - Hard cap is `0.75`; no strength cap tiers and no early-entry bypass.
@@ -114,9 +114,11 @@ strategy:
   min_leading_ask: 0.62
   max_entry_price: 0.75
   btc_direction_confirm: false
+  btc_price_feed_source: polymarket_rtds
   btc_reverse_filter:
     enabled: true
     lookback_sec: 20
+    # Unit is percent: 0.02 means 0.02%, not 2%.
     min_reverse_move_pct: 0.02
 
 params:
@@ -138,7 +140,7 @@ params:
   stop_loss:
     enabled: true
     trigger_price: 0.35
-    start_remaining_sec: 65
+    start_remaining_sec: 60
     end_remaining_sec: 45
     sell_bid_level: 10
     retry_count: 3
@@ -153,6 +155,15 @@ Rules:
 - Do not require BTC direction from window open to match the selected side.
 - Use a BTC recent-reverse soft filter: skip UP if BTC fell at least 0.02% over
   the last 20s, and skip DOWN if BTC rose at least 0.02% over the last 20s.
+- `btc_reverse_filter.min_reverse_move_pct` is in percent units: `0.02` means
+  `0.02%`, not `2%`.
+- The reverse filter reads BTC history from Polymarket RTDS `crypto_prices`
+  (`btcusdt`) by default; Binance remains as a fallback source option while RTDS
+  stability is validated.
+- Reverse-filter checks log `BTC_REVERSE_FILTER_CHECK` once per
+  `(history_ready, triggered)` state per window. Polymarket RTDS ignores
+  malformed/non-finite values, preserves inner batch item symbols, and appends
+  ordered ticks on the hot path.
 - Use existing target-leg order-book depth gating; do not use backtest-only L5
   price proxies for live execution.
 - Reject candidates whose leading ask is above `max_entry_price=0.75` before
@@ -168,6 +179,8 @@ Rules:
 - Entry logs include UP/DOWN best-ask cache age for book freshness validation.
 - Crowd entry `signal_price` is the leading ask, and `active_theta_pct` remains
   empty because BTC theta is not used.
+- Dry-run BUY/SELL simulates FAK latency and a tick buffer; dry BUY cap failure
+  after latency locks the window and clears target entry state.
 - Hold to `window.end_epoch` unless the narrow stop-loss window fills.
 
 Stop-loss when enabled:
@@ -213,7 +226,7 @@ python3.11 run.py --preset enhanced --rounds 3
 env -u ALL_PROXY -u all_proxy -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy pytest -q
 ```
 
-Expected suite size after crowd_m1 cleanup fixes: 165 tests.
+Expected suite size after RTDS/reverse-filter bugfixes: 185 tests.
 
 VPS:
 
@@ -291,8 +304,14 @@ Price fields:
 - `target_entry_ask`: selected depth level price.
 - `price_hint`: clamped FAK hint.
 - `FAK_FILLED.avg_price`: actual average fill.
-- Persistent trade logs are JSONL only: `log/<market>_trade.jsonl` and run-dir
-  copies. Human-readable logs stay in stdout/stderr, not `*_trade.log`.
+- `TRADE_RESOLVED` uses binary settlement only when the held-leg mark is fresh.
+  Stale cached marks are logged as `result=MARK_STALE` with
+  `mark_price_age_sec` / `mark_price_fresh` and use mark-to-mid PnL.
+- Persistent run logs are JSONL only. Normal business records below `WARNING`
+  go to `log/runs/<run_id>/<market>_trade.jsonl`; abnormal records at
+  `WARNING` and above go to `log/runs/<run_id>/<market>_error.jsonl`.
+  Human-readable normal output goes to stdout/remote `stdout.log`; abnormal
+  output goes to stderr/remote `stderr.log`; do not create `*_trade.log`.
 
 ## Guardrails
 

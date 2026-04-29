@@ -137,6 +137,16 @@ Config:
 - A separate BTC reverse soft filter is enabled: if the selected side is UP and
   BTC fell at least `0.02%` over the last 20s, or the selected side is DOWN and
   BTC rose at least `0.02%` over the last 20s, skip that entry.
+- `btc_reverse_filter.min_reverse_move_pct` is expressed in percent units:
+  `0.02` means `0.02%`, not `2%`.
+- The BTC price history for that reverse filter comes from Polymarket RTDS
+  `crypto_prices` (`btcusdt`) by default; the Binance feed remains available as
+  a fallback config option while RTDS stability is validated.
+- Reverse-filter checks log `BTC_REVERSE_FILTER_CHECK` once per
+  `(history_ready, triggered)` state per window, so an early history-missing
+  check does not suppress a later ready check.
+- Polymarket RTDS crypto handling ignores malformed/non-finite values, preserves
+  inner symbols in batched payloads, and uses append on ordered hot-path ticks.
 - Use the same target-leg depth-gated execution path as `paired_window`.
 - Hard max entry cap is `0.75`.
 - If the leading ask is above `0.75`, the strategy rejects the candidate before
@@ -152,7 +162,10 @@ Config:
 - Entry logs include UP/DOWN best-ask cache age so dry-runs can verify book
   freshness before FAK. For crowd entries, `signal_price` is the leading ask,
   and `active_theta_pct` remains empty because BTC theta is not used.
-- Stop-loss is enabled only while remaining time is `[65s,45s]`, with trigger
+- Dry-run BUY/SELL simulates FAK latency and a tick buffer; if a dry BUY
+  latency recheck moves above cap, the window is locked and target entry state
+  is cleared.
+- Stop-loss is enabled only while remaining time is `[60s,45s]`, with trigger
   `0.35`; otherwise hold to `window.end_epoch`.
 - After BUY fill, held-token WS updates are ignored until 5s before the
   stop-loss window; prewarm logs held-leg bid-book age, and active-window
@@ -200,7 +213,7 @@ Run tests:
 env -u ALL_PROXY -u all_proxy -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy pytest -q
 ```
 
-Current expected test suite size: 165 tests.
+Current expected test suite size: 185 tests.
 
 Collect data:
 
@@ -346,9 +359,11 @@ bash tools/vpsctl.sh fetch --vps-profile sweden --run-id <collect_run_id>
 Remote `collect` defaults to `--slim --no-snap --poly-min-interval-ms 100`.
 Pass collector arguments after `--` to replace that default set.
 
-Runs persist one structured analysis log:
-`log/runs/<RUN_ID>/<market>_trade.jsonl`. Human-readable logs are stdout/stderr
-only; remote runs capture them in `stdout.log`. Fetched logs are copied to
+Runs persist separate structured JSONL files under `log/runs/<RUN_ID>/`:
+`<market>_trade.jsonl` contains normal business records below `WARNING`, and
+`<market>_error.jsonl` contains abnormal records at `WARNING` and above.
+Human-readable normal output is written to stdout/remote `stdout.log`; abnormal
+output is written to stderr/remote `stderr.log`. Fetched logs are copied to
 `remote_runs/<host_ip_with_underscores>/<RUN_ID>/`.
 
 Probe latency remotely:
@@ -386,3 +401,7 @@ Key price fields:
 - `target_entry_ask`: selected depth level price.
 - `price_hint`: FAK price hint, clamped to cap.
 - `FAK_FILLED.avg_price`: actual average fill price.
+- `TRADE_RESOLVED` uses binary `1.0/0.0` settlement only when the held-leg mark
+  is fresh. Stale cached marks are logged as `result=MARK_STALE` with
+  `mark_price_age_sec` / `mark_price_fresh` and use mark-to-mid PnL instead of
+  pretending stale mid above `0.5` settled to `1.0`.

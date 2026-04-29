@@ -25,8 +25,8 @@ class Candidate:
     entry_elapsed_sec: float
     min_leading_ask: float
     stop_loss_trigger: Optional[float]
-    stop_loss_start_remaining_sec: float = 45.0
-    stop_loss_end_remaining_sec: float = 25.0
+    stop_loss_start_remaining_sec: float = 60.0
+    stop_loss_end_remaining_sec: float = 45.0
     max_entry_price: float = 0.75
     min_ask_gap: float = 0.0
     min_sell_price: float = 0.20
@@ -374,10 +374,23 @@ def run_report(
     summary_out: Path,
     trades_dir: Path,
     trade_candidate_names: set[str],
+    stop_loss_start_remaining_sec: float = 60.0,
+    stop_loss_end_remaining_sec: float = 45.0,
 ) -> list[dict[str, object]]:
     windows = _load_windows(jsonl)
     summary_rows: list[dict[str, object]] = []
-    for candidate in default_candidates():
+    for base_candidate in default_candidates():
+        candidate = Candidate(
+            name=base_candidate.name,
+            entry_elapsed_sec=base_candidate.entry_elapsed_sec,
+            min_leading_ask=base_candidate.min_leading_ask,
+            stop_loss_trigger=base_candidate.stop_loss_trigger,
+            stop_loss_start_remaining_sec=stop_loss_start_remaining_sec,
+            stop_loss_end_remaining_sec=stop_loss_end_remaining_sec,
+            max_entry_price=base_candidate.max_entry_price,
+            min_ask_gap=base_candidate.min_ask_gap,
+            min_sell_price=base_candidate.min_sell_price,
+        )
         trades, skips = backtest_candidate(windows, candidate)
         summary_rows.append(
             summarize(
@@ -428,13 +441,29 @@ def main() -> None:
         type=Path,
         default=Path("analysis/crowd_m1_125w_trades"),
     )
+    parser.add_argument(
+        "--stop-loss-start-remaining",
+        type=float,
+        default=60.0,
+        help="Stop-loss window start, expressed as remaining seconds",
+    )
+    parser.add_argument(
+        "--stop-loss-end-remaining",
+        type=float,
+        default=45.0,
+        help="Stop-loss window end, expressed as remaining seconds",
+    )
     args = parser.parse_args()
+    if args.stop_loss_start_remaining <= args.stop_loss_end_remaining:
+        parser.error("--stop-loss-start-remaining must be greater than --stop-loss-end-remaining")
 
     rows = run_report(
         args.jsonl,
         summary_out=args.summary_out,
         trades_dir=args.trades_dir,
         trade_candidate_names=default_trade_candidate_names(),
+        stop_loss_start_remaining_sec=args.stop_loss_start_remaining,
+        stop_loss_end_remaining_sec=args.stop_loss_end_remaining,
     )
     print("Backtest input:", args.jsonl)
     print("Windows:", rows[0]["windows"] if rows else 0)

@@ -16,6 +16,8 @@ FAK_RETRY_INTERVAL: float = 0.1  # seconds between retries (~10x per second)
 PRICE_HINT_BUFFER_TICKS: float = 1.0  # add one tick above best ask for BUY hints
 FAK_RETRY_PRICE_HINT_BUFFER_TICKS: float = 2.0  # slightly wider retry hint after FAK no-depth
 FAK_RETRY_MAX_BEST_ASK_AGE_SEC: float = 1.0  # require fresh WS ask before retrying FAK
+DRY_RUN_SIMULATED_FAK_LATENCY_SEC: float = 0.4  # approximate VPS signal-to-order latency
+DRY_RUN_SIMULATED_PRICE_BUFFER_TICKS: float = 5.0  # pessimistic dry fill from fresh best bid/ask
 
 # Window timing
 WINDOW_END_BUFFER: int = 5  # treat window as ending this many seconds early to avoid boundary issues

@@ -10,9 +10,11 @@ strategy:
   min_leading_ask: 0.62
   max_entry_price: 0.75
   btc_direction_confirm: false
+  btc_price_feed_source: polymarket_rtds
   btc_reverse_filter:
     enabled: true
     lookback_sec: 20
+    # Unit is percent: 0.02 means 0.02%, not 2%.
     min_reverse_move_pct: 0.02
 
 params:
@@ -35,7 +37,7 @@ params:
   stop_loss:
     enabled: true
     trigger_price: 0.35
-    start_remaining_sec: 65
+    start_remaining_sec: 60
     end_remaining_sec: 45
     sell_bid_level: 10
     retry_count: 3

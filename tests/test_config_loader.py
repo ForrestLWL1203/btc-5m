@@ -4,6 +4,7 @@ import pytest
 import yaml
 
 from polybot.config_loader import load_config, build_series, build_strategy, build_trade_config
+from polybot.market.polymarket_rtds import PolymarketRTDSPriceFeed
 from polybot.market.series import MarketSeries
 from polybot.strategies.crowd_m1 import CrowdM1Strategy
 from polybot.strategies.paired_window import PairedWindowStrategy
@@ -114,6 +115,7 @@ class TestBuildStrategy:
                 "min_ask_gap": 0.16,
                 "max_entry_price": 0.75,
                 "btc_direction_confirm": True,
+                "btc_price_feed_source": "polymarket_rtds",
                 "btc_reverse_filter": {
                     "enabled": True,
                     "lookback_sec": 20,
@@ -128,6 +130,8 @@ class TestBuildStrategy:
         assert strat._min_ask_gap == pytest.approx(0.16)
         assert strat._max_entry_price == pytest.approx(0.75)
         assert strat._btc_direction_confirm is True
+        assert strat._btc_price_feed_source == "polymarket_rtds"
+        assert isinstance(strat._feed, PolymarketRTDSPriceFeed)
         assert strat._btc_reverse_filter_enabled is True
         assert strat._btc_reverse_lookback_sec == pytest.approx(20)
         assert strat._btc_reverse_min_move_pct == pytest.approx(0.02)
