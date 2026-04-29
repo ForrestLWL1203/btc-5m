@@ -269,7 +269,7 @@ async def test_stop_loss_does_not_trigger_from_deep_book_price_only():
 
 
 @pytest.mark.asyncio
-async def test_stop_loss_logs_check_when_bid_above_trigger(caplog):
+async def test_stop_loss_stays_quiet_when_bid_above_trigger(caplog):
     now = time.time()
     window = _make_window(start_epoch=int(now) - 240, end_epoch=int(now) + 60)
     state = _make_state(
@@ -308,10 +308,7 @@ async def test_stop_loss_logs_check_when_bid_above_trigger(caplog):
         for record in caplog.records
         if getattr(record, "event_data", {}).get("action") == "STOP_LOSS_CHECK"
     ]
-    assert checks
-    assert checks[0]["reason"] == "bid_above_stop"
-    assert checks[0]["best_bid_level_1"] == pytest.approx(0.56)
-    assert checks[0]["stop_price"] == pytest.approx(0.38)
+    assert checks == []
 
 
 @pytest.mark.asyncio
@@ -1788,6 +1785,59 @@ async def test_monitor_window_skips_stale_preopened_after_strategy_entry_band_en
     assert any(
         getattr(record, "event_data", {}).get("action") == "SKIP"
         and getattr(record, "event_data", {}).get("preopened") is True
+        for record in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_monitor_window_skips_when_connect_delay_misses_snapshot_entry_band(caplog):
+    import datetime
+
+    base_now = int(time.time())
+    current_time = float(base_now)
+    utc = datetime.timezone.utc
+    window = MarketWindow(
+        question="Test Window",
+        up_token="up-tok",
+        down_token="down-tok",
+        start_time=datetime.datetime.fromtimestamp(base_now - 100, tz=utc),
+        end_time=datetime.datetime.fromtimestamp(base_now + 200, tz=utc),
+        slug="test",
+    )
+
+    async def delayed_switch_tokens(_token_ids):
+        nonlocal current_time
+        current_time = float(base_now + 100)
+
+    mock_ws = MagicMock()
+    mock_ws.set_on_price = MagicMock()
+    mock_ws.switch_tokens = AsyncMock(side_effect=delayed_switch_tokens)
+    mock_ws.get_latest_price = MagicMock(return_value=0.50)
+
+    strategy = CrowdM1Strategy(
+        MarketSeries.from_known("btc-updown-5m"),
+        entry_elapsed_sec=180,
+        entry_timeout_sec=5,
+    )
+
+    with caplog.at_level(logging.INFO), \
+         patch("polybot.trading.monitor.time.time", side_effect=lambda: current_time), \
+         patch("polybot.trading.monitor.prefetch_order_params", create=True, new=MagicMock()), \
+         patch("polybot.trading.monitor._find_and_preopen_next_window", return_value=None), \
+         patch("polybot.trading.monitor._monitor_single_window", new_callable=AsyncMock) as monitor_single:
+        next_win, returned_ws, monitored = await monitor_window(
+            window, dry_run=True, preopened=True, existing_ws=mock_ws,
+            trade_config=_tc(), strategy=strategy,
+        )
+
+    assert monitored is False
+    assert returned_ws is mock_ws
+    assert next_win is None
+    mock_ws.switch_tokens.assert_awaited_once()
+    monitor_single.assert_not_called()
+    assert any(
+        getattr(record, "event_data", {}).get("action") == "SKIP"
+        and getattr(record, "event_data", {}).get("phase") == "post_connect"
         for record in caplog.records
     )
 

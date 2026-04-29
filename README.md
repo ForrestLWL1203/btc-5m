@@ -151,9 +151,11 @@ Config:
 - Hard max entry cap is `0.75`.
 - If the leading ask is above `0.75`, the strategy rejects the candidate before
   entering the depth/FAK pipeline.
-- Dynamic entry depth is selected by leading ask: `<=0.64` uses L5, `<=0.68`
-  uses L4, `<=0.72` uses L2, and `<=0.75` uses L1.
-- Selected entry ask must stay within `0.04` of the target-leg best ask.
+- Entry scans the target-leg order book up to `entry_ask_level=10`, skipping
+  the top level for fillability and stopping at the first level whose
+  cumulative depth covers the order amount.
+- Selected entry ask must stay within `0.04` of the target-leg best ask and at
+  or below `max_entry_price=0.75`.
 - Entry checks are event-driven: UP or DOWN Polymarket WS updates refresh the
   cached two-leg snapshot and can trigger entry immediately inside the 5s entry
   window; the 1s snapshot loop remains only as a fallback.
@@ -166,7 +168,7 @@ Config:
   latency recheck moves above cap, the window is locked and target entry state
   is cleared.
 - Stop-loss is enabled only while remaining time is `[60s,45s]`, with trigger
-  `0.35`; otherwise hold to `window.end_epoch`.
+  `0.40`; otherwise hold to `window.end_epoch`.
 - After BUY fill, held-token WS updates are ignored until 5s before the
   stop-loss window; prewarm logs held-leg bid-book age, and active-window
   updates can trigger stop-loss immediately.

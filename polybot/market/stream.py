@@ -336,7 +336,7 @@ class PriceStream:
         self._prices.clear()
         self._books.clear()
         if log_reconnect:
-            log_event(log, logging.INFO, WS, {"action": "RECONNECTED"})
+            log_event(log, logging.WARNING, WS, {"action": "RECONNECTED"})
 
     async def _ping_loop(self) -> None:
         """Send ``{}`` every PING_INTERVAL seconds to keep the connection alive."""

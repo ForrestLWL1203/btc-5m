@@ -657,17 +657,6 @@ async def _maybe_handle_stop_loss(
         )
         return
     if quote.best_bid_level_1 > stop_price:
-        _log_stop_loss_check(
-            state,
-            side=side,
-            window=window,
-            remaining=remaining,
-            entry_price=entry_price,
-            stop_price=stop_price,
-            quote=quote,
-            shares=shares_to_sell,
-            reason="bid_above_stop",
-        )
         return
     if not quote.enough or quote.price is None:
         _log_stop_loss_check(
@@ -1513,6 +1502,22 @@ async def monitor_window(
         wait_sec = window.start_epoch - now_epoch
         log.debug("Waiting %ds for window to start... (WS pre-connected)", wait_sec)
         await asyncio.sleep(wait_sec)
+
+    # Re-check after WS subscribe/prefetch/wait. Network stalls can consume the
+    # narrow snapshot entry band even when the window was fresh on initial attach.
+    now_epoch = int(time.time())
+    elapsed_since_start = now_epoch - window.start_epoch
+    if elapsed_since_start > skip_threshold:
+        log_event(log, logging.INFO, WINDOW, {
+            "action": "SKIP",
+            "window": window.short_label,
+            "elapsed": elapsed_since_start,
+            "reason": skip_reason,
+            "preopened": preopened,
+            "phase": "post_connect",
+        })
+        next_win = _find_and_preopen_next_window(window, series)
+        return next_win, ws, False
 
     # Window is now live — enable trading
     state.started = True

@@ -123,23 +123,12 @@ strategy:
 
 params:
   amount: 1.0
-  entry_ask_level: 9
-  low_price_threshold: 0.60
-  low_price_entry_ask_level: 11
+  entry_ask_level: 10
   max_slippage_from_best_ask: 0.04
-  dynamic_entry_levels:
-    - leading_ask_max: 0.64
-      entry_ask_level: 5
-    - leading_ask_max: 0.68
-      entry_ask_level: 4
-    - leading_ask_max: 0.72
-      entry_ask_level: 2
-    - leading_ask_max: 0.75
-      entry_ask_level: 1
   max_entries_per_window: 1
   stop_loss:
     enabled: true
-    trigger_price: 0.35
+    trigger_price: 0.40
     start_remaining_sec: 60
     end_remaining_sec: 45
     sell_bid_level: 10
@@ -168,9 +157,11 @@ Rules:
   price proxies for live execution.
 - Reject candidates whose leading ask is above `max_entry_price=0.75` before
   entering the depth/FAK pipeline.
-- Dynamic entry depth lowers slippage: leading ask `<=0.64` uses L5, `<=0.68`
-  uses L4, `<=0.72` uses L2, and `<=0.75` uses L1.
-- Selected entry ask must stay within 0.04 of target-leg best ask.
+- Entry scans the target-leg order book up to `entry_ask_level=10`, skipping
+  level 1 for fillability and stopping at the first level whose cumulative
+  depth covers the order amount.
+- Selected entry ask must stay within 0.04 of target-leg best ask and at or
+  below `max_entry_price=0.75`.
 - Entry is event-driven: UP or DOWN Polymarket WS updates refresh the cached
   two-leg snapshot and can trigger entry immediately inside the 5s entry window;
   the 1s snapshot loop is only a fallback.
@@ -186,7 +177,7 @@ Rules:
 Stop-loss when enabled:
 
 - Entries below 0.45 do not use stop-loss.
-- Trigger price is `max(min_sell_price, trigger_price=0.35)`.
+- Trigger price is `max(min_sell_price, trigger_price=0.40)`.
 - Active only while `start_remaining_sec >= remaining >= end_remaining_sec`.
 - Uses held-leg bid book, skips level 1, and defaults to scanning up to bid
   level 10.

@@ -75,10 +75,12 @@ def test_preset_config_loads_crowd_m1_yaml():
     assert cfg["strategy"]["btc_reverse_filter"]["enabled"] is True
     assert cfg["strategy"]["btc_reverse_filter"]["lookback_sec"] == pytest.approx(20)
     assert cfg["strategy"]["btc_reverse_filter"]["min_reverse_move_pct"] == pytest.approx(0.02)
-    assert cfg["params"]["entry_ask_level"] == 9
-    assert cfg["params"]["low_price_entry_ask_level"] == 11
+    assert cfg["params"]["entry_ask_level"] == 10
+    assert "low_price_threshold" not in cfg["params"]
+    assert "low_price_entry_ask_level" not in cfg["params"]
+    assert "dynamic_entry_levels" not in cfg["params"]
     assert cfg["params"]["stop_loss"]["enabled"] is True
-    assert cfg["params"]["stop_loss"]["trigger_price"] == pytest.approx(0.35)
+    assert cfg["params"]["stop_loss"]["trigger_price"] == pytest.approx(0.40)
     assert cfg["params"]["stop_loss"]["start_remaining_sec"] == pytest.approx(60)
     assert cfg["params"]["stop_loss"]["end_remaining_sec"] == pytest.approx(45)
 

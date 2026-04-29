@@ -57,6 +57,49 @@ def test_backtest_candidate_ignores_stop_bid_below_min_sell_price():
     assert trades[0].realized_pnl == pytest.approx(-1.0)
 
 
+def test_backtest_candidate_scans_entry_timeout_until_first_valid_quote():
+    rows = [
+        {"ts": 1120.0, "src": "poly", "token": "up", "bid": 0.57, "ask": 0.58},
+        {"ts": 1120.0, "src": "poly", "token": "down", "bid": 0.41, "ask": 0.42},
+        {"ts": 1123.0, "src": "poly", "token": "up", "bid": 0.63, "ask": 0.64},
+    ]
+    candidate = Candidate(
+        name="test",
+        entry_elapsed_sec=120,
+        entry_timeout_sec=5,
+        min_leading_ask=0.60,
+        stop_loss_trigger=None,
+    )
+
+    trades, _ = backtest_candidate([_window(rows, outcome="up")], candidate)
+
+    assert len(trades) == 1
+    assert trades[0].entry_ts == pytest.approx(1123.0)
+    assert trades[0].entry_price == pytest.approx(0.64)
+
+
+def test_backtest_candidate_applies_entry_and_stop_loss_tick_buffers():
+    rows = [
+        {"ts": 1120.0, "src": "poly", "token": "up", "bid": 0.69, "ask": 0.70},
+        {"ts": 1120.0, "src": "poly", "token": "down", "bid": 0.29, "ask": 0.30},
+        {"ts": 1245.0, "src": "poly", "token": "up", "bid": 0.34, "ask": 0.35},
+    ]
+    candidate = Candidate(
+        name="test",
+        entry_elapsed_sec=120,
+        min_leading_ask=0.60,
+        stop_loss_trigger=0.35,
+        entry_buffer_ticks=5,
+        stop_loss_buffer_ticks=5,
+    )
+
+    trades, _ = backtest_candidate([_window(rows, outcome="up")], candidate)
+
+    assert len(trades) == 1
+    assert trades[0].entry_price == pytest.approx(0.75)
+    assert trades[0].exit_price == pytest.approx(0.29)
+
+
 def test_default_trade_candidates_cover_baseline_and_live_comparison_set():
     names = default_trade_candidate_names()
 

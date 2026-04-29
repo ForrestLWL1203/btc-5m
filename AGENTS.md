@@ -147,10 +147,11 @@ Runtime behavior:
 - Cap final selected entry/hint at `max_entry_price=0.75`.
 - Reject candidates whose leading ask is above `max_entry_price=0.75` before
   entering the depth/FAK pipeline.
-- Use dynamic entry depth by leading ask: `<=0.64` uses L5, `<=0.68` uses L4,
-  `<=0.72` uses L2, and `<=0.75` uses L1.
-- Reject entries whose selected ask is more than `0.04` above target-leg best
-  ask.
+- Scan the target-leg order book up to `entry_ask_level=10`, skipping level 1
+  for fillability and stopping at the first level whose cumulative depth covers
+  the order amount.
+- Reject entries whose selected ask is above `max_entry_price=0.75` or more
+  than `0.04` above target-leg best ask.
 - Entry is event-driven: UP or DOWN Polymarket WS updates refresh the cached
   two-leg snapshot and can trigger entry immediately inside the 5s entry
   window; the 1s snapshot loop remains only as a fallback.
@@ -162,7 +163,7 @@ Runtime behavior:
 - Dry-run BUY/SELL simulates FAK latency and a tick buffer; if a dry BUY fails
   after the latency recheck because the ask moved above cap, the window is
   locked and target entry state is cleared.
-- Stop-loss is enabled with trigger `0.35`, only while remaining time is
+- Stop-loss is enabled with trigger `0.40`, only while remaining time is
   `[60s,45s]`.
 - After BUY fill, held-token WS updates are ignored until 5s before the
   stop-loss window; prewarm logs held-leg bid-book age, and active-window
@@ -207,7 +208,7 @@ Tests:
 env -u ALL_PROXY -u all_proxy -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy pytest -q
 ```
 
-Expected suite size after RTDS/reverse-filter bugfixes: 185 tests.
+Expected suite size after latest crowd/backtest updates: 188 tests.
 
 VPS bootstrap:
 

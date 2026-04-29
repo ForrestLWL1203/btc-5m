@@ -19,24 +19,12 @@ strategy:
 
 params:
   amount: 1.0
-  entry_ask_level: 9
-  low_price_threshold: 0.60
-  low_price_entry_ask_level: 11
+  entry_ask_level: 10
   max_slippage_from_best_ask: 0.04
-  dynamic_entry_levels:
-    - leading_ask_max: 0.64
-      entry_ask_level: 5
-    - leading_ask_max: 0.68
-      entry_ask_level: 4
-    - leading_ask_max: 0.72
-      entry_ask_level: 2
-    - leading_ask_max: 0.75
-      entry_ask_level: 1
-  amount_tiers: []
   max_entries_per_window: 1
   stop_loss:
     enabled: true
-    trigger_price: 0.35
+    trigger_price: 0.40
     start_remaining_sec: 60
     end_remaining_sec: 45
     sell_bid_level: 10
