@@ -111,7 +111,7 @@ strategy:
   entry_elapsed_sec: 180
   entry_timeout_sec: 5
   min_ask_gap: 0.0
-  min_leading_ask: 0.62
+  min_leading_ask: 0.66
   max_entry_price: 0.75
   btc_direction_confirm: false
   btc_price_feed_source: polymarket_rtds
@@ -139,7 +139,7 @@ params:
 Rules:
 
 - At 180s after open, buy the higher-best-ask Polymarket side only if the
-  leading ask is at least 0.62; gap requirement is disabled with
+  leading ask is at least 0.66; gap requirement is disabled with
   `min_ask_gap=0.0`.
 - Do not require BTC direction from window open to match the selected side.
 - Use a BTC recent-reverse soft filter: skip UP if BTC fell at least 0.02% over

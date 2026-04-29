@@ -126,7 +126,7 @@ Runtime behavior:
 - At `entry_elapsed_sec=180`, compare current UP and DOWN best asks; use
   `entry_timeout_sec=5` to avoid late attach entries.
 - Buy the higher-best-ask side only if its leading ask is at least
-  `min_leading_ask=0.62`; `min_ask_gap=0.0` disables a gap requirement.
+  `min_leading_ask=0.66`; `min_ask_gap=0.0` disables a gap requirement.
 - Do not require BTC direction confirmation; this is a pure crowd-following variant.
 - Enable the BTC recent-reverse soft filter: skip UP entries if BTC dropped at
   least `0.02%` over the last 20s, and skip DOWN entries if BTC rose at least

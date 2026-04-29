@@ -131,7 +131,7 @@ Config:
 
 - At 180s after window open, compare UP and DOWN best ask; the runtime entry
   timeout is 5s to avoid late attach entries.
-- Buy the higher-best-ask side only when the leading ask is at least `0.62`;
+- Buy the higher-best-ask side only when the leading ask is at least `0.66`;
   `min_ask_gap=0.0` disables a gap requirement.
 - Do not require BTC direction confirmation; this is a pure crowd-following variant.
 - A separate BTC reverse soft filter is enabled: if the selected side is UP and
