@@ -123,19 +123,19 @@ Experimental config: `crowd_m1_dry.yaml`.
 
 Runtime behavior:
 
-- At `entry_elapsed_sec=180`, compare current UP and DOWN best asks; use
+- At `entry_elapsed_sec=170`, compare current UP and DOWN best asks; use
   `entry_timeout_sec=5` to avoid late attach entries.
 - Buy the higher-best-ask side only if its leading ask is at least
-  `min_leading_ask=0.66`; `min_ask_gap=0.0` disables a gap requirement.
+  `min_leading_ask=0.62`; `min_ask_gap=0.0` disables a gap requirement.
 - Do not require BTC direction confirmation; this is a pure crowd-following variant.
 - Enable the BTC recent-reverse soft filter: skip UP entries if BTC dropped at
   least `0.02%` over the last 20s, and skip DOWN entries if BTC rose at least
   `0.02%` over the last 20s.
 - `btc_reverse_filter.min_reverse_move_pct` is in percent units:
   `0.02` means `0.02%`, not `2%`.
-- The reverse filter uses Polymarket RTDS `crypto_prices` for `btcusdt` by
-  default. Keep the Binance feed available as a fallback option until RTDS has
-  proven stable in dry-run.
+- The reverse filter uses Binance WS by default. Polymarket RTDS remains
+  available as a fallback option, but is not the active default after stale-feed
+  behavior was observed in dry-run.
 - The reverse filter logs `BTC_REVERSE_FILTER_CHECK` once per
   `(history_ready, triggered)` state per window, so a temporary history-missing
   check does not hide a later ready check.
@@ -160,9 +160,9 @@ Runtime behavior:
 - Entry logs include UP/DOWN best-ask cache age for book freshness validation.
 - Crowd entry `signal_price` is the leading ask, and `active_theta_pct` remains
   empty because BTC theta is not used.
-- Dry-run BUY/SELL simulates FAK latency and a tick buffer; if a dry BUY fails
-  after the latency recheck because the ask moved above cap, the window is
-  locked and target entry state is cleared.
+- Dry-run BUY uses the same depth quote selected by the entry scan and does not
+  add simulated buy latency or extra ticks. Stop-loss dry-run still simulates
+  sell-side FAK latency and a tick buffer.
 - Stop-loss is enabled with trigger `0.40`, only while remaining time is
   `[60s,45s]`.
 - After BUY fill, held-token WS updates are ignored until 5s before the

@@ -32,7 +32,6 @@ from .fak_execution import place_fak_buy, place_fak_stop_loss_sell
 from .fak_quotes import (
     BidDepthQuote,
     CapDepthQuote,
-    buffer_buy_price_hint,
     buffer_sell_price_hint,
     cap_limited_depth_quote as _cap_limited_depth_quote,
     stop_loss_bid_quote as _stop_loss_bid_quote,
@@ -51,6 +50,84 @@ _SETTLEMENT_MARK_FRESH_SEC = 5.0
 async def _noop_price_callback(update: PriceUpdate) -> None:
     """Placeholder callback used before a PriceStream is fully wired."""
     return None
+
+
+def _record_min_max(
+    current_min: Optional[float],
+    current_max: Optional[float],
+    value: Optional[float],
+) -> tuple[Optional[float], Optional[float]]:
+    if value is None:
+        return current_min, current_max
+    next_min = value if current_min is None else min(current_min, value)
+    next_max = value if current_max is None else max(current_max, value)
+    return next_min, next_max
+
+
+def _record_entry_replay_quote(
+    state: MonitorState,
+    *,
+    leading_ask: Optional[float],
+    quote: CapDepthQuote,
+) -> None:
+    """Aggregate entry quote evidence for compact dry-run replay logs."""
+    state.entry_replay_check_count += 1
+    state.entry_replay_min_leading_ask, state.entry_replay_max_leading_ask = _record_min_max(
+        state.entry_replay_min_leading_ask,
+        state.entry_replay_max_leading_ask,
+        leading_ask,
+    )
+    state.entry_replay_min_best_ask, state.entry_replay_max_best_ask = _record_min_max(
+        state.entry_replay_min_best_ask,
+        state.entry_replay_max_best_ask,
+        quote.best_ask_level_1,
+    )
+    state.entry_replay_min_selected_ask, state.entry_replay_max_selected_ask = _record_min_max(
+        state.entry_replay_min_selected_ask,
+        state.entry_replay_max_selected_ask,
+        quote.price,
+    )
+    state.entry_replay_max_depth_notional = max(
+        state.entry_replay_max_depth_notional,
+        quote.cap_notional,
+    )
+    ask_age_ms = round(quote.ask_age_sec * 1000) if quote.ask_age_sec is not None else None
+    state.entry_replay_min_best_ask_age_ms, state.entry_replay_max_best_ask_age_ms = _record_min_max(
+        state.entry_replay_min_best_ask_age_ms,
+        state.entry_replay_max_best_ask_age_ms,
+        ask_age_ms,
+    )
+    if quote.enough:
+        state.entry_replay_signal_count += 1
+
+
+def _record_stop_replay_quote(
+    state: MonitorState,
+    *,
+    quote: BidDepthQuote,
+) -> None:
+    """Aggregate stop-loss quote evidence for compact dry-run replay logs."""
+    state.stop_replay_check_count += 1
+    state.stop_replay_min_best_bid, state.stop_replay_max_best_bid = _record_min_max(
+        state.stop_replay_min_best_bid,
+        state.stop_replay_max_best_bid,
+        quote.best_bid_level_1,
+    )
+    state.stop_replay_min_selected_bid, state.stop_replay_max_selected_bid = _record_min_max(
+        state.stop_replay_min_selected_bid,
+        state.stop_replay_max_selected_bid,
+        quote.price,
+    )
+    state.stop_replay_max_bid_shares_available = max(
+        state.stop_replay_max_bid_shares_available,
+        quote.shares_available,
+    )
+    bid_age_ms = round(quote.bid_age_sec * 1000) if quote.bid_age_sec is not None else None
+    state.stop_replay_min_best_bid_age_ms, state.stop_replay_max_best_bid_age_ms = _record_min_max(
+        state.stop_replay_min_best_bid_age_ms,
+        state.stop_replay_max_best_bid_age_ms,
+        bid_age_ms,
+    )
 
 
 def _entry_price_cap(
@@ -237,20 +314,9 @@ def _log_stop_loss_check(
     shares: float,
     reason: str,
 ) -> None:
-    key = (
-        reason,
-        round(quote.best_bid_level_1, 3) if quote.best_bid_level_1 is not None else None,
-        round(quote.price, 3) if quote.price is not None else None,
-        bool(quote.enough),
-    )
-    now = time.time()
-    if (
-        state.last_stop_loss_check_key == key
-        and now - state.last_stop_loss_check_logged_at < _STOP_LOSS_CHECK_LOG_INTERVAL_SEC
-    ):
+    if reason in state.stop_loss_check_logged_reasons:
         return
-    state.last_stop_loss_check_key = key
-    state.last_stop_loss_check_logged_at = now
+    state.stop_loss_check_logged_reasons.add(reason)
     log_event(log, logging.INFO, TRADE, {
         "action": "STOP_LOSS_CHECK",
         "reason": reason,
@@ -412,38 +478,6 @@ def _log_signal_eval(
             else None
         ),
     })
-
-
-async def _simulated_dry_buy_fill_price(
-    ws: Optional[PriceStream],
-    token_id: str,
-    *,
-    fallback_price: float,
-    max_entry_price: Optional[float],
-) -> Optional[float]:
-    """Return a pessimistic dry BUY fill after simulated FAK latency."""
-    if ws is None:
-        return fallback_price
-    await asyncio.sleep(config.DRY_RUN_SIMULATED_FAK_LATENCY_SEC)
-    try:
-        latest_ask = ws.get_latest_best_ask(
-            token_id,
-            max_age_sec=config.FAK_RETRY_MAX_BEST_ASK_AGE_SEC,
-            level=1,
-        )
-    except TypeError:
-        latest_ask = ws.get_latest_best_ask(token_id)
-    if latest_ask is None:
-        return fallback_price
-    latest_ask = float(latest_ask)
-    if max_entry_price is not None and latest_ask > max_entry_price:
-        return None
-    return buffer_buy_price_hint(
-        token_id,
-        latest_ask,
-        buffer_ticks=config.DRY_RUN_SIMULATED_PRICE_BUFFER_TICKS,
-        max_price=max_entry_price,
-    )
 
 
 async def _simulated_dry_sell_fill_price(
@@ -644,6 +678,9 @@ async def _maybe_handle_stop_loss(
         min_sell_price=trade_config.stop_loss_min_sell_price,
     )
     if quote.best_bid_level_1 is None:
+        if dry_run:
+            _record_stop_replay_quote(state, quote=quote)
+            state.stop_replay_missing_or_stale_bid_count += 1
         _log_stop_loss_check(
             state,
             side=side,
@@ -656,9 +693,13 @@ async def _maybe_handle_stop_loss(
             reason="missing_or_stale_bid",
         )
         return
+    if dry_run:
+        _record_stop_replay_quote(state, quote=quote)
     if quote.best_bid_level_1 > stop_price:
         return
     if not quote.enough or quote.price is None:
+        if dry_run:
+            state.stop_replay_insufficient_depth_count += 1
         _log_stop_loss_check(
             state,
             side=side,
@@ -721,6 +762,8 @@ async def _maybe_handle_stop_loss(
                     return
 
     state.stop_loss_attempted = True
+    if dry_run:
+        state.stop_replay_triggered_count += 1
     log_event(log, logging.WARNING, TRADE, {
         "action": "STOP_LOSS_TRIGGERED",
         "side": side.upper(),
@@ -874,6 +917,35 @@ def _log_window_summary(state: MonitorState, window: MarketWindow, dry_run: bool
             "depth_skip_max_entry_ask": state.depth_skip_max_entry_ask,
             "depth_skip_max_notional": round(state.depth_skip_max_notional, 4),
         })
+    if dry_run and state.entry_replay_check_count > 0:
+        data["entry_replay"] = {
+            "checks": state.entry_replay_check_count,
+            "signals": state.entry_replay_signal_count,
+            "buy_signals": state.entry_replay_buy_signal_count,
+            "leading_ask_min": state.entry_replay_min_leading_ask,
+            "leading_ask_max": state.entry_replay_max_leading_ask,
+            "best_ask_min": state.entry_replay_min_best_ask,
+            "best_ask_max": state.entry_replay_max_best_ask,
+            "selected_ask_min": state.entry_replay_min_selected_ask,
+            "selected_ask_max": state.entry_replay_max_selected_ask,
+            "depth_notional_max": round(state.entry_replay_max_depth_notional, 4),
+            "best_ask_age_ms_min": state.entry_replay_min_best_ask_age_ms,
+            "best_ask_age_ms_max": state.entry_replay_max_best_ask_age_ms,
+        }
+    if dry_run and state.stop_replay_check_count > 0:
+        data["stop_replay"] = {
+            "checks": state.stop_replay_check_count,
+            "triggered": state.stop_replay_triggered_count,
+            "missing_or_stale_bid": state.stop_replay_missing_or_stale_bid_count,
+            "insufficient_depth": state.stop_replay_insufficient_depth_count,
+            "best_bid_min": state.stop_replay_min_best_bid,
+            "best_bid_max": state.stop_replay_max_best_bid,
+            "selected_bid_min": state.stop_replay_min_selected_bid,
+            "selected_bid_max": state.stop_replay_max_selected_bid,
+            "bid_shares_available_max": round(state.stop_replay_max_bid_shares_available, 4),
+            "best_bid_age_ms_min": state.stop_replay_min_best_bid_age_ms,
+            "best_bid_age_ms_max": state.stop_replay_max_best_bid_age_ms,
+        }
     log_event(log, logging.INFO, WINDOW, data)
 
 
@@ -1041,6 +1113,8 @@ async def _attempt_strategy_entry(
         dynamic_entry_levels=trade_config.dynamic_entry_levels,
         max_slippage_from_best_ask=trade_config.max_slippage_from_best_ask,
     )
+    if dry_run:
+        _record_entry_replay_quote(state, leading_ask=entry_signal_price, quote=quote)
     if not quote.enough:
         state.target_entry_price = None
         _log_depth_skip(
@@ -1066,6 +1140,8 @@ async def _attempt_strategy_entry(
     if not _entry_ask_changed(state, effective_side, quote.price_hint):
         state.target_entry_price = None
         return
+    if dry_run:
+        state.entry_replay_buy_signal_count += 1
     state.target_entry_price = quote.price
     log_event(log, logging.INFO, SIGNAL, {
         "action": "BUY_SIGNAL",
@@ -1278,18 +1354,20 @@ async def _monitor_single_window(
                         up_best_ask_age_sec,
                         down_best_ask_age_sec,
                     ) = _market_snapshot_from_ws(window, ws)
-                    log_event(log, logging.INFO, SIGNAL, {
-                        "action": "SNAPSHOT_ENTRY_CHECK",
-                        "strategy": strategy.__class__.__name__,
-                        "window": window.short_label,
-                        "remaining_sec": round(window.end_epoch - time.time()),
-                        "up_mid": up_mid,
-                        "down_mid": down_mid,
-                        "up_best_ask": up_best_ask,
-                        "down_best_ask": down_best_ask,
-                        "up_best_ask_age_ms": round(up_best_ask_age_sec * 1000) if up_best_ask_age_sec is not None else None,
-                        "down_best_ask_age_ms": round(down_best_ask_age_sec * 1000) if down_best_ask_age_sec is not None else None,
-                    })
+                    if not state.snapshot_entry_check_logged:
+                        log_event(log, logging.INFO, SIGNAL, {
+                            "action": "SNAPSHOT_ENTRY_CHECK",
+                            "strategy": strategy.__class__.__name__,
+                            "window": window.short_label,
+                            "remaining_sec": round(window.end_epoch - time.time()),
+                            "up_mid": up_mid,
+                            "down_mid": down_mid,
+                            "up_best_ask": up_best_ask,
+                            "down_best_ask": down_best_ask,
+                            "up_best_ask_age_ms": round(up_best_ask_age_sec * 1000) if up_best_ask_age_sec is not None else None,
+                            "down_best_ask_age_ms": round(down_best_ask_age_sec * 1000) if down_best_ask_age_sec is not None else None,
+                        })
+                        state.snapshot_entry_check_logged = True
                     strategy.set_market_snapshot(
                         up_mid=up_mid,
                         down_mid=down_mid,
@@ -1433,6 +1511,7 @@ async def monitor_window(
     state.stop_loss_price = None
     state.last_stop_loss_check_key = None
     state.last_stop_loss_check_logged_at = 0.0
+    state.stop_loss_check_logged_reasons.clear()
     state.last_signal_eval_key = None
     state.last_signal_eval_logged_at = 0.0
     state.last_depth_skip_key = None
@@ -1445,9 +1524,33 @@ async def monitor_window(
     state.depth_skip_min_entry_ask = None
     state.depth_skip_max_entry_ask = None
     state.depth_skip_max_notional = 0.0
+    state.entry_replay_check_count = 0
+    state.entry_replay_signal_count = 0
+    state.entry_replay_buy_signal_count = 0
+    state.entry_replay_min_leading_ask = None
+    state.entry_replay_max_leading_ask = None
+    state.entry_replay_min_best_ask = None
+    state.entry_replay_max_best_ask = None
+    state.entry_replay_min_selected_ask = None
+    state.entry_replay_max_selected_ask = None
+    state.entry_replay_max_depth_notional = 0.0
+    state.entry_replay_min_best_ask_age_ms = None
+    state.entry_replay_max_best_ask_age_ms = None
+    state.stop_replay_check_count = 0
+    state.stop_replay_triggered_count = 0
+    state.stop_replay_missing_or_stale_bid_count = 0
+    state.stop_replay_insufficient_depth_count = 0
+    state.stop_replay_min_best_bid = None
+    state.stop_replay_max_best_bid = None
+    state.stop_replay_min_selected_bid = None
+    state.stop_replay_max_selected_bid = None
+    state.stop_replay_max_bid_shares_available = 0.0
+    state.stop_replay_min_best_bid_age_ms = None
+    state.stop_replay_max_best_bid_age_ms = None
     state.entry_amount = 0.0
     state.last_entry_check_side = None
     state.last_entry_check_best_ask = None
+    state.snapshot_entry_check_logged = False
     state.started = False
 
     # Check daily reset and risk management before monitoring this window
@@ -1967,13 +2070,9 @@ async def _handle_opening_price(
                 })
                 raise RuntimeError(result.message)
     else:
-        simulated_buy_price = await _simulated_dry_buy_fill_price(
-            ws,
-            buy_token_id,
-            fallback_price=buy_price,
-            max_entry_price=_entry_price_cap(strategy, state),
-        )
-        if simulated_buy_price is None:
+        dry_buy_price = target_entry_ask if target_entry_ask is not None else buy_price
+        max_entry_price = _entry_price_cap(strategy, state)
+        if max_entry_price is not None and dry_buy_price > max_entry_price:
             state.exit_triggered = True
             state.buy_blocked_window_cap = True
             log_event(log, logging.WARNING, TRADE, {
@@ -1981,15 +2080,17 @@ async def _handle_opening_price(
                 "side": side.upper(),
                 "price": buy_price,
                 "amount": trade_amount,
-                "message": "dry-run simulated FAK ask above cap after latency",
+                "message": "dry-run depth quote above cap",
                 "window": window.short_label,
                 "dry_run": True,
-                "simulated_latency_ms": round(config.DRY_RUN_SIMULATED_FAK_LATENCY_SEC * 1000),
+                "dry_run_pricing": "depth_quote",
+                "target_entry_ask": target_entry_ask,
+                "max_entry_price": max_entry_price,
             })
             state.target_entry_price = None
             state.target_side = None
             return
-        buy_price = simulated_buy_price
+        buy_price = dry_buy_price
         state.bought = True
         state.entry_count += 1
         state.entry_timestamps.append(time.time())
@@ -2006,8 +2107,7 @@ async def _handle_opening_price(
             "target_entry_ask": target_entry_ask,
             "best_ask_level_1": best_ask_level_1,
             "price_hint": best_ask,
-            "simulated_latency_ms": round(config.DRY_RUN_SIMULATED_FAK_LATENCY_SEC * 1000) if ws is not None else None,
-            "simulated_price_buffer_ticks": config.DRY_RUN_SIMULATED_PRICE_BUFFER_TICKS if ws is not None else None,
+            "dry_run_pricing": "depth_quote",
             "depth_levels_used": depth_levels_used,
             "depth_notional": round(depth_notional, 4) if depth_notional is not None else None,
             "depth_skipped_levels": depth_skipped_levels,
@@ -2045,8 +2145,7 @@ async def _handle_opening_price(
             "shares": state.holding_size,
             "window": window.short_label,
             "avg_price": buy_price,
-            "simulated_latency_ms": round(config.DRY_RUN_SIMULATED_FAK_LATENCY_SEC * 1000) if ws is not None else None,
-            "simulated_price_buffer_ticks": config.DRY_RUN_SIMULATED_PRICE_BUFFER_TICKS if ws is not None else None,
+            "dry_run_pricing": "depth_quote",
             "dry_run": True,
         })
         if strategy is not None:

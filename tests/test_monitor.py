@@ -312,6 +312,62 @@ async def test_stop_loss_stays_quiet_when_bid_above_trigger(caplog):
 
 
 @pytest.mark.asyncio
+async def test_stop_loss_insufficient_depth_logs_once_per_window(caplog):
+    now = time.time()
+    window = _make_window(start_epoch=int(now) - 240, end_epoch=int(now) + 60)
+    state = _make_state(
+        bought=True,
+        holding_size=1000.0,
+        entry_amount=1.0,
+        entry_price=0.66,
+        entry_avg_price=0.66,
+    )
+    ws = MagicMock()
+    ws.get_latest_bid_levels_with_size.side_effect = [
+        _bid_book(0.34, 12),
+        _bid_book(0.33, 12),
+    ]
+    ws.get_latest_best_bid_age.return_value = 0.01
+    trade_config = _tc(
+        stop_loss_enabled=True,
+        stop_loss_start_remaining_sec=120,
+        stop_loss_end_remaining_sec=15,
+        stop_loss_trigger_price=0.38,
+    )
+
+    with patch("polybot.trading.fak_quotes.get_tick_size", return_value=0.01), \
+         patch("polybot.trading.monitor.place_fak_stop_loss_sell", new_callable=AsyncMock) as mock_sell:
+        with caplog.at_level(logging.INFO, logger="polybot.trading.monitor"):
+            await _maybe_handle_stop_loss(
+                window,
+                state,
+                ws,
+                "down-token-123",
+                False,
+                trade_config,
+                "down",
+            )
+            await _maybe_handle_stop_loss(
+                window,
+                state,
+                ws,
+                "down-token-123",
+                False,
+                trade_config,
+                "down",
+            )
+
+    mock_sell.assert_not_called()
+    checks = [
+        record.event_data
+        for record in caplog.records
+        if getattr(record, "event_data", {}).get("action") == "STOP_LOSS_CHECK"
+    ]
+    assert len(checks) == 1
+    assert checks[0]["reason"] == "insufficient_bid_depth"
+
+
+@pytest.mark.asyncio
 async def test_stop_loss_disabled_for_low_entry_price():
     now = time.time()
     window = _make_window(start_epoch=int(now) - 180, end_epoch=int(now) + 120)
@@ -1048,6 +1104,67 @@ def test_window_summary_includes_depth_skip_aggregate(caplog):
     assert summary.event_data["depth_skip_max_notional"] == pytest.approx(381.0224)
 
 
+def test_window_summary_includes_dry_run_replay_aggregates(caplog):
+    window = _make_window()
+    state = MonitorState(
+        entry_replay_check_count=7,
+        entry_replay_signal_count=3,
+        entry_replay_buy_signal_count=1,
+        entry_replay_min_leading_ask=0.66,
+        entry_replay_max_leading_ask=0.74,
+        entry_replay_min_best_ask=0.64,
+        entry_replay_max_best_ask=0.72,
+        entry_replay_min_selected_ask=0.69,
+        entry_replay_max_selected_ask=0.75,
+        entry_replay_max_depth_notional=12.3456,
+        entry_replay_min_best_ask_age_ms=0,
+        entry_replay_max_best_ask_age_ms=220,
+        stop_replay_check_count=5,
+        stop_replay_triggered_count=1,
+        stop_replay_missing_or_stale_bid_count=1,
+        stop_replay_insufficient_depth_count=2,
+        stop_replay_min_best_bid=0.31,
+        stop_replay_max_best_bid=0.43,
+        stop_replay_min_selected_bid=0.28,
+        stop_replay_max_selected_bid=0.36,
+        stop_replay_max_bid_shares_available=4.321,
+        stop_replay_min_best_bid_age_ms=2,
+        stop_replay_max_best_bid_age_ms=140,
+    )
+
+    with caplog.at_level(logging.INFO, logger="polybot.trading.monitor"):
+        _log_window_summary(state, window, dry_run=True)
+
+    summary = next(record for record in caplog.records if getattr(record, "event_data", {}).get("action") == "SUMMARY")
+    assert summary.event_data["entry_replay"] == {
+        "checks": 7,
+        "signals": 3,
+        "buy_signals": 1,
+        "leading_ask_min": 0.66,
+        "leading_ask_max": 0.74,
+        "best_ask_min": 0.64,
+        "best_ask_max": 0.72,
+        "selected_ask_min": 0.69,
+        "selected_ask_max": 0.75,
+        "depth_notional_max": 12.3456,
+        "best_ask_age_ms_min": 0,
+        "best_ask_age_ms_max": 220,
+    }
+    assert summary.event_data["stop_replay"] == {
+        "checks": 5,
+        "triggered": 1,
+        "missing_or_stale_bid": 1,
+        "insufficient_depth": 2,
+        "best_bid_min": 0.31,
+        "best_bid_max": 0.43,
+        "selected_bid_min": 0.28,
+        "selected_bid_max": 0.36,
+        "bid_shares_available_max": 4.321,
+        "best_bid_age_ms_min": 2,
+        "best_bid_age_ms_max": 140,
+    }
+
+
 @pytest.mark.asyncio
 async def test_on_price_uses_configured_entry_ask_level():
     window = _make_window()
@@ -1209,7 +1326,7 @@ async def test_handle_opening_price_uses_strength_amount_tier():
 
 
 @pytest.mark.asyncio
-async def test_handle_opening_price_dry_run_simulates_latency_and_buffered_ask():
+async def test_handle_opening_price_dry_run_uses_depth_quote_without_latency():
     window = _make_window()
     state = MonitorState()
     state.target_side = "up"
@@ -1217,7 +1334,7 @@ async def test_handle_opening_price_dry_run_simulates_latency_and_buffered_ask()
     strategy = _mock_strategy()
     strategy.max_entry_price = 0.75
     ws = MagicMock()
-    ws.get_latest_best_ask.return_value = 0.67
+    ws.get_latest_best_ask.return_value = 0.74
 
     with patch("polybot.trading.monitor.asyncio.sleep", new_callable=AsyncMock) as mock_sleep, \
          patch("polybot.trading.fak_quotes.get_tick_size", return_value=0.01):
@@ -1230,25 +1347,27 @@ async def test_handle_opening_price_dry_run_simulates_latency_and_buffered_ask()
             trade_config=_tc(amount=1.0),
             strategy=strategy,
             side="up",
+            target_entry_ask=0.67,
+            best_ask=0.68,
             ws=ws,
         )
 
-    mock_sleep.assert_awaited_once_with(0.4)
-    assert state.entry_price == pytest.approx(0.72)
-    assert state.entry_avg_price == pytest.approx(0.72)
-    assert state.holding_size == pytest.approx(1.0 / 0.72)
+    mock_sleep.assert_not_awaited()
+    ws.get_latest_best_ask.assert_not_called()
+    assert state.entry_price == pytest.approx(0.67)
+    assert state.entry_avg_price == pytest.approx(0.67)
+    assert state.holding_size == pytest.approx(1.0 / 0.67)
 
 
 @pytest.mark.asyncio
-async def test_handle_opening_price_dry_run_cap_failure_clears_target_side():
+async def test_handle_opening_price_dry_run_depth_quote_above_cap_clears_target_side():
     window = _make_window()
     state = MonitorState()
     state.target_side = "up"
-    state.target_entry_price = 0.65
+    state.target_entry_price = 0.76
     strategy = _mock_strategy()
     strategy.max_entry_price = 0.75
     ws = MagicMock()
-    ws.get_latest_best_ask.return_value = 0.76
 
     with patch("polybot.trading.monitor.asyncio.sleep", new_callable=AsyncMock):
         await _handle_opening_price(
@@ -1260,6 +1379,7 @@ async def test_handle_opening_price_dry_run_cap_failure_clears_target_side():
             trade_config=_tc(amount=1.0),
             strategy=strategy,
             side="up",
+            target_entry_ask=0.76,
             ws=ws,
         )
 
@@ -1445,6 +1565,59 @@ async def test_monitor_single_window_actively_evaluates_snapshot_strategy_at_ent
     assert checks[0]["down_best_ask"] == pytest.approx(0.39)
     assert checks[0]["up_best_ask_age_ms"] == 120
     assert checks[0]["down_best_ask_age_ms"] == 340
+
+
+@pytest.mark.asyncio
+async def test_monitor_single_window_logs_snapshot_entry_check_once_per_window(caplog):
+    now = int(time.time())
+    window = _make_window(start_epoch=now - 120, end_epoch=now + 180)
+    state = _make_state()
+    state.started = True
+    ws = MagicMock()
+    ws.get_latest_price.side_effect = lambda token: {
+        "up-token-123": 0.62,
+        "down-token-456": 0.38,
+    }.get(token)
+    ws.get_latest_best_ask.side_effect = lambda token: {
+        "up-token-123": 0.63,
+        "down-token-456": 0.39,
+    }.get(token)
+    ws.get_latest_best_ask_age.return_value = 0.01
+
+    strategy = _mock_crowd_strategy()
+    strategy.entry_start_remaining_sec = 180
+    strategy.entry_end_remaining_sec = 175
+    strategy.should_buy.return_value = False
+
+    fake_now = {"value": now}
+
+    async def _advance_time(_seconds):
+        fake_now["value"] += 1
+        if fake_now["value"] >= now + 2:
+            fake_now["value"] = window.end_epoch
+
+    with patch("polybot.trading.monitor.time.time", side_effect=lambda: fake_now["value"]), \
+         patch("polybot.trading.monitor.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        mock_sleep.side_effect = _advance_time
+
+        with caplog.at_level(logging.INFO, logger="polybot.trading.monitor"):
+            await _monitor_single_window(
+                window,
+                state,
+                ws,
+                dry_run=True,
+                trade_config=_tc(),
+                strategy=strategy,
+                prefetch_next_window=False,
+            )
+
+    assert strategy.set_market_snapshot.call_count == 2
+    checks = [
+        record.event_data
+        for record in caplog.records
+        if getattr(record, "event_data", {}).get("action") == "SNAPSHOT_ENTRY_CHECK"
+    ]
+    assert len(checks) == 1
 
 
 @pytest.mark.asyncio

@@ -35,8 +35,10 @@ class MonitorState:
     stop_loss_price: Optional[float] = None
     last_stop_loss_check_key: Optional[tuple] = None
     last_stop_loss_check_logged_at: float = 0.0
+    stop_loss_check_logged_reasons: set[str] = field(default_factory=set)
     last_entry_check_side: Optional[str] = None  # target side for the last entry-band check
     last_entry_check_best_ask: Optional[float] = None  # target ask used by the last entry-band check
+    snapshot_entry_check_logged: bool = False
     last_signal_eval_key: Optional[tuple] = None
     last_signal_eval_logged_at: float = 0.0
     last_depth_skip_key: Optional[tuple] = None
@@ -49,6 +51,29 @@ class MonitorState:
     depth_skip_min_entry_ask: Optional[float] = None
     depth_skip_max_entry_ask: Optional[float] = None
     depth_skip_max_notional: float = 0.0
+    entry_replay_check_count: int = 0
+    entry_replay_signal_count: int = 0
+    entry_replay_buy_signal_count: int = 0
+    entry_replay_min_leading_ask: Optional[float] = None
+    entry_replay_max_leading_ask: Optional[float] = None
+    entry_replay_min_best_ask: Optional[float] = None
+    entry_replay_max_best_ask: Optional[float] = None
+    entry_replay_min_selected_ask: Optional[float] = None
+    entry_replay_max_selected_ask: Optional[float] = None
+    entry_replay_max_depth_notional: float = 0.0
+    entry_replay_min_best_ask_age_ms: Optional[int] = None
+    entry_replay_max_best_ask_age_ms: Optional[int] = None
+    stop_replay_check_count: int = 0
+    stop_replay_triggered_count: int = 0
+    stop_replay_missing_or_stale_bid_count: int = 0
+    stop_replay_insufficient_depth_count: int = 0
+    stop_replay_min_best_bid: Optional[float] = None
+    stop_replay_max_best_bid: Optional[float] = None
+    stop_replay_min_selected_bid: Optional[float] = None
+    stop_replay_max_selected_bid: Optional[float] = None
+    stop_replay_max_bid_shares_available: float = 0.0
+    stop_replay_min_best_bid_age_ms: Optional[int] = None
+    stop_replay_max_best_bid_age_ms: Optional[int] = None
     trade_lock: asyncio.Lock = None  # prevents concurrent buy/sell from WS callbacks
     started: bool = False  # set True when window officially starts — prevents pre-start trades
 

@@ -108,13 +108,13 @@ params:
 ```yaml
 strategy:
   type: crowd_m1
-  entry_elapsed_sec: 180
+  entry_elapsed_sec: 170
   entry_timeout_sec: 5
   min_ask_gap: 0.0
-  min_leading_ask: 0.66
+  min_leading_ask: 0.62
   max_entry_price: 0.75
   btc_direction_confirm: false
-  btc_price_feed_source: polymarket_rtds
+  btc_price_feed_source: binance
   btc_reverse_filter:
     enabled: true
     lookback_sec: 20
@@ -138,17 +138,17 @@ params:
 
 Rules:
 
-- At 180s after open, buy the higher-best-ask Polymarket side only if the
-  leading ask is at least 0.66; gap requirement is disabled with
+- At 170s after open, buy the higher-best-ask Polymarket side only if the
+  leading ask is at least 0.62; gap requirement is disabled with
   `min_ask_gap=0.0`.
 - Do not require BTC direction from window open to match the selected side.
 - Use a BTC recent-reverse soft filter: skip UP if BTC fell at least 0.02% over
   the last 20s, and skip DOWN if BTC rose at least 0.02% over the last 20s.
 - `btc_reverse_filter.min_reverse_move_pct` is in percent units: `0.02` means
   `0.02%`, not `2%`.
-- The reverse filter reads BTC history from Polymarket RTDS `crypto_prices`
-  (`btcusdt`) by default; Binance remains as a fallback source option while RTDS
-  stability is validated.
+- The reverse filter reads BTC history from Binance WS by default. Polymarket
+  RTDS remains available as a fallback source option, but it is not the active
+  default after stale-feed behavior was observed in dry-run.
 - Reverse-filter checks log `BTC_REVERSE_FILTER_CHECK` once per
   `(history_ready, triggered)` state per window. Polymarket RTDS ignores
   malformed/non-finite values, preserves inner batch item symbols, and appends
@@ -170,8 +170,9 @@ Rules:
 - Entry logs include UP/DOWN best-ask cache age for book freshness validation.
 - Crowd entry `signal_price` is the leading ask, and `active_theta_pct` remains
   empty because BTC theta is not used.
-- Dry-run BUY/SELL simulates FAK latency and a tick buffer; dry BUY cap failure
-  after latency locks the window and clears target entry state.
+- Dry-run BUY uses the same depth quote selected by the entry scan and does not
+  add simulated buy latency or extra ticks. Stop-loss dry-run still simulates
+  sell-side FAK latency and a tick buffer.
 - Hold to `window.end_epoch` unless the narrow stop-loss window fills.
 
 Stop-loss when enabled:
