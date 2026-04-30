@@ -80,7 +80,7 @@ def test_preset_config_loads_crowd_m1_yaml():
     assert "low_price_entry_ask_level" not in cfg["params"]
     assert "dynamic_entry_levels" not in cfg["params"]
     assert cfg["params"]["stop_loss"]["enabled"] is True
-    assert cfg["params"]["stop_loss"]["trigger_price"] == pytest.approx(0.45)
+    assert cfg["params"]["stop_loss"]["trigger_price"] == pytest.approx(0.40)
     assert cfg["params"]["stop_loss"]["start_remaining_sec"] == pytest.approx(60)
     assert cfg["params"]["stop_loss"]["end_remaining_sec"] == pytest.approx(45)
 
