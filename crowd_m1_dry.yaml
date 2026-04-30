@@ -24,7 +24,7 @@ params:
   max_entries_per_window: 1
   stop_loss:
     enabled: true
-    trigger_price: 0.40
+    trigger_price: 0.45
     start_remaining_sec: 60
     end_remaining_sec: 45
     sell_bid_level: 10

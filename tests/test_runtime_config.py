@@ -68,8 +68,8 @@ def test_preset_config_loads_crowd_m1_yaml():
     assert cfg["strategy"]["entry_elapsed_sec"] == pytest.approx(180)
     assert cfg["strategy"]["entry_timeout_sec"] == pytest.approx(5)
     assert cfg["strategy"]["min_ask_gap"] == pytest.approx(0.0)
-    assert cfg["strategy"]["min_leading_ask"] == pytest.approx(0.64)
-    assert cfg["strategy"]["max_entry_price"] == pytest.approx(0.80)
+    assert cfg["strategy"]["min_leading_ask"] == pytest.approx(0.58)
+    assert cfg["strategy"]["max_entry_price"] == pytest.approx(0.76)
     assert cfg["strategy"]["btc_direction_confirm"] is True
     assert cfg["strategy"]["btc_price_feed_source"] == "binance"
     assert cfg["strategy"]["btc_reverse_filter"]["enabled"] is True
@@ -80,7 +80,7 @@ def test_preset_config_loads_crowd_m1_yaml():
     assert "low_price_entry_ask_level" not in cfg["params"]
     assert "dynamic_entry_levels" not in cfg["params"]
     assert cfg["params"]["stop_loss"]["enabled"] is True
-    assert cfg["params"]["stop_loss"]["trigger_price"] == pytest.approx(0.40)
+    assert cfg["params"]["stop_loss"]["trigger_price"] == pytest.approx(0.45)
     assert cfg["params"]["stop_loss"]["start_remaining_sec"] == pytest.approx(60)
     assert cfg["params"]["stop_loss"]["end_remaining_sec"] == pytest.approx(45)
 
