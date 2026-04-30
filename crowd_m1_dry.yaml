@@ -7,7 +7,7 @@ strategy:
   entry_elapsed_sec: 180
   entry_timeout_sec: 5
   min_ask_gap: 0.0
-  min_leading_ask: 0.58
+  min_leading_ask: 0.60
   max_entry_price: 0.76
   btc_direction_confirm: true
   btc_price_feed_source: binance

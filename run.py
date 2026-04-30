@@ -126,6 +126,12 @@ def _setup_file_logging(slug_prefix: str, run_id: str) -> None:
     _run_error_jsonl_handler.addFilter(_AtOrAboveLevelFilter(logging.WARNING))
     root_log.addHandler(_run_error_jsonl_handler)
 
+
+def _raise_if_fatal_state(state: MonitorState) -> None:
+    if state.fatal_error is not None:
+        raise RuntimeError(state.fatal_error)
+
+
 async def main() -> None:
     global _LAST_DRY_RUN
     parser = argparse.ArgumentParser(
@@ -243,6 +249,7 @@ Examples:
                 trade_config=trade_config, strategy=strategy, series=series,
                 state=shared_state, prefetch_next_window=should_prefetch_next,
             )
+            _raise_if_fatal_state(shared_state)
             if monitored:
                 completed += 1
                 log.info("ROUND_COMPLETE: %d/%s", completed, trade_config.rounds if trade_config.rounds else "∞")
@@ -260,6 +267,7 @@ Examples:
                     trade_config=trade_config, strategy=strategy, series=series,
                     state=shared_state, prefetch_next_window=should_prefetch_next,
                 )
+                _raise_if_fatal_state(shared_state)
                 if monitored:
                     completed += 1
                     log.info("ROUND_COMPLETE: %d/%s", completed, trade_config.rounds if trade_config.rounds else "∞")
@@ -277,6 +285,7 @@ Examples:
                         trade_config=trade_config, strategy=strategy, series=series,
                         state=shared_state, prefetch_next_window=should_prefetch_next,
                     )
+                    _raise_if_fatal_state(shared_state)
                     if monitored:
                         completed += 1
                         log.info("ROUND_COMPLETE: %d/%s", completed, trade_config.rounds if trade_config.rounds else "∞")

@@ -68,7 +68,7 @@ def test_preset_config_loads_crowd_m1_yaml():
     assert cfg["strategy"]["entry_elapsed_sec"] == pytest.approx(180)
     assert cfg["strategy"]["entry_timeout_sec"] == pytest.approx(5)
     assert cfg["strategy"]["min_ask_gap"] == pytest.approx(0.0)
-    assert cfg["strategy"]["min_leading_ask"] == pytest.approx(0.58)
+    assert cfg["strategy"]["min_leading_ask"] == pytest.approx(0.60)
     assert cfg["strategy"]["max_entry_price"] == pytest.approx(0.76)
     assert cfg["strategy"]["btc_direction_confirm"] is True
     assert cfg["strategy"]["btc_price_feed_source"] == "binance"

@@ -187,6 +187,52 @@ async def test_stop_loss_sells_with_bid_depth_inside_time_band():
 
 
 @pytest.mark.asyncio
+async def test_stop_loss_insufficient_funds_marks_fatal():
+    now = time.time()
+    window = _make_window(start_epoch=int(now) - 240, end_epoch=int(now) + 60)
+    state = _make_state(
+        bought=True,
+        holding_size=1.3889,
+        entry_amount=1.0,
+        entry_price=0.72,
+        entry_avg_price=0.72,
+    )
+    ws = MagicMock()
+    ws.get_latest_bid_levels_with_size.return_value = _bid_book(0.38, 12)
+    ws.get_latest_best_bid_age.return_value = 0.01
+    trade_config = _tc(
+        stop_loss_enabled=True,
+        stop_loss_start_remaining_sec=120,
+        stop_loss_end_remaining_sec=15,
+        stop_loss_sell_bid_level=9,
+        stop_loss_retry_count=3,
+        stop_loss_min_sell_price=0.20,
+    )
+
+    with patch("polybot.trading.fak_quotes.get_tick_size", return_value=0.01), \
+         patch("polybot.trading.monitor.get_token_balance", return_value=1.3889), \
+         patch("polybot.trading.monitor.place_fak_stop_loss_sell", new_callable=AsyncMock) as mock_sell:
+        mock_sell.return_value = OrderResult(
+            success=False,
+            message="INSUFFICIENT_FUNDS: not enough balance / allowance",
+        )
+
+        with pytest.raises(RuntimeError, match="INSUFFICIENT_FUNDS"):
+            await _maybe_handle_stop_loss(
+                window,
+                state,
+                ws,
+                "up-token-123",
+                False,
+                trade_config,
+                "up",
+            )
+
+    assert state.fatal_error == "INSUFFICIENT_FUNDS: not enough balance / allowance"
+    assert state.stop_loss_attempted is True
+
+
+@pytest.mark.asyncio
 async def test_stop_loss_dry_run_simulates_latency_and_buffered_bid():
     now = time.time()
     window = _make_window(start_epoch=int(now) - 240, end_epoch=int(now) + 60)
@@ -1390,6 +1436,37 @@ async def test_handle_opening_price_dry_run_depth_quote_above_cap_clears_target_
 
 
 @pytest.mark.asyncio
+async def test_handle_opening_price_live_insufficient_funds_marks_fatal():
+    window = _make_window()
+    state = _make_state()
+    strategy = _mock_strategy()
+
+    with patch("polybot.trading.monitor.place_fak_buy", new_callable=AsyncMock) as mock_buy:
+        mock_buy.return_value = OrderResult(
+            success=False,
+            message="INSUFFICIENT_FUNDS: not enough balance / allowance",
+        )
+
+        with pytest.raises(RuntimeError, match="INSUFFICIENT_FUNDS"):
+            await _handle_opening_price(
+                window,
+                state,
+                "up-token-123",
+                0.65,
+                dry_run=False,
+                trade_config=_tc(amount=1.0),
+                strategy=strategy,
+                side="up",
+                best_ask=0.66,
+                target_entry_ask=0.66,
+            )
+
+    assert state.fatal_error == "INSUFFICIENT_FUNDS: not enough balance / allowance"
+    assert state.exit_triggered is True
+    assert state.buy_blocked_window_cap is True
+
+
+@pytest.mark.asyncio
 async def test_sync_holding_balance_after_buy_updates_live_shares():
     window = _make_window()
     state = _make_state(
@@ -1657,6 +1734,27 @@ async def test_monitor_single_window_actively_checks_stop_loss_without_price_upd
     mock_stop.assert_awaited()
     assert mock_stop.await_args.args[:4] == (window, state, ws, window.down_token)
     assert mock_stop.await_args.args[6] == "down"
+
+
+@pytest.mark.asyncio
+async def test_monitor_single_window_exits_on_fatal_state_without_waiting():
+    now = int(time.time())
+    window = _make_window(start_epoch=now - 100, end_epoch=now + 200)
+    state = _make_state(fatal_error="INSUFFICIENT_FUNDS: not enough balance / allowance")
+
+    with patch("polybot.trading.monitor.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        with pytest.raises(RuntimeError, match="INSUFFICIENT_FUNDS"):
+            await _monitor_single_window(
+                window,
+                state,
+                ws=None,
+                dry_run=False,
+                trade_config=_tc(),
+                strategy=_mock_strategy(),
+                prefetch_next_window=False,
+            )
+
+    mock_sleep.assert_not_awaited()
 
 
 @pytest.mark.asyncio

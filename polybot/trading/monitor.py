@@ -52,6 +52,16 @@ async def _noop_price_callback(update: PriceUpdate) -> None:
     return None
 
 
+def _mark_fatal_error(state: MonitorState, message: str) -> None:
+    if state.fatal_error is None:
+        state.fatal_error = message
+
+
+def _raise_if_fatal(state: MonitorState) -> None:
+    if state.fatal_error is not None:
+        raise RuntimeError(state.fatal_error)
+
+
 def _record_min_max(
     current_min: Optional[float],
     current_max: Optional[float],
@@ -823,6 +833,8 @@ async def _maybe_handle_stop_loss(
         retry_count=trade_config.stop_loss_retry_count,
     )
     if not result.success:
+        if "INSUFFICIENT_FUNDS" in result.message:
+            _mark_fatal_error(state, result.message)
         log_event(log, logging.WARNING, TRADE, {
             "action": "STOP_LOSS_FAILED",
             "side": side.upper(),
@@ -832,6 +844,7 @@ async def _maybe_handle_stop_loss(
             "price_hint": quote.price_hint,
             "message": result.message,
         })
+        _raise_if_fatal(state)
         return
 
     sold_size = min(result.filled_size or shares_to_sell, shares_to_sell)
@@ -1224,6 +1237,7 @@ async def _monitor_single_window(
     fetch_task = None
 
     while True:
+        _raise_if_fatal(state)
         now = int(time.time())
         if now >= window.end_epoch:
             if state.bought and not state.exit_triggered:
@@ -1296,6 +1310,7 @@ async def _monitor_single_window(
             break
 
         if state.exit_triggered:
+            _raise_if_fatal(state)
             remaining = window.end_epoch - now
             # Pre-fetch next window while we sleep unless this is the caller's
             # final planned round.
@@ -1484,6 +1499,7 @@ async def monitor_window(
     # Use shared state if provided, otherwise create new (which won't persist)
     if state is None:
         state = MonitorState()
+    _raise_if_fatal(state)
     ws: Optional[PriceStream] = existing_ws
 
     # Reset per-window state for new window
@@ -1594,6 +1610,7 @@ async def monitor_window(
     else:
         # First window — create new WS connection
         await ws.connect(token_ids)
+    _raise_if_fatal(state)
 
     # Pre-fetch order params during wait time to reduce order placement delay.
     from polybot.core.client import prefetch_order_params
@@ -1605,6 +1622,7 @@ async def monitor_window(
         wait_sec = window.start_epoch - now_epoch
         log.debug("Waiting %ds for window to start... (WS pre-connected)", wait_sec)
         await asyncio.sleep(wait_sec)
+        _raise_if_fatal(state)
 
     # Re-check after WS subscribe/prefetch/wait. Network stalls can consume the
     # narrow snapshot entry band even when the window was fresh on initial attach.
@@ -2063,6 +2081,7 @@ async def _handle_opening_price(
                 "note": "window locked to prevent duplicate entries",
             })
             if "INSUFFICIENT_FUNDS" in result.message:
+                _mark_fatal_error(state, result.message)
                 log_event(log, logging.CRITICAL, TRADE, {
                     "action": "STOP_INSUFFICIENT_FUNDS",
                     "window": window.short_label,
