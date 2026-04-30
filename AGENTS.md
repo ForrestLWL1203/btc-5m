@@ -123,11 +123,12 @@ Experimental config: `crowd_m1_dry.yaml`.
 
 Runtime behavior:
 
-- At `entry_elapsed_sec=170`, compare current UP and DOWN best asks; use
+- At `entry_elapsed_sec=180`, compare current UP and DOWN best asks; use
   `entry_timeout_sec=5` to avoid late attach entries.
 - Buy the higher-best-ask side only if its leading ask is at least
-  `min_leading_ask=0.62`; `min_ask_gap=0.0` disables a gap requirement.
-- Do not require BTC direction confirmation; this is a pure crowd-following variant.
+  `min_leading_ask=0.64`; `min_ask_gap=0.0` disables a gap requirement.
+- Require BTC direction confirmation: the selected Polymarket side must match
+  BTC's move from the 5-minute window open to entry.
 - Enable the BTC recent-reverse soft filter: skip UP entries if BTC dropped at
   least `0.02%` over the last 20s, and skip DOWN entries if BTC rose at least
   `0.02%` over the last 20s.
@@ -144,13 +145,13 @@ Runtime behavior:
   and inner symbols, and appends ordered ticks on the hot path.
 - Use existing target-leg depth-gated execution; do not replace live execution
   with backtest-only L5 price proxies.
-- Cap final selected entry/hint at `max_entry_price=0.75`.
-- Reject candidates whose leading ask is above `max_entry_price=0.75` before
+- Cap final selected entry/hint at `max_entry_price=0.80`.
+- Reject candidates whose leading ask is above `max_entry_price=0.80` before
   entering the depth/FAK pipeline.
 - Scan the target-leg order book up to `entry_ask_level=10`, skipping level 1
   for fillability and stopping at the first level whose cumulative depth covers
   the order amount.
-- Reject entries whose selected ask is above `max_entry_price=0.75` or more
+- Reject entries whose selected ask is above `max_entry_price=0.80` or more
   than `0.04` above target-leg best ask.
 - Entry is event-driven: UP or DOWN Polymarket WS updates refresh the cached
   two-leg snapshot and can trigger entry immediately inside the 5s entry

@@ -108,12 +108,12 @@ params:
 ```yaml
 strategy:
   type: crowd_m1
-  entry_elapsed_sec: 170
+  entry_elapsed_sec: 180
   entry_timeout_sec: 5
   min_ask_gap: 0.0
-  min_leading_ask: 0.62
-  max_entry_price: 0.75
-  btc_direction_confirm: false
+  min_leading_ask: 0.64
+  max_entry_price: 0.80
+  btc_direction_confirm: true
   btc_price_feed_source: binance
   btc_reverse_filter:
     enabled: true
@@ -138,10 +138,11 @@ params:
 
 Rules:
 
-- At 170s after open, buy the higher-best-ask Polymarket side only if the
-  leading ask is at least 0.62; gap requirement is disabled with
+- At 180s after open, buy the higher-best-ask Polymarket side only if the
+  leading ask is at least 0.64; gap requirement is disabled with
   `min_ask_gap=0.0`.
-- Do not require BTC direction from window open to match the selected side.
+- Require BTC direction confirmation: the selected Polymarket side must match
+  BTC's move from the 5-minute window open to entry.
 - Use a BTC recent-reverse soft filter: skip UP if BTC fell at least 0.02% over
   the last 20s, and skip DOWN if BTC rose at least 0.02% over the last 20s.
 - `btc_reverse_filter.min_reverse_move_pct` is in percent units: `0.02` means
@@ -155,13 +156,13 @@ Rules:
   ordered ticks on the hot path.
 - Use existing target-leg order-book depth gating; do not use backtest-only L5
   price proxies for live execution.
-- Reject candidates whose leading ask is above `max_entry_price=0.75` before
+- Reject candidates whose leading ask is above `max_entry_price=0.80` before
   entering the depth/FAK pipeline.
 - Entry scans the target-leg order book up to `entry_ask_level=10`, skipping
   level 1 for fillability and stopping at the first level whose cumulative
   depth covers the order amount.
 - Selected entry ask must stay within 0.04 of target-leg best ask and at or
-  below `max_entry_price=0.75`.
+  below `max_entry_price=0.80`.
 - Entry is event-driven: UP or DOWN Polymarket WS updates refresh the cached
   two-leg snapshot and can trigger entry immediately inside the 5s entry window;
   the 1s snapshot loop is only a fallback.

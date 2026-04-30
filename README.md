@@ -129,11 +129,12 @@ Config:
 
 `crowd_m1` is a simple dry-run candidate:
 
-- At 170s after window open, compare UP and DOWN best ask; the runtime entry
+- At 180s after window open, compare UP and DOWN best ask; the runtime entry
   timeout is 5s to avoid late attach entries.
-- Buy the higher-best-ask side only when the leading ask is at least `0.62`;
+- Buy the higher-best-ask side only when the leading ask is at least `0.64`;
   `min_ask_gap=0.0` disables a gap requirement.
-- Do not require BTC direction confirmation; this is a pure crowd-following variant.
+- Require BTC direction confirmation: the selected Polymarket side must match
+  BTC's move from the 5-minute window open to entry.
 - A separate BTC reverse soft filter is enabled: if the selected side is UP and
   BTC fell at least `0.02%` over the last 20s, or the selected side is DOWN and
   BTC rose at least `0.02%` over the last 20s, skip that entry.
@@ -148,14 +149,14 @@ Config:
 - Polymarket RTDS crypto handling ignores malformed/non-finite values, preserves
   inner symbols in batched payloads, and uses append on ordered hot-path ticks.
 - Use the same target-leg depth-gated execution path as `paired_window`.
-- Hard max entry cap is `0.75`.
-- If the leading ask is above `0.75`, the strategy rejects the candidate before
+- Hard max entry cap is `0.80`.
+- If the leading ask is above `0.80`, the strategy rejects the candidate before
   entering the depth/FAK pipeline.
 - Entry scans the target-leg order book up to `entry_ask_level=10`, skipping
   the top level for fillability and stopping at the first level whose
   cumulative depth covers the order amount.
 - Selected entry ask must stay within `0.04` of the target-leg best ask and at
-  or below `max_entry_price=0.75`.
+  or below `max_entry_price=0.80`.
 - Entry checks are event-driven: UP or DOWN Polymarket WS updates refresh the
   cached two-leg snapshot and can trigger entry immediately inside the 5s entry
   window; the 1s snapshot loop remains only as a fallback.

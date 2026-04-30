@@ -4,12 +4,12 @@ market:
 
 strategy:
   type: crowd_m1
-  entry_elapsed_sec: 170
+  entry_elapsed_sec: 180
   entry_timeout_sec: 5
   min_ask_gap: 0.0
-  min_leading_ask: 0.62
-  max_entry_price: 0.75
-  btc_direction_confirm: false
+  min_leading_ask: 0.64
+  max_entry_price: 0.80
+  btc_direction_confirm: true
   btc_price_feed_source: binance
   btc_reverse_filter:
     enabled: true
