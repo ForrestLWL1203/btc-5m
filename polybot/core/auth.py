@@ -8,14 +8,14 @@ from typing import Optional
 
 from eth_account import Account
 
-from py_clob_client.client import ClobClient
-from py_clob_client.http_helpers import helpers as _http_helpers
+from py_clob_client_v2 import ClobClient
+from py_clob_client_v2.http_helpers import helpers as _http_helpers
 
 from . import config
 
 
 def _configure_proxy() -> None:
-    """Inject HTTPS proxy into py-clob-client's httpx client."""
+    """Inject HTTPS proxy into py-clob-client-v2's httpx client."""
     proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
     if proxy and hasattr(_http_helpers, "_http_client"):
         _http_helpers._http_client = _http_helpers._http_client.__class__(
@@ -84,7 +84,7 @@ def create_clob_client(
         if proxy_addr:
             funder_addr = proxy_addr
         else:
-            # Fall back to EOA address — this works if py-clob-client or the
+            # Fall back to EOA address — this works if the CLOB server or SDK
             # CLOB server maps EOA → proxy automatically, but may fail otherwise.
             funder_addr = _derive_funder_address(pk)
             sys.stderr.write(
@@ -103,9 +103,9 @@ def create_clob_client(
 
     # Set API credentials (required for L2 auth on trading endpoints).
     #
-    # py-clob-client's create_or_derive_api_creds() tries POST /auth/api-key
+    # py-clob-client-v2's create_or_derive_api_key() tries POST /auth/api-key
     # before deriving an existing key. For accounts that already have CLOB API
-    # credentials, that POST consistently returns 400 and then derive succeeds.
+    # credentials, that POST can be noisy or geoblocked and derive succeeds.
     # Derive first to avoid a noisy, guaranteed-failing request on every start.
     try:
         creds = client.derive_api_key()

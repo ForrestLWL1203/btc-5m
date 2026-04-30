@@ -3,7 +3,7 @@
 Polybot — Polymarket Up/Down trading bot runner
 
 Requirements:
-  - Python 3.11+ (py-clob-client dependency)
+  - Python 3.11+ (py-clob-client-v2 dependency)
   - polymarket CLI configured at ~/.config/polymarket/config.json
 """
 

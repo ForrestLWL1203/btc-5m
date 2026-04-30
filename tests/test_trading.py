@@ -4,6 +4,7 @@ import asyncio
 from unittest.mock import MagicMock, patch
 
 import pytest
+from py_clob_client_v2 import OrderType
 
 from polybot.trading.trading import (
     OrderResult,
@@ -58,6 +59,19 @@ def test_signed_order_diagnostics_derives_sell_limit_price():
     assert diag["signed_limit_price"] == pytest.approx(0.45)
 
 
+def test_signed_order_diagnostics_handles_v2_numeric_buy_side():
+    """V2 SDK signed orders encode side as numeric enum values."""
+    signed = {
+        "makerAmount": "1000000",
+        "takerAmount": "1315700",
+        "side": 0,
+    }
+
+    diag = _signed_order_diagnostics(signed, "BUY")
+
+    assert diag["signed_limit_price"] == pytest.approx(1000000 / 1315700)
+
+
 def test_derive_buy_fill_from_taking_and_making_amounts():
     filled, price = _derive_fill_from_amounts(
         "BUY",
@@ -106,6 +120,9 @@ async def test_fak_buy_full_fill():
     assert result.success
     assert result.filled_size == 10.0
     assert mock_client.post_order.call_count == 1
+    order_args = mock_client.create_market_order.call_args.args[0]
+    assert order_args.order_type == OrderType.FAK
+    assert mock_client.post_order.call_args.args[1] == OrderType.FAK
 
 
 @pytest.mark.asyncio

@@ -19,8 +19,8 @@ import sys
 import time
 from typing import Any
 
-from py_clob_client.clob_types import OrderArgs, OrderType
-from py_clob_client.order_builder.constants import BUY, SELL
+from py_clob_client_v2 import OrderArgs, OrderType
+from py_clob_client_v2.order_builder.constants import BUY, SELL
 
 from polybot.core.auth import create_clob_client
 from polybot.core.client import get_tick_size, prefetch_order_params, get_order_options

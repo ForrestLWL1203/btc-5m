@@ -1,6 +1,6 @@
 # Polymarket API Reference
 
-Studied 2026-04-17 from https://docs.polymarket.com
+Studied 2026-05-01 from https://docs.polymarket.com
 
 ## Three API Systems
 
@@ -12,8 +12,8 @@ Studied 2026-04-17 from https://docs.polymarket.com
 
 ## Authentication (CLOB)
 
-- **L1**: Derive API key/secret from private key via EIP-712 `create_or_derive_api_creds()`
-- **L2**: HMAC-SHA256 signature on every trading request (handled by py-clob-client)
+- **L1**: Derive API key/secret from private key via EIP-712 `derive_api_key()` / `create_or_derive_api_key()`
+- **L2**: HMAC-SHA256 signature on every trading request (handled by `py-clob-client-v2`)
 - Signature types: EOA(0), POLY_PROXY(1), GNOSIS_SAFE(2)
 - polybot uses type=1 (Magic Link proxy wallet)
 
@@ -62,7 +62,15 @@ POST /order response lacks fill data. Options:
 - **Convert**: `float(balance) / 1_000_000` = actual shares
 - **No "sell all" API exists** — must query balance then sell exact amount
 
-## MarketOrderArgs (py-clob-client)
+## CLOB V2 Order Signing
+
+- Runtime dependency is `py-clob-client-v2==1.0.0`.
+- V2 signed orders include `timestamp`, `metadata`, and `builder`.
+- V1 signed-order fields `nonce`, `feeRateBps`, and signed `taker` are not used.
+- CLOB production remains `https://clob.polymarket.com`; V2 is selected by the SDK/order signature.
+- Runtime FAK calls build `MarketOrderArgs(..., order_type=OrderType.FAK)` and then `post_order(..., OrderType.FAK)`.
+
+## MarketOrderArgs (`py-clob-client-v2`)
 
 - **BUY**: `amount` = dollars to spend (NOT shares). Shares = amount / price
 - **SELL**: `amount` = shares to sell directly
@@ -114,9 +122,9 @@ Tick size determines minimum price increment. Varies by price range:
 
 ## Fees
 
-- Taker fee: `C × 0.072 × price × (1 - price)` where C is notional
-- Maker: **zero fees, earns rebates**
-- Fee peaks at 50¢ probability (0.072 × 0.5 × 0.5 = 0.018 per unit)
+- Fees are determined by the protocol / CLOB market info at match time.
+- The bot does not set `feeRateBps` on orders.
+- Maker: **zero fees, earns rebates** where applicable.
 
 ## Geoblock
 

@@ -4,8 +4,7 @@ import asyncio
 import logging
 from typing import Optional
 
-from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import PartialCreateOrderOptions
+from py_clob_client_v2 import ClobClient, PartialCreateOrderOptions
 
 from . import config
 from .auth import create_clob_client
@@ -16,8 +15,8 @@ _client: Optional[ClobClient] = None
 
 # Tick size cache: token_id -> tick_size (rarely changes, safe to cache for session)
 _tick_size_cache: dict[str, float] = {}
-# Pre-fetched order params: token_id -> (tick_size_str, neg_risk, fee_rate_bps)
-_order_params_cache: dict[str, tuple[str, bool, int]] = {}
+# Pre-fetched order params: token_id -> (tick_size_str, neg_risk)
+_order_params_cache: dict[str, tuple[str, bool]] = {}
 
 
 def get_client() -> ClobClient:
@@ -72,7 +71,7 @@ def get_token_balance(token_id: str, safe: bool = True) -> Optional[float]:
         safe: If True, truncate and subtract tick to avoid overselling.
               If False, return raw balance (for cleanup/diagnostic use).
     """
-    from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+    from py_clob_client_v2 import BalanceAllowanceParams, AssetType
     try:
         params = BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id)
         resp = get_client().get_balance_allowance(params)
@@ -103,7 +102,7 @@ def round_to_tick(price: float, token_id: str) -> float:
 
 
 def prefetch_order_params(token_id: str) -> None:
-    """Pre-fetch tick_size, neg_risk, fee_rate for a token.
+    """Pre-fetch tick_size and neg_risk for a token.
 
     Populates SDK internal caches so create_market_order / create_order
     skip redundant API calls during order placement.
@@ -119,10 +118,7 @@ def prefetch_order_params(token_id: str) -> None:
 
         neg_risk = client.get_neg_risk(token_id)
 
-        # Fee rate: populate SDK's internal __fee_rates cache
-        client.get_fee_rate_bps(token_id)
-
-        _order_params_cache[token_id] = (tick_str, bool(neg_risk), 0)
+        _order_params_cache[token_id] = (tick_str, bool(neg_risk))
         log.debug("Prefetched order params for %s: tick=%s neg_risk=%s",
                   token_id[:20], tick_str, neg_risk)
     except Exception as e:
@@ -134,5 +130,5 @@ def get_order_options(token_id: str) -> Optional[PartialCreateOrderOptions]:
     cached = _order_params_cache.get(token_id)
     if cached is None:
         return None
-    tick_str, neg_risk, _ = cached
+    tick_str, neg_risk = cached
     return PartialCreateOrderOptions(tick_size=tick_str, neg_risk=neg_risk)

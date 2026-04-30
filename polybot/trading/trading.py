@@ -6,8 +6,8 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Optional
 
-from py_clob_client.clob_types import MarketOrderArgs, OrderType
-from py_clob_client.order_builder.constants import BUY, SELL
+from py_clob_client_v2 import MarketOrderArgs, OrderType
+from py_clob_client_v2.order_builder.constants import BUY, SELL
 
 from polybot.core import config
 from polybot.core.client import get_client, get_order_options
@@ -108,7 +108,7 @@ def _signed_order_diagnostics(signed_order, requested_side: str) -> dict:
     taker = _safe_float(taker_amount)
     signed_limit_price = 0.0
     if maker > 0 and taker > 0:
-        if str(signed_side).upper() == BUY:
+        if _side_name(signed_side) == BUY:
             signed_limit_price = maker / taker
         else:
             signed_limit_price = taker / maker
@@ -121,6 +121,28 @@ def _signed_order_diagnostics(signed_order, requested_side: str) -> dict:
     if signed_limit_price > 0:
         diagnostics["signed_limit_price"] = signed_limit_price
     return diagnostics
+
+
+def _side_name(side) -> str:
+    """Normalize SDK side constants, enums, and plain strings."""
+    if side in (0, "0"):
+        return BUY
+    if side in (1, "1"):
+        return SELL
+    name = getattr(side, "name", None)
+    if name in (BUY, SELL):
+        return name
+    value = getattr(side, "value", None)
+    if value in (0, "0", BUY):
+        return BUY
+    if value in (1, "1", SELL):
+        return SELL
+    text = str(side).upper()
+    if text.endswith(".BUY"):
+        return BUY
+    if text.endswith(".SELL"):
+        return SELL
+    return BUY if text == BUY else SELL if text == SELL else text
 
 
 def _derive_fill_from_amounts(
@@ -196,6 +218,7 @@ async def _post_fak_market(
                 token_id=token_id,
                 amount=amount,
                 side=side_const,
+                order_type=OrderType.FAK,
                 price=current_price_hint or 0,  # non-zero skips SDK's internal GET /book
             )
             options = get_order_options(token_id)
