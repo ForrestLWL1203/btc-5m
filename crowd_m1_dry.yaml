@@ -16,7 +16,7 @@ strategy:
   # Dynamic entry only triggers after a strong open-to-current BTC move.
   # Unit is percent: 0.04 means 0.04%, not 4%.
   strong_move_pct: 0.04
-  btc_price_feed_source: coinbase
+  btc_price_feed_source: binance
 
 params:
   amount: 1.0

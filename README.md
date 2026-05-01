@@ -137,11 +137,9 @@ Config:
   BTC's move from the 5-minute window open to entry. Dynamic entry requires
   `strong_move_pct=0.04%`; it no longer requires a 10-second persistence
   lookback or `min_move_ratio`.
-- The BTC price feed comes from Coinbase ticker WS by default for US VPS
-  latency tests. Binance WS remains available via `btc_price_feed_source:
-  binance`. Polymarket RTDS remains available as a fallback config option, but
-  it is not the active default after stale-feed behavior was observed in
-  dry-run.
+- The BTC price feed comes from Binance trade WS by default. Recent live probes
+  showed Polymarket RTDS was much closer to Binance than Coinbase. Coinbase and
+  Polymarket RTDS remain available as fallback config options.
 - Polymarket RTDS crypto handling ignores malformed/non-finite values, preserves
   inner symbols in batched payloads, and uses append on ordered hot-path ticks.
 - Use the same target-leg depth-gated execution path as `paired_window`.

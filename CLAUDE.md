@@ -117,7 +117,7 @@ strategy:
   btc_direction_confirm: true
   # Unit is percent: 0.04 means 0.04%, not 4%.
   strong_move_pct: 0.04
-  btc_price_feed_source: coinbase
+  btc_price_feed_source: binance
 
 params:
   amount: 1.0
@@ -144,10 +144,9 @@ Rules:
   BTC's move from the 5-minute window open to entry, and the absolute BTC move
   must be at least `strong_move_pct=0.04%`. There is no 10-second persistence
   lookback and no `min_move_ratio` requirement.
-- The BTC price feed uses Coinbase ticker WS by default for US VPS latency
-  tests. Binance WS remains available via `btc_price_feed_source: binance`.
-  Polymarket RTDS remains available as a fallback source option, but it is not
-  the active default after stale-feed behavior was observed in dry-run.
+- The BTC price feed uses Binance trade WS by default. Recent live probes showed
+  Polymarket RTDS was much closer to Binance than Coinbase. Coinbase and
+  Polymarket RTDS remain available as fallback config options.
 - Use existing target-leg order-book depth gating; do not use backtest-only L5
   price proxies for live execution.
 - Reject candidates whose leading ask is above `max_entry_price=0.74` before

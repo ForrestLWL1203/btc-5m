@@ -76,7 +76,7 @@ def test_preset_config_loads_crowd_m1_yaml():
     assert cfg["strategy"]["strong_move_pct"] == pytest.approx(0.04)
     assert "persistence_sec" not in cfg["strategy"]
     assert "min_move_ratio" not in cfg["strategy"]
-    assert cfg["strategy"]["btc_price_feed_source"] == "coinbase"
+    assert cfg["strategy"]["btc_price_feed_source"] == "binance"
     assert cfg["params"]["entry_ask_level"] == 10
     assert "low_price_threshold" not in cfg["params"]
     assert "low_price_entry_ask_level" not in cfg["params"]
