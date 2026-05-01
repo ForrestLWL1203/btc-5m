@@ -112,11 +112,11 @@ strategy:
   entry_start_elapsed_sec: 45
   entry_end_elapsed_sec: 90
   min_ask_gap: 0.0
-  min_leading_ask: 0.65
-  max_entry_price: 0.78
+  min_leading_ask: 0.64
+  max_entry_price: 0.74
   btc_direction_confirm: true
-  # Unit is percent: 0.05 means 0.05%, not 5%.
-  strong_move_pct: 0.05
+  # Unit is percent: 0.04 means 0.04%, not 4%.
+  strong_move_pct: 0.04
   btc_price_feed_source: coinbase
 
 params:
@@ -128,7 +128,7 @@ params:
     enabled: true
     trigger_drop_pct: 0.35
     trigger_price: 0.20
-    start_remaining_sec: 55
+    start_remaining_sec: 65
     end_remaining_sec: 40
     sell_bid_level: 10
     retry_count: 3
@@ -138,11 +138,11 @@ params:
 Rules:
 
 - Between 45s and 90s after open, buy the higher-best-ask Polymarket side only
-  if the leading ask is at least 0.65; gap requirement is disabled with
+  if the leading ask is at least 0.64; gap requirement is disabled with
   `min_ask_gap=0.0`.
 - Require BTC direction confirmation: the selected Polymarket side must match
   BTC's move from the 5-minute window open to entry, and the absolute BTC move
-  must be at least `strong_move_pct=0.05%`. There is no 10-second persistence
+  must be at least `strong_move_pct=0.04%`. There is no 10-second persistence
   lookback and no `min_move_ratio` requirement.
 - The BTC price feed uses Coinbase ticker WS by default for US VPS latency
   tests. Binance WS remains available via `btc_price_feed_source: binance`.
@@ -150,13 +150,13 @@ Rules:
   the active default after stale-feed behavior was observed in dry-run.
 - Use existing target-leg order-book depth gating; do not use backtest-only L5
   price proxies for live execution.
-- Reject candidates whose leading ask is above `max_entry_price=0.78` before
+- Reject candidates whose leading ask is above `max_entry_price=0.74` before
   entering the depth/FAK pipeline.
 - Entry scans the target-leg order book from level 1 up to
   `entry_ask_level=10`, stopping at the first level whose cumulative depth
   covers the order amount.
 - Selected entry ask must stay within 0.04 of target-leg best ask and at or
-  below `max_entry_price=0.78`.
+  below `max_entry_price=0.74`.
 - Entry is event-driven: UP or DOWN Polymarket WS updates refresh the cached
   two-leg snapshot and can trigger entry immediately inside the 45s-90s entry
   band; the 1s snapshot loop is only a fallback.
@@ -188,6 +188,8 @@ Stop-loss when enabled:
 - Live runs sync actual CLOB token balance about 8 seconds after BUY fill, then
   check balance again before stop-loss SELL.
 - SELL FAK retries up to 3 times.
+- Tiny live SELL dust remainders are treated as closed positions so the window
+  is not settled a second time for the dust.
 - A filled stop records realized PnL and exits the window.
 
 ## Core Files
@@ -299,6 +301,9 @@ Price fields:
   expiry. Stale cached marks are logged as `result=MARK_STALE`, and a fresh
   `0.5` mark is logged as `result=MARK_AMBIGUOUS` instead of being counted as a
   loss.
+- Successful `STOP_LOSS_TRIGGERED` / `STOP_LOSS_FILLED` records are normal trade
+  events and stay in the trade JSONL; only failed stop-loss attempts are warning
+  records in the error JSONL.
 - Persistent run logs are JSONL only. Normal business records below `WARNING`
   go to `log/runs/<run_id>/<market>_trade.jsonl`; abnormal records at
   `WARNING` and above go to `log/runs/<run_id>/<market>_error.jsonl`.

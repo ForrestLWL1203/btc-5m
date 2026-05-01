@@ -131,11 +131,11 @@ Config:
 - Between 45s and 90s after window open, watch BTC and Polymarket
   event-driven snapshots. Entry can trigger as soon as BTC shows a strong
   open-to-current move.
-- Buy the higher-best-ask side only when the leading ask is at least `0.65`;
+- Buy the higher-best-ask side only when the leading ask is at least `0.64`;
   `min_ask_gap=0.0` disables a gap requirement.
 - Require BTC direction confirmation: the selected Polymarket side must match
   BTC's move from the 5-minute window open to entry. Dynamic entry requires
-  `strong_move_pct=0.05%`; it no longer requires a 10-second persistence
+  `strong_move_pct=0.04%`; it no longer requires a 10-second persistence
   lookback or `min_move_ratio`.
 - The BTC price feed comes from Coinbase ticker WS by default for US VPS
   latency tests. Binance WS remains available via `btc_price_feed_source:
@@ -145,14 +145,14 @@ Config:
 - Polymarket RTDS crypto handling ignores malformed/non-finite values, preserves
   inner symbols in batched payloads, and uses append on ordered hot-path ticks.
 - Use the same target-leg depth-gated execution path as `paired_window`.
-- Hard max entry cap is `0.78`.
-- If the leading ask is above `0.78`, the strategy rejects the candidate before
+- Hard max entry cap is `0.74`.
+- If the leading ask is above `0.74`, the strategy rejects the candidate before
   entering the depth/FAK pipeline.
 - Entry scans the target-leg order book from level 1 up to `entry_ask_level=10`,
   stopping at the first level whose
   cumulative depth covers the order amount.
 - Selected entry ask must stay within `0.04` of the target-leg best ask and at
-  or below `max_entry_price=0.78`.
+  or below `max_entry_price=0.74`.
 - Entry checks are event-driven: UP or DOWN Polymarket WS updates refresh the
   cached two-leg snapshot and can trigger entry immediately inside the
   45s-90s dynamic entry band; the 1s snapshot loop remains only as a
@@ -165,7 +165,7 @@ Config:
 - Dry-run BUY uses the same depth quote selected by the entry scan and does not
   add simulated buy latency or extra ticks. Stop-loss dry-run still simulates
   sell-side FAK latency and a tick buffer.
-- Stop-loss is enabled only while remaining time is `[55s,40s]`, with trigger
+- Stop-loss is enabled only while remaining time is `[65s,40s]`, with trigger
   `max(min_sell_price, entry_avg_price * 0.65)`, i.e. a 35% drop from actual
   entry price; `trigger_price=0.20` is present only to avoid an implicit
   loader fallback while `trigger_drop_pct` is active. Otherwise hold to
@@ -262,6 +262,9 @@ Execution constraints:
   actual sell size, not the deepest scanned level.
 - Live runs sync actual CLOB token balance about 8 seconds after BUY fill, and
   check balance again before stop-loss SELL.
+- If live stop-loss sells essentially the whole position but CLOB returns a
+  tiny dust remainder, the bot treats the position as closed instead of
+  recording a second window-end settlement for the dust.
 - SELL FAK price hint is placed below the selected bid level and retried up to
   `retry_count=3`.
 - If stop-loss fills, the bot records realized PnL and exits the window.
@@ -415,3 +418,6 @@ Key price fields:
   before expiry. Stale cached marks are logged as `result=MARK_STALE`, and a
   fresh `0.5` mark is logged as `result=MARK_AMBIGUOUS` instead of being counted
   as a loss.
+- Successful `STOP_LOSS_TRIGGERED` / `STOP_LOSS_FILLED` records are normal trade
+  events and stay in the trade JSONL; only failed stop-loss attempts are warning
+  records in the error JSONL.

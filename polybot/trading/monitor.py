@@ -46,6 +46,8 @@ _STOP_LOSS_CHECK_LOG_INTERVAL_SEC = 5.0
 _STOP_LOSS_PREWARM_SEC = 5.0
 _SETTLEMENT_MARK_FRESH_SEC = 5.0
 _SETTLEMENT_MARK_REFRESH_REMAINING_SEC = 2.0
+_STOP_LOSS_DUST_COST_BASIS_USD = 0.01
+_STOP_LOSS_DUST_SHARES = 0.01
 
 
 async def _noop_price_callback(update: PriceUpdate) -> None:
@@ -374,6 +376,13 @@ def _log_stop_loss_book_freshness(
         "remaining_sec": round(remaining, 3),
         "best_bid_age_ms": best_bid_age_ms,
     })
+
+
+def _is_stop_loss_dust_position(remaining_shares: float, remaining_cost_basis: float) -> bool:
+    return (
+        remaining_shares <= _STOP_LOSS_DUST_SHARES
+        or remaining_cost_basis <= _STOP_LOSS_DUST_COST_BASIS_USD
+    )
 
 
 async def _refresh_settlement_mark(
@@ -815,7 +824,7 @@ async def _maybe_handle_stop_loss(
     state.stop_loss_attempted = True
     if dry_run:
         state.stop_replay_triggered_count += 1
-    log_event(log, logging.WARNING, TRADE, {
+    log_event(log, logging.INFO, TRADE, {
         "action": "STOP_LOSS_TRIGGERED",
         "side": side.upper(),
         "window": window.short_label,
@@ -848,7 +857,7 @@ async def _maybe_handle_stop_loss(
             sell_price = quote.price_hint or quote.price or 0.0
         realized_pnl = state.holding_size * sell_price - state.entry_amount
         _process_trade_result(state, realized_pnl >= 0, realized_pnl, trade_config)
-        log_event(log, logging.WARNING, TRADE, {
+        log_event(log, logging.INFO, TRADE, {
             "action": "STOP_LOSS_FILLED",
             "side": side.upper(),
             "window": window.short_label,
@@ -892,8 +901,11 @@ async def _maybe_handle_stop_loss(
     sell_price = result.avg_price or quote.price_hint or quote.price or 0.0
     cost_basis = state.entry_amount * (sold_size / shares_to_sell) if shares_to_sell > 0 else 0.0
     realized_pnl = sold_size * sell_price - cost_basis
+    remaining_shares = max(0.0, shares_to_sell - sold_size)
+    remaining_cost_basis = max(0.0, state.entry_amount - cost_basis)
+    position_closed = _is_stop_loss_dust_position(remaining_shares, remaining_cost_basis)
     _process_trade_result(state, realized_pnl >= 0, realized_pnl, trade_config)
-    log_event(log, logging.WARNING, TRADE, {
+    log_event(log, logging.INFO, TRADE, {
         "action": "STOP_LOSS_FILLED",
         "side": side.upper(),
         "window": window.short_label,
@@ -903,13 +915,15 @@ async def _maybe_handle_stop_loss(
         "shares_source": balance_source,
         "realized_pnl": round(realized_pnl, 4),
         "daily_realized_pnl": round(state.daily_realized_pnl, 4),
+        "remaining_shares": round(remaining_shares, 6),
+        "remaining_cost_basis": round(remaining_cost_basis, 6),
+        "position_closed": position_closed,
         "order_id": result.order_id,
     })
-    state.holding_size = max(0.0, shares_to_sell - sold_size)
-    state.entry_amount = max(0.0, state.entry_amount - cost_basis)
+    state.holding_size = 0.0 if position_closed else remaining_shares
+    state.entry_amount = 0.0 if position_closed else remaining_cost_basis
     state.stop_loss_triggered = True
-    if state.holding_size <= 1e-9:
-        state.holding_size = 0.0
+    if position_closed:
         state.bought = False
         state.exit_triggered = True
 

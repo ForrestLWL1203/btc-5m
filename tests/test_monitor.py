@@ -187,6 +187,66 @@ async def test_stop_loss_sells_with_bid_depth_inside_time_band():
 
 
 @pytest.mark.asyncio
+async def test_stop_loss_treats_tiny_live_remainder_as_closed(caplog):
+    now = time.time()
+    window = _make_window(start_epoch=int(now) - 240, end_epoch=int(now) + 60)
+    state = _make_state(
+        bought=True,
+        holding_size=1.35135,
+        entry_amount=1.0,
+        entry_price=0.74,
+        entry_avg_price=0.74,
+    )
+    ws = MagicMock()
+    ws.get_latest_bid_levels_with_size.return_value = _bid_book(0.36, 716)
+    ws.get_latest_best_bid_age.return_value = 0.01
+    trade_config = _tc(
+        stop_loss_enabled=True,
+        stop_loss_start_remaining_sec=120,
+        stop_loss_end_remaining_sec=15,
+        stop_loss_sell_bid_level=10,
+        stop_loss_retry_count=3,
+        stop_loss_min_sell_price=0.20,
+    )
+
+    with patch("polybot.trading.fak_quotes.get_tick_size", return_value=0.01), \
+         patch("polybot.trading.monitor.get_token_balance", return_value=1.35135), \
+         patch("polybot.trading.monitor.place_fak_stop_loss_sell", new_callable=AsyncMock) as mock_sell:
+        mock_sell.return_value = OrderResult(
+            success=True,
+            order_id="sell-dust",
+            filled_size=1.35,
+            avg_price=0.37,
+        )
+        with caplog.at_level(logging.INFO, logger="polybot.trading.monitor"):
+            await _maybe_handle_stop_loss(
+                window,
+                state,
+                ws,
+                "up-token-123",
+                False,
+                trade_config,
+                "up",
+            )
+
+    mock_sell.assert_awaited_once()
+    assert state.stop_loss_triggered is True
+    assert state.exit_triggered is True
+    assert state.bought is False
+    assert state.holding_size == pytest.approx(0.0)
+    assert state.entry_amount == pytest.approx(0.0)
+    fills = [
+        record.event_data
+        for record in caplog.records
+        if getattr(record, "event_data", {}).get("action") == "STOP_LOSS_FILLED"
+    ]
+    assert fills
+    assert fills[0]["remaining_shares"] == pytest.approx(0.00135)
+    assert fills[0]["position_closed"] is True
+    assert all(record.levelno < logging.WARNING for record in caplog.records)
+
+
+@pytest.mark.asyncio
 async def test_stop_loss_insufficient_funds_marks_fatal():
     now = time.time()
     window = _make_window(start_epoch=int(now) - 240, end_epoch=int(now) + 60)
