@@ -73,7 +73,7 @@ def test_preset_config_loads_crowd_m1_yaml():
     assert cfg["strategy"]["max_entry_price"] == pytest.approx(0.76)
     assert cfg["strategy"]["btc_direction_confirm"] is True
     assert cfg["strategy"]["btc_direction_deadband_pct"] == pytest.approx(0.015)
-    assert cfg["strategy"]["btc_price_feed_source"] == "binance"
+    assert cfg["strategy"]["btc_price_feed_source"] == "coinbase"
     assert "btc_reverse_filter" not in cfg["strategy"]
     assert cfg["params"]["entry_ask_level"] == 10
     assert "low_price_threshold" not in cfg["params"]

@@ -13,7 +13,7 @@ strategy:
   # Treat open-to-entry BTC moves smaller than this as no clear direction.
   # Unit is percent: 0.015 means 0.015%, not 1.5%.
   btc_direction_deadband_pct: 0.015
-  btc_price_feed_source: binance
+  btc_price_feed_source: coinbase
 
 params:
   amount: 1.0

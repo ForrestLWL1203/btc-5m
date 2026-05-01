@@ -133,8 +133,8 @@ Runtime behavior:
   BTC's move from the 5-minute window open to entry. Open-to-entry BTC moves
   smaller than `btc_direction_deadband_pct=0.015%` are treated as no clear BTC
   direction and do not block the Polymarket-leading side.
-- The BTC price feed uses Binance WS by default. Coinbase ticker WS is
-  available via `btc_price_feed_source: coinbase` for US VPS latency tests.
+- The BTC price feed uses Coinbase ticker WS by default for US VPS latency
+  tests. Binance WS remains available via `btc_price_feed_source: binance`.
   Polymarket RTDS remains available as a fallback option, but is not the active
   default after stale-feed behavior was observed in dry-run.
 - Polymarket RTDS feed handling ignores malformed/non-finite crypto price
