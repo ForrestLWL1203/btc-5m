@@ -889,6 +889,56 @@ async def test_on_price_live_does_not_log_entry_replay_sample(caplog):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("elapsed_sec", [100, 200])
+async def test_crowd_entry_replay_sample_only_logs_inside_entry_band(caplog, elapsed_sec):
+    now = int(time.time())
+    window = _make_window(start_epoch=now - elapsed_sec, end_epoch=now - elapsed_sec + 300)
+    state = _make_state()
+    strategy = CrowdM1Strategy(
+        series=MarketSeries.from_known("btc-updown-5m"),
+        entry_start_elapsed_sec=135,
+        entry_end_elapsed_sec=180,
+        min_ask_gap=0.0,
+        min_leading_ask=0.64,
+        strong_move_pct=0.05,
+    )
+    strategy._started = True
+    strategy.set_window_start(window.start_epoch)
+    strategy._window_open_btc = 100.0
+    strategy._feed = MagicMock()
+    strategy._feed.latest_price = 100.02
+    ws = MagicMock()
+    ws.get_latest_price.side_effect = lambda token: {
+        "up-token-123": 0.38,
+        "down-token-456": 0.62,
+    }.get(token)
+    ws.get_latest_best_ask.side_effect = lambda token: {
+        "up-token-123": 0.39,
+        "down-token-456": 0.63,
+    }.get(token)
+
+    update = _make_update("down-token-456", midpoint=0.62)
+    trade_config = _tc(replay_logging_enabled=True)
+
+    with caplog.at_level(logging.INFO, logger="polybot.trading.monitor"):
+        await _on_price_update(
+            update,
+            window,
+            state,
+            ws=ws,
+            dry_run=True,
+            trade_config=trade_config,
+            strategy=strategy,
+            side="up",
+        )
+
+    assert all(
+        getattr(record, "event_data", {}).get("action") != "ENTRY_REPLAY_SAMPLE"
+        for record in caplog.records
+    )
+
+
+@pytest.mark.asyncio
 async def test_on_price_paired_strategy_ignores_down_token_before_entry():
     window = _make_window()
     state = _make_state()

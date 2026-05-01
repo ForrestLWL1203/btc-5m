@@ -185,13 +185,21 @@ def _log_entry_replay_sample(
     decision: str,
     reason: Optional[str] = None,
 ) -> None:
+    elapsed = max(0.0, time.time() - window.start_epoch)
+    entry_start_elapsed = _strategy_attr(strategy, "entry_elapsed_sec")
+    entry_end_elapsed = _strategy_attr(strategy, "entry_end_elapsed_sec")
+    if (
+        entry_start_elapsed is not None
+        and entry_end_elapsed is not None
+        and not (float(entry_start_elapsed) <= elapsed <= float(entry_end_elapsed))
+    ):
+        return
     if not _should_log_replay_sample(
         state,
         kind="entry",
         interval_sec=trade_config.replay_entry_sample_interval_sec,
     ):
         return
-    elapsed = max(0.0, time.time() - window.start_epoch)
     remaining = window.end_epoch - time.time()
     up_best_ask = _strategy_attr(strategy, "up_best_ask")
     down_best_ask = _strategy_attr(strategy, "down_best_ask")
