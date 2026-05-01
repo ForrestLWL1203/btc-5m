@@ -118,8 +118,6 @@ class TestBuildStrategy:
                 "btc_direction_confirm": True,
                 "btc_direction_deadband_pct": 0.015,
                 "strong_move_pct": 0.06,
-                "persistence_sec": 10,
-                "min_move_ratio": 0.7,
                 "btc_price_feed_source": "polymarket_rtds",
             }
         }
@@ -132,8 +130,6 @@ class TestBuildStrategy:
         assert strat._btc_direction_confirm is True
         assert strat._btc_direction_deadband_pct == pytest.approx(0.015)
         assert strat._strong_move_pct == pytest.approx(0.06)
-        assert strat._persistence_sec == pytest.approx(10)
-        assert strat._min_move_ratio == pytest.approx(0.7)
         assert strat._btc_price_feed_source == "polymarket_rtds"
         assert isinstance(strat._feed, PolymarketRTDSPriceFeed)
 

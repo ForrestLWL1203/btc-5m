@@ -27,7 +27,12 @@ def test_backtest_candidate_marks_false_stop_when_side_would_win():
 
     trades, skips = backtest_candidate([_window(rows, outcome="up")], candidate)
 
-    assert skips == {"missing_quote": 0, "ask_gap": 0, "leading": 0, "cap": 0}
+    assert {key: skips[key] for key in ("missing_quote", "ask_gap", "leading", "cap")} == {
+        "missing_quote": 0,
+        "ask_gap": 0,
+        "leading": 0,
+        "cap": 0,
+    }
     assert len(trades) == 1
     assert trades[0].exit_reason == "stop_loss"
     assert trades[0].false_stop is True
@@ -78,6 +83,58 @@ def test_backtest_candidate_scans_entry_timeout_until_first_valid_quote():
     assert trades[0].entry_price == pytest.approx(0.64)
 
 
+def test_backtest_candidate_scans_dynamic_band_with_btc_threshold():
+    rows = [
+        {"ts": 1000.0, "src": "binance", "price": 100000.0},
+        {"ts": 1110.0, "src": "binance", "price": 100040.0},
+        {"ts": 1120.0, "src": "binance", "price": 100070.0},
+        {"ts": 1120.0, "src": "poly", "token": "up", "bid": 0.65, "ask": 0.66},
+        {"ts": 1120.0, "src": "poly", "token": "down", "bid": 0.33, "ask": 0.34},
+    ]
+    candidate = Candidate(
+        name="test",
+        entry_elapsed_sec=120,
+        entry_end_elapsed_sec=180,
+        min_leading_ask=0.60,
+        stop_loss_trigger=None,
+        btc_direction_confirm=True,
+        strong_move_pct=0.06,
+    )
+
+    trades, skips = backtest_candidate([_window(rows, outcome="up")], candidate)
+
+    assert skips["btc_strength"] == 0
+    assert len(trades) == 1
+    assert trades[0].entry_ts == pytest.approx(1120.0)
+    assert trades[0].side == "up"
+    assert trades[0].btc_move_pct == pytest.approx(0.07)
+
+
+def test_backtest_candidate_rejects_poly_lead_against_btc_direction():
+    rows = [
+        {"ts": 1000.0, "src": "binance", "price": 100000.0},
+        {"ts": 1110.0, "src": "binance", "price": 100040.0},
+        {"ts": 1120.0, "src": "binance", "price": 100070.0},
+        {"ts": 1120.0, "src": "poly", "token": "up", "bid": 0.42, "ask": 0.43},
+        {"ts": 1120.0, "src": "poly", "token": "down", "bid": 0.56, "ask": 0.57},
+        {"ts": 1125.0, "src": "poly", "token": "down", "bid": 0.61, "ask": 0.62},
+    ]
+    candidate = Candidate(
+        name="test",
+        entry_elapsed_sec=120,
+        entry_end_elapsed_sec=180,
+        min_leading_ask=0.60,
+        stop_loss_trigger=None,
+        btc_direction_confirm=True,
+        strong_move_pct=0.06,
+    )
+
+    trades, skips = backtest_candidate([_window(rows, outcome="down")], candidate)
+
+    assert trades == []
+    assert skips["btc_direction"] == 1
+
+
 def test_backtest_candidate_applies_entry_and_stop_loss_tick_buffers():
     rows = [
         {"ts": 1120.0, "src": "poly", "token": "up", "bid": 0.69, "ask": 0.70},
@@ -119,5 +176,5 @@ def test_default_candidate_names_use_rounded_threshold_labels():
 def test_default_candidates_use_current_stop_loss_window():
     candidate = default_candidates()[0]
 
-    assert candidate.stop_loss_start_remaining_sec == pytest.approx(60)
-    assert candidate.stop_loss_end_remaining_sec == pytest.approx(45)
+    assert candidate.stop_loss_start_remaining_sec == pytest.approx(55)
+    assert candidate.stop_loss_end_remaining_sec == pytest.approx(40)

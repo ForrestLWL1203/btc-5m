@@ -125,16 +125,15 @@ Experimental config: `crowd_m1_dry.yaml`.
 
 Runtime behavior:
 
-- Between `entry_start_elapsed_sec=120` and `entry_end_elapsed_sec=180`, watch
+- Between `entry_start_elapsed_sec=45` and `entry_end_elapsed_sec=90`, watch
   BTC and Polymarket event-driven snapshots. Entry can trigger as soon as BTC
   shows a strong open-to-current move.
 - Buy the higher-best-ask side only if its leading ask is at least
   `min_leading_ask=0.65`; `min_ask_gap=0.0` disables a gap requirement.
 - Require BTC direction confirmation: the selected Polymarket side must match
   BTC's move from the 5-minute window open to entry. Dynamic entry requires
-  `strong_move_pct=0.06%`, plus same-direction BTC persistence
-  `persistence_sec=10` seconds ago and current move at least
-  `min_move_ratio=0.7` of that past move.
+  `strong_move_pct=0.04%`; it no longer requires a 10-second persistence
+  lookback or `min_move_ratio`.
 - The BTC price feed uses Coinbase ticker WS by default for US VPS latency
   tests. Binance WS remains available via `btc_price_feed_source: binance`.
   Polymarket RTDS remains available as a fallback option, but is not the active
@@ -152,7 +151,7 @@ Runtime behavior:
 - Reject entries whose selected ask is above `max_entry_price=0.76` or more
   than `0.04` above target-leg best ask.
 - Entry is event-driven: UP or DOWN Polymarket WS updates refresh the cached
-  two-leg snapshot and can trigger entry immediately inside the 120s-180s
+  two-leg snapshot and can trigger entry immediately inside the 45s-90s
   dynamic entry band; the 1s snapshot loop remains only as a fallback.
 - Entry requires both UP and DOWN best-ask caches to be fresh; stale cross-leg
   books are skipped before direction selection.
@@ -162,7 +161,7 @@ Runtime behavior:
 - Dry-run BUY uses the same depth quote selected by the entry scan and does not
   add simulated buy latency or extra ticks. Stop-loss dry-run still simulates
   sell-side FAK latency and a tick buffer.
-- Stop-loss is enabled only while remaining time is `[60s,45s]`, with dynamic
+- Stop-loss is enabled only while remaining time is `[55s,40s]`, with dynamic
   trigger `max(min_sell_price, entry_avg_price * 0.65)`, i.e. a 35% drop from
   actual entry price.
 - After BUY fill, held-token WS updates are ignored until 5s before the

@@ -88,8 +88,6 @@ def build_strategy(cfg: dict, series: Optional[MarketSeries] = None):
                 if strat_cfg.get("strong_move_pct") is not None
                 else None
             ),
-            persistence_sec=float(strat_cfg.get("persistence_sec", 10.0)),
-            min_move_ratio=float(strat_cfg.get("min_move_ratio", 0.7)),
             btc_price_feed_source=strat_cfg.get("btc_price_feed_source", "binance"),
             open_price_max_wait_sec=strat_cfg.get("open_price_max_wait_sec", 30.0),
         )

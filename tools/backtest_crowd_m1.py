@@ -8,6 +8,7 @@ target leg best ask being at or below the configured cap.
 from __future__ import annotations
 
 import argparse
+from bisect import bisect_left, bisect_right
 import csv
 import json
 from dataclasses import dataclass
@@ -26,8 +27,12 @@ class Candidate:
     min_leading_ask: float
     stop_loss_trigger: Optional[float]
     entry_timeout_sec: float = 0.0
-    stop_loss_start_remaining_sec: float = 60.0
-    stop_loss_end_remaining_sec: float = 45.0
+    entry_end_elapsed_sec: Optional[float] = None
+    strong_move_pct: Optional[float] = None
+    btc_direction_confirm: bool = False
+    stop_loss_drop_pct: Optional[float] = None
+    stop_loss_start_remaining_sec: float = 55.0
+    stop_loss_end_remaining_sec: float = 40.0
     max_entry_price: float = 0.75
     min_ask_gap: float = 0.0
     min_sell_price: float = 0.20
@@ -57,6 +62,7 @@ class Trade:
     realized_pnl: float
     hold_pnl: float
     false_stop: bool
+    btc_move_pct: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -67,6 +73,19 @@ class EntryDecision:
     lower_ask: float
     ask_gap: float
     entry_price: float
+    btc_move_pct: Optional[float] = None
+
+
+@dataclass(frozen=True)
+class WindowIndex:
+    rows: list[dict]
+    outcome: dict
+    start_ts: float
+    end_ts: float
+    btc_ts: list[float]
+    btc_prices: list[float]
+    poly_rows: list[dict]
+    poly_ts: list[float]
 
 
 def _fmt_ts(ts: float) -> str:
@@ -89,19 +108,99 @@ def _load_windows(path: Path) -> list[tuple[list[dict], dict]]:
     return windows
 
 
-def _quote_at(rows: list[dict], ts: float) -> dict[str, dict]:
-    quotes: dict[str, dict] = {}
-    for row in rows:
+def build_window_indexes(windows: list[tuple[list[dict], dict]]) -> list[WindowIndex]:
+    return [_build_window_index(rows, outcome) for rows, outcome in windows]
+
+
+def _build_window_index(rows: list[dict], outcome: dict) -> WindowIndex:
+    end_ts = float(outcome["ts"])
+    start_ts = end_ts - WINDOW_SEC
+    sorted_rows = sorted(
+        rows,
+        key=lambda row: row.get("ts") if isinstance(row.get("ts"), (int, float)) else float("inf"),
+    )
+    btc_ts: list[float] = []
+    btc_prices: list[float] = []
+    poly_rows: list[dict] = []
+    poly_ts: list[float] = []
+    for row in sorted_rows:
         row_ts = row.get("ts")
-        if not isinstance(row_ts, (int, float)) or row_ts > ts:
+        if not isinstance(row_ts, (int, float)):
             continue
-        if (
-            row.get("src") == "poly"
-            and row.get("token") in ("up", "down")
-            and row.get("ask") is not None
-        ):
-            quotes[str(row["token"])] = row
+        if row.get("src") == "binance" and row.get("price") is not None:
+            btc_ts.append(float(row_ts))
+            btc_prices.append(float(row["price"]))
+        elif row.get("src") == "poly" and row.get("token") in ("up", "down"):
+            poly_rows.append(row)
+            poly_ts.append(float(row_ts))
+    return WindowIndex(
+        rows=sorted_rows,
+        outcome=outcome,
+        start_ts=start_ts,
+        end_ts=end_ts,
+        btc_ts=btc_ts,
+        btc_prices=btc_prices,
+        poly_rows=poly_rows,
+        poly_ts=poly_ts,
+    )
+
+
+def _quote_at_index(window: WindowIndex, ts: float) -> dict[str, dict]:
+    quotes: dict[str, dict] = {}
+    idx = bisect_right(window.poly_ts, ts) - 1
+    while idx >= 0 and len(quotes) < 2:
+        row = window.poly_rows[idx]
+        if row.get("ask") is not None:
+            token = str(row["token"])
+            if token not in quotes:
+                quotes[token] = row
+        idx -= 1
     return quotes
+
+
+def _btc_price_at_or_before_index(window: WindowIndex, ts: float) -> Optional[float]:
+    idx = bisect_right(window.btc_ts, ts) - 1
+    if idx < 0:
+        return None
+    return window.btc_prices[idx]
+
+
+def _btc_price_at_or_after_index(
+    window: WindowIndex,
+    ts: float,
+    *,
+    max_forward_sec: float = 30.0,
+) -> Optional[float]:
+    idx = bisect_left(window.btc_ts, ts)
+    if idx >= len(window.btc_ts):
+        return None
+    if window.btc_ts[idx] - ts > max_forward_sec:
+        return None
+    return window.btc_prices[idx]
+
+
+def _btc_dynamic_signal_index(
+    window: WindowIndex,
+    *,
+    ts: float,
+    candidate: Candidate,
+    skips: dict[str, int],
+) -> Optional[tuple[str, float]]:
+    if not candidate.btc_direction_confirm and candidate.strong_move_pct is None:
+        return None
+    open_btc = _btc_price_at_or_after_index(window, window.start_ts)
+    current_btc = _btc_price_at_or_before_index(window, ts)
+    if open_btc is None or current_btc is None or open_btc <= 0:
+        skips["btc_missing"] += 1
+        return None
+    move_pct = (current_btc / open_btc - 1.0) * 100.0
+    if candidate.strong_move_pct is not None and abs(move_pct) < candidate.strong_move_pct:
+        skips["btc_strength"] += 1
+        return None
+    if move_pct == 0:
+        skips["btc_strength"] += 1
+        return None
+    return ("up" if move_pct > 0 else "down", move_pct)
 
 
 def _buffered_buy_price(ask: float, candidate: Candidate) -> float:
@@ -118,6 +217,8 @@ def _entry_decision_from_quotes(
     ts: float,
     candidate: Candidate,
     skips: dict[str, int],
+    btc_side: Optional[str] = None,
+    btc_move_pct: Optional[float] = None,
 ) -> Optional[EntryDecision]:
     if "up" not in quotes or "down" not in quotes:
         skips["missing_quote"] += 1
@@ -141,6 +242,9 @@ def _entry_decision_from_quotes(
     if entry_price > candidate.max_entry_price:
         skips["cap"] += 1
         return None
+    if btc_side is not None and side != btc_side:
+        skips["btc_direction"] += 1
+        return None
 
     return EntryDecision(
         ts=ts,
@@ -149,90 +253,101 @@ def _entry_decision_from_quotes(
         lower_ask=lower_ask,
         ask_gap=ask_gap,
         entry_price=entry_price,
+        btc_move_pct=btc_move_pct,
     )
 
 
-def _entry_decision(
-    rows: list[dict],
+def _entry_decision_index(
+    window: WindowIndex,
     *,
-    start_ts: float,
     candidate: Candidate,
     skips: dict[str, int],
 ) -> Optional[EntryDecision]:
-    entry_start_ts = start_ts + candidate.entry_elapsed_sec
-    entry_end_ts = entry_start_ts + candidate.entry_timeout_sec
-    if candidate.entry_timeout_sec <= 0:
-        return _entry_decision_from_quotes(
-            _quote_at(rows, entry_start_ts),
-            ts=entry_start_ts,
+    entry_start_ts = window.start_ts + candidate.entry_elapsed_sec
+    entry_end_ts = (
+        window.start_ts + candidate.entry_end_elapsed_sec
+        if candidate.entry_end_elapsed_sec is not None
+        else entry_start_ts + candidate.entry_timeout_sec
+    )
+    uses_btc_filter = candidate.btc_direction_confirm or candidate.strong_move_pct is not None
+
+    def evaluate(ts: float, quotes: dict[str, dict]) -> Optional[EntryDecision]:
+        btc_signal = _btc_dynamic_signal_index(
+            window,
+            ts=ts,
             candidate=candidate,
             skips=skips,
         )
+        if uses_btc_filter and btc_signal is None:
+            return None
+        return _entry_decision_from_quotes(
+            quotes,
+            ts=ts,
+            candidate=candidate,
+            skips=skips,
+            btc_side=btc_signal[0] if btc_signal else None,
+            btc_move_pct=btc_signal[1] if btc_signal else None,
+        )
 
-    quotes = _quote_at(rows, entry_start_ts)
-    decision = _entry_decision_from_quotes(
-        quotes,
-        ts=entry_start_ts,
-        candidate=candidate,
-        skips=skips,
-    )
+    if entry_end_ts <= entry_start_ts:
+        return evaluate(entry_start_ts, _quote_at_index(window, entry_start_ts))
+
+    quotes = _quote_at_index(window, entry_start_ts)
+    decision = evaluate(entry_start_ts, quotes)
     if decision is not None:
         return decision
 
-    for row in rows:
-        row_ts = row.get("ts")
-        if not isinstance(row_ts, (int, float)):
+    idx = bisect_right(window.poly_ts, entry_start_ts)
+    end_idx = bisect_right(window.poly_ts, entry_end_ts)
+    for row in window.poly_rows[idx:end_idx]:
+        if row.get("ask") is None:
             continue
-        if row_ts <= entry_start_ts or row_ts > entry_end_ts:
-            continue
-        if (
-            row.get("src") == "poly"
-            and row.get("token") in ("up", "down")
-            and row.get("ask") is not None
-        ):
-            quotes[str(row["token"])] = row
-            decision = _entry_decision_from_quotes(
-                quotes,
-                ts=row_ts,
-                candidate=candidate,
-                skips=skips,
-            )
-            if decision is not None:
-                return decision
+        row_ts = float(row["ts"])
+        quotes[str(row["token"])] = row
+        decision = evaluate(row_ts, quotes)
+        if decision is not None:
+            return decision
     return None
 
 
-def _stop_loss_exit(
-    rows: list[dict],
+def _stop_loss_exit_index(
+    window: WindowIndex,
     *,
     side: str,
-    start_ts: float,
+    entry_price: float,
     candidate: Candidate,
 ) -> tuple[Optional[float], Optional[float]]:
-    if candidate.stop_loss_trigger is None:
+    if candidate.stop_loss_trigger is None and candidate.stop_loss_drop_pct is None:
         return None, None
-    stop_price = max(candidate.min_sell_price, candidate.stop_loss_trigger)
-    active_start = start_ts + (WINDOW_SEC - candidate.stop_loss_start_remaining_sec)
-    active_end = start_ts + (WINDOW_SEC - candidate.stop_loss_end_remaining_sec)
-    for row in rows:
-        row_ts = row.get("ts")
-        if not isinstance(row_ts, (int, float)):
-            continue
-        if row_ts < active_start or row_ts > active_end:
-            continue
-        if row.get("src") != "poly" or row.get("token") != side:
+    if candidate.stop_loss_drop_pct is not None:
+        stop_price = max(candidate.min_sell_price, entry_price * (1.0 - candidate.stop_loss_drop_pct))
+    else:
+        stop_price = max(candidate.min_sell_price, candidate.stop_loss_trigger or 0.0)
+    active_start = window.start_ts + (WINDOW_SEC - candidate.stop_loss_start_remaining_sec)
+    active_end = window.start_ts + (WINDOW_SEC - candidate.stop_loss_end_remaining_sec)
+    idx = bisect_left(window.poly_ts, active_start)
+    end_idx = bisect_right(window.poly_ts, active_end)
+    for row in window.poly_rows[idx:end_idx]:
+        if row.get("token") != side:
             continue
         bid = row.get("bid")
         if bid is None:
             continue
         bid = float(bid)
         if candidate.min_sell_price <= bid <= stop_price:
-            return row_ts, _buffered_sell_price(bid, candidate)
+            return float(row["ts"]), _buffered_sell_price(bid, candidate)
     return None, None
 
 
 def backtest_candidate(
     windows: list[tuple[list[dict], dict]],
+    candidate: Candidate,
+) -> tuple[list[Trade], dict[str, int]]:
+    return backtest_indexed_candidate(build_window_indexes(windows), candidate)
+
+
+def backtest_indexed_candidate(
+    windows: list[WindowIndex],
     candidate: Candidate,
 ) -> tuple[list[Trade], dict[str, int]]:
     trades: list[Trade] = []
@@ -241,28 +356,28 @@ def backtest_candidate(
         "ask_gap": 0,
         "leading": 0,
         "cap": 0,
+        "btc_missing": 0,
+        "btc_strength": 0,
+        "btc_direction": 0,
     }
-    for rows, outcome in windows:
-        end_ts = float(outcome["ts"])
-        start_ts = end_ts - WINDOW_SEC
-        decision = _entry_decision(
-            rows,
-            start_ts=start_ts,
+    for window in windows:
+        decision = _entry_decision_index(
+            window,
             candidate=candidate,
             skips=skips,
         )
         if decision is None:
             continue
 
-        outcome_side = str(outcome.get("direction"))
+        outcome_side = str(window.outcome.get("direction"))
         won = decision.side == outcome_side
-        exit_ts = end_ts
+        exit_ts = window.end_ts
         exit_reason = "settlement"
         exit_price = 1.0 if won else 0.0
-        stop_ts, stop_price = _stop_loss_exit(
-            rows,
+        stop_ts, stop_price = _stop_loss_exit_index(
+            window,
             side=decision.side,
-            start_ts=start_ts,
+            entry_price=decision.entry_price,
             candidate=candidate,
         )
         if stop_ts is not None and stop_price is not None:
@@ -277,8 +392,8 @@ def backtest_candidate(
         trades.append(
             Trade(
                 candidate=candidate.name,
-                window=str(outcome["window"]),
-                start_ts=start_ts,
+                window=str(window.outcome["window"]),
+                start_ts=window.start_ts,
                 entry_ts=decision.ts,
                 exit_ts=exit_ts,
                 side=decision.side,
@@ -294,6 +409,7 @@ def backtest_candidate(
                 realized_pnl=realized_pnl,
                 hold_pnl=hold_pnl,
                 false_stop=false_stop,
+                btc_move_pct=decision.btc_move_pct,
             )
         )
     return trades, skips
@@ -338,6 +454,58 @@ def default_trade_candidate_names() -> set[str]:
     }
 
 
+def _label_float(value: float, scale: int = 100) -> str:
+    return f"{int(round(value * scale)):03d}"
+
+
+def _build_custom_candidates(
+    *,
+    elapsed_values: list[float],
+    min_leading_values: list[float],
+    max_entry_values: list[float],
+    strong_move_values: list[Optional[float]],
+    entry_end_elapsed_sec: Optional[float],
+    btc_direction_confirm: bool,
+    stop_loss_trigger: Optional[float],
+    stop_loss_drop_pct: Optional[float],
+) -> list[Candidate]:
+    candidates: list[Candidate] = []
+    for elapsed in elapsed_values:
+        for min_leading in min_leading_values:
+            for max_entry in max_entry_values:
+                for strong_move in strong_move_values:
+                    strong_label = (
+                        "none" if strong_move is None else _label_float(strong_move, scale=1000)
+                    )
+                    stop_label = (
+                        f"drop{_label_float(stop_loss_drop_pct)}"
+                        if stop_loss_drop_pct is not None
+                        else "none"
+                        if stop_loss_trigger is None
+                        else f"sl{_label_float(stop_loss_trigger)}"
+                    )
+                    candidates.append(
+                        Candidate(
+                            name=(
+                                f"custom_{int(elapsed):03d}"
+                                f"_to{'' if entry_end_elapsed_sec is None else int(entry_end_elapsed_sec)}"
+                                f"_l{_label_float(min_leading)}"
+                                f"_cap{_label_float(max_entry)}"
+                                f"_btc{strong_label}_{stop_label}"
+                            ),
+                            entry_elapsed_sec=elapsed,
+                            entry_end_elapsed_sec=entry_end_elapsed_sec,
+                            min_leading_ask=min_leading,
+                            max_entry_price=max_entry,
+                            stop_loss_trigger=stop_loss_trigger,
+                            stop_loss_drop_pct=stop_loss_drop_pct,
+                            strong_move_pct=strong_move,
+                            btc_direction_confirm=btc_direction_confirm,
+                        )
+                    )
+    return candidates
+
+
 def summarize(
     *,
     candidate: Candidate,
@@ -352,10 +520,17 @@ def summarize(
     return {
         "candidate": candidate.name,
         "entry_elapsed_sec": int(candidate.entry_elapsed_sec),
+        "entry_end_elapsed_sec": (
+            "" if candidate.entry_end_elapsed_sec is None else int(candidate.entry_end_elapsed_sec)
+        ),
         "entry_timeout_sec": int(candidate.entry_timeout_sec),
         "min_leading_ask": candidate.min_leading_ask,
+        "strong_move_pct": "" if candidate.strong_move_pct is None else candidate.strong_move_pct,
         "stop_loss_trigger": (
             "" if candidate.stop_loss_trigger is None else candidate.stop_loss_trigger
+        ),
+        "stop_loss_drop_pct": (
+            "" if candidate.stop_loss_drop_pct is None else candidate.stop_loss_drop_pct
         ),
         "stop_loss_start_remaining_sec": int(candidate.stop_loss_start_remaining_sec),
         "stop_loss_end_remaining_sec": int(candidate.stop_loss_end_remaining_sec),
@@ -375,6 +550,9 @@ def summarize(
         "skip_ask_gap": skips["ask_gap"],
         "skip_leading": skips["leading"],
         "skip_cap": skips["cap"],
+        "skip_btc_missing": skips["btc_missing"],
+        "skip_btc_strength": skips["btc_strength"],
+        "skip_btc_direction": skips["btc_direction"],
     }
 
 
@@ -383,9 +561,12 @@ def write_summary(path: Path, rows: list[dict[str, object]]) -> None:
     fields = [
         "candidate",
         "entry_elapsed_sec",
+        "entry_end_elapsed_sec",
         "entry_timeout_sec",
         "min_leading_ask",
+        "strong_move_pct",
         "stop_loss_trigger",
+        "stop_loss_drop_pct",
         "stop_loss_start_remaining_sec",
         "stop_loss_end_remaining_sec",
         "max_entry_price",
@@ -404,6 +585,9 @@ def write_summary(path: Path, rows: list[dict[str, object]]) -> None:
         "skip_ask_gap",
         "skip_leading",
         "skip_cap",
+        "skip_btc_missing",
+        "skip_btc_strength",
+        "skip_btc_direction",
     ]
     with path.open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fields)
@@ -432,6 +616,7 @@ def write_trades(path: Path, trades: list[Trade]) -> None:
         "realized_pnl",
         "hold_pnl",
         "false_stop",
+        "btc_move_pct",
     ]
     with path.open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fields)
@@ -457,8 +642,31 @@ def write_trades(path: Path, trades: list[Trade]) -> None:
                     "realized_pnl": round(trade.realized_pnl, 6),
                     "hold_pnl": round(trade.hold_pnl, 6),
                     "false_stop": int(trade.false_stop),
+                    "btc_move_pct": (
+                        "" if trade.btc_move_pct is None else round(trade.btc_move_pct, 6)
+                    ),
                 }
             )
+
+
+def _parse_float_list(raw: Optional[str]) -> Optional[list[float]]:
+    if raw is None:
+        return None
+    return [float(part) for part in raw.split(",") if part]
+
+
+def _parse_optional_float_list(raw: Optional[str]) -> Optional[list[Optional[float]]]:
+    if raw is None:
+        return None
+    values: list[Optional[float]] = []
+    for part in raw.split(","):
+        if not part:
+            continue
+        if part.lower() in {"none", "null", "off"}:
+            values.append(None)
+        else:
+            values.append(float(part))
+    return values
 
 
 def run_report(
@@ -467,44 +675,68 @@ def run_report(
     summary_out: Path,
     trades_dir: Path,
     trade_candidate_names: set[str],
-    stop_loss_start_remaining_sec: float = 60.0,
-    stop_loss_end_remaining_sec: float = 45.0,
+    stop_loss_start_remaining_sec: float = 55.0,
+    stop_loss_end_remaining_sec: float = 40.0,
     entry_timeout_sec: float = 0.0,
     max_entry_price: float = 0.75,
+    max_entry_values: Optional[list[float]] = None,
+    min_leading_values: Optional[list[float]] = None,
     entry_buffer_ticks: float = 0.0,
     stop_loss_buffer_ticks: float = 0.0,
     elapsed_values: Optional[list[float]] = None,
+    entry_end_elapsed_sec: Optional[float] = None,
+    strong_move_values: Optional[list[Optional[float]]] = None,
+    btc_direction_confirm: bool = False,
+    stop_loss_drop_pct: Optional[float] = None,
 ) -> list[dict[str, object]]:
     windows = _load_windows(jsonl)
+    window_indexes = build_window_indexes(windows)
     summary_rows: list[dict[str, object]] = []
-    base_candidates = default_candidates()
-    if elapsed_values is not None:
-        base_candidates = [
-            Candidate(
-                name=f"custom_{int(elapsed):03d}_l062_sl035",
-                entry_elapsed_sec=elapsed,
-                min_leading_ask=0.62,
-                stop_loss_trigger=0.35,
-            )
-            for elapsed in elapsed_values
-        ]
+    custom_grid = any(
+        value is not None
+        for value in (
+            elapsed_values,
+            min_leading_values,
+            max_entry_values,
+            entry_end_elapsed_sec,
+            strong_move_values,
+            stop_loss_drop_pct,
+        )
+    ) or btc_direction_confirm
+    if custom_grid:
+        base_candidates = _build_custom_candidates(
+            elapsed_values=elapsed_values or [120.0],
+            min_leading_values=min_leading_values or [0.62],
+            max_entry_values=max_entry_values or [max_entry_price],
+            strong_move_values=strong_move_values or [None],
+            entry_end_elapsed_sec=entry_end_elapsed_sec,
+            btc_direction_confirm=btc_direction_confirm,
+            stop_loss_trigger=None if stop_loss_drop_pct is not None else 0.35,
+            stop_loss_drop_pct=stop_loss_drop_pct,
+        )
+    else:
+        base_candidates = default_candidates()
     for base_candidate in base_candidates:
         candidate = Candidate(
             name=base_candidate.name,
             entry_elapsed_sec=base_candidate.entry_elapsed_sec,
+            entry_end_elapsed_sec=base_candidate.entry_end_elapsed_sec,
             min_leading_ask=base_candidate.min_leading_ask,
             stop_loss_trigger=base_candidate.stop_loss_trigger,
+            stop_loss_drop_pct=base_candidate.stop_loss_drop_pct,
             entry_timeout_sec=entry_timeout_sec,
+            strong_move_pct=base_candidate.strong_move_pct,
+            btc_direction_confirm=base_candidate.btc_direction_confirm,
             stop_loss_start_remaining_sec=stop_loss_start_remaining_sec,
             stop_loss_end_remaining_sec=stop_loss_end_remaining_sec,
-            max_entry_price=max_entry_price,
+            max_entry_price=base_candidate.max_entry_price if custom_grid else max_entry_price,
             min_ask_gap=base_candidate.min_ask_gap,
             min_sell_price=base_candidate.min_sell_price,
             entry_ask_level=base_candidate.entry_ask_level,
             entry_buffer_ticks=entry_buffer_ticks,
             stop_loss_buffer_ticks=stop_loss_buffer_ticks,
         )
-        trades, skips = backtest_candidate(windows, candidate)
+        trades, skips = backtest_indexed_candidate(window_indexes, candidate)
         summary_rows.append(
             summarize(
                 candidate=candidate,
@@ -558,13 +790,13 @@ def main() -> None:
     parser.add_argument(
         "--stop-loss-start-remaining",
         type=float,
-        default=60.0,
+        default=55.0,
         help="Stop-loss window start, expressed as remaining seconds",
     )
     parser.add_argument(
         "--stop-loss-end-remaining",
         type=float,
-        default=45.0,
+        default=40.0,
         help="Stop-loss window end, expressed as remaining seconds",
     )
     parser.add_argument(
@@ -577,6 +809,16 @@ def main() -> None:
         "--max-entry-price",
         type=float,
         default=0.75,
+    )
+    parser.add_argument(
+        "--max-entry-values",
+        default=None,
+        help="Comma-separated max entry caps for custom grids, e.g. 0.72,0.74,0.76",
+    )
+    parser.add_argument(
+        "--min-leading-values",
+        default=None,
+        help="Comma-separated min leading asks for custom grids, e.g. 0.60,0.62,0.64",
     )
     parser.add_argument(
         "--entry-buffer-ticks",
@@ -595,13 +837,36 @@ def main() -> None:
         default=None,
         help="Comma-separated custom entry elapsed seconds; uses current crowd defaults",
     )
+    parser.add_argument(
+        "--entry-end-elapsed",
+        type=float,
+        default=None,
+        help="End of dynamic entry scan band, expressed as elapsed seconds",
+    )
+    parser.add_argument(
+        "--strong-move-values",
+        default=None,
+        help="Comma-separated BTC open-to-now thresholds in percent; use none to disable",
+    )
+    parser.add_argument(
+        "--btc-direction-confirm",
+        action="store_true",
+        help="Require the Polymarket leading side to match BTC open-to-now direction",
+    )
+    parser.add_argument(
+        "--stop-loss-drop-pct",
+        type=float,
+        default=None,
+        help="Use entry_price * (1 - drop_pct) stop trigger instead of a fixed trigger",
+    )
     args = parser.parse_args()
     if args.stop_loss_start_remaining <= args.stop_loss_end_remaining:
         parser.error("--stop-loss-start-remaining must be greater than --stop-loss-end-remaining")
 
-    elapsed_values = None
-    if args.elapsed_values:
-        elapsed_values = [float(part) for part in args.elapsed_values.split(",") if part]
+    elapsed_values = _parse_float_list(args.elapsed_values)
+    min_leading_values = _parse_float_list(args.min_leading_values)
+    max_entry_values = _parse_float_list(args.max_entry_values)
+    strong_move_values = _parse_optional_float_list(args.strong_move_values)
 
     rows = run_report(
         args.jsonl,
@@ -612,9 +877,15 @@ def main() -> None:
         stop_loss_end_remaining_sec=args.stop_loss_end_remaining,
         entry_timeout_sec=args.entry_timeout_sec,
         max_entry_price=args.max_entry_price,
+        max_entry_values=max_entry_values,
+        min_leading_values=min_leading_values,
         entry_buffer_ticks=args.entry_buffer_ticks,
         stop_loss_buffer_ticks=args.stop_loss_buffer_ticks,
         elapsed_values=elapsed_values,
+        entry_end_elapsed_sec=args.entry_end_elapsed,
+        strong_move_values=strong_move_values,
+        btc_direction_confirm=args.btc_direction_confirm,
+        stop_loss_drop_pct=args.stop_loss_drop_pct,
     )
     print("Backtest input:", args.jsonl)
     print("Windows:", rows[0]["windows"] if rows else 0)

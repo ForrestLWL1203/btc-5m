@@ -108,18 +108,15 @@ params:
 ```yaml
 strategy:
   type: crowd_m1
-  entry_elapsed_sec: 180
-  entry_timeout_sec: 5
+  entry_start_elapsed_sec: 45
+  entry_end_elapsed_sec: 90
   min_ask_gap: 0.0
-  min_leading_ask: 0.64
-  max_entry_price: 0.80
+  min_leading_ask: 0.65
+  max_entry_price: 0.76
   btc_direction_confirm: true
-  btc_price_feed_source: binance
-  btc_reverse_filter:
-    enabled: true
-    lookback_sec: 20
-    # Unit is percent: 0.02 means 0.02%, not 2%.
-    min_reverse_move_pct: 0.02
+  # Unit is percent: 0.04 means 0.04%, not 4%.
+  strong_move_pct: 0.04
+  btc_price_feed_source: coinbase
 
 params:
   amount: 1.0
@@ -128,9 +125,9 @@ params:
   max_entries_per_window: 1
   stop_loss:
     enabled: true
-    trigger_price: 0.40
-    start_remaining_sec: 60
-    end_remaining_sec: 45
+    trigger_drop_pct: 0.35
+    start_remaining_sec: 55
+    end_remaining_sec: 40
     sell_bid_level: 10
     retry_count: 3
     min_sell_price: 0.20
@@ -138,34 +135,29 @@ params:
 
 Rules:
 
-- At 180s after open, buy the higher-best-ask Polymarket side only if the
-  leading ask is at least 0.64; gap requirement is disabled with
+- Between 45s and 90s after open, buy the higher-best-ask Polymarket side only
+  if the leading ask is at least 0.65; gap requirement is disabled with
   `min_ask_gap=0.0`.
 - Require BTC direction confirmation: the selected Polymarket side must match
-  BTC's move from the 5-minute window open to entry.
-- Use a BTC recent-reverse soft filter: skip UP if BTC fell at least 0.02% over
-  the last 20s, and skip DOWN if BTC rose at least 0.02% over the last 20s.
-- `btc_reverse_filter.min_reverse_move_pct` is in percent units: `0.02` means
-  `0.02%`, not `2%`.
-- The reverse filter reads BTC history from Binance WS by default. Polymarket
-  RTDS remains available as a fallback source option, but it is not the active
-  default after stale-feed behavior was observed in dry-run.
-- Reverse-filter checks log `BTC_REVERSE_FILTER_CHECK` once per
-  `(history_ready, triggered)` state per window. Polymarket RTDS ignores
-  malformed/non-finite values, preserves inner batch item symbols, and appends
-  ordered ticks on the hot path.
+  BTC's move from the 5-minute window open to entry, and the absolute BTC move
+  must be at least `strong_move_pct=0.04%`. There is no 10-second persistence
+  lookback and no `min_move_ratio` requirement.
+- The BTC price feed uses Coinbase ticker WS by default for US VPS latency
+  tests. Binance WS remains available via `btc_price_feed_source: binance`.
+  Polymarket RTDS remains available as a fallback source option, but it is not
+  the active default after stale-feed behavior was observed in dry-run.
 - Use existing target-leg order-book depth gating; do not use backtest-only L5
   price proxies for live execution.
-- Reject candidates whose leading ask is above `max_entry_price=0.80` before
+- Reject candidates whose leading ask is above `max_entry_price=0.76` before
   entering the depth/FAK pipeline.
-- Entry scans the target-leg order book up to `entry_ask_level=10`, skipping
-  level 1 for fillability and stopping at the first level whose cumulative
-  depth covers the order amount.
+- Entry scans the target-leg order book from level 1 up to
+  `entry_ask_level=10`, stopping at the first level whose cumulative depth
+  covers the order amount.
 - Selected entry ask must stay within 0.04 of target-leg best ask and at or
-  below `max_entry_price=0.80`.
+  below `max_entry_price=0.76`.
 - Entry is event-driven: UP or DOWN Polymarket WS updates refresh the cached
-  two-leg snapshot and can trigger entry immediately inside the 5s entry window;
-  the 1s snapshot loop is only a fallback.
+  two-leg snapshot and can trigger entry immediately inside the 45s-90s entry
+  band; the 1s snapshot loop is only a fallback.
 - Entry requires both UP and DOWN best-ask caches to be fresh; stale cross-leg
   books are skipped before direction selection.
 - Entry logs include UP/DOWN best-ask cache age for book freshness validation.
@@ -179,7 +171,7 @@ Rules:
 Stop-loss when enabled:
 
 - Entries below 0.45 do not use stop-loss.
-- Trigger price is `max(min_sell_price, trigger_price=0.40)`.
+- Trigger price is `max(min_sell_price, entry_avg_price * 0.65)`.
 - Active only while `start_remaining_sec >= remaining >= end_remaining_sec`.
 - Uses held-leg bid book, skips level 1, and defaults to scanning up to bid
   level 10.
