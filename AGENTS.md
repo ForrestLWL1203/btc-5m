@@ -125,7 +125,7 @@ Experimental config: `crowd_m1_dry.yaml`.
 
 Runtime behavior:
 
-- At `entry_elapsed_sec=180`, compare current UP and DOWN best asks; use
+- At `entry_elapsed_sec=170`, compare current UP and DOWN best asks; use
   `entry_timeout_sec=5` to avoid late attach entries.
 - Buy the higher-best-ask side only if its leading ask is at least
   `min_leading_ask=0.65`; `min_ask_gap=0.0` disables a gap requirement.

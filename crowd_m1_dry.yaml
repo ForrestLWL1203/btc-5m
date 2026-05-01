@@ -4,7 +4,7 @@ market:
 
 strategy:
   type: crowd_m1
-  entry_elapsed_sec: 180
+  entry_elapsed_sec: 170
   entry_timeout_sec: 5
   min_ask_gap: 0.0
   min_leading_ask: 0.65

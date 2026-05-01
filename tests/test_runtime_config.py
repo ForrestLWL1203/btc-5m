@@ -66,7 +66,7 @@ def test_preset_config_loads_crowd_m1_yaml():
     cfg = preset_config("crowd_m1")
     assert cfg["market"]["asset"] == "btc"
     assert cfg["strategy"]["type"] == "crowd_m1"
-    assert cfg["strategy"]["entry_elapsed_sec"] == pytest.approx(180)
+    assert cfg["strategy"]["entry_elapsed_sec"] == pytest.approx(170)
     assert cfg["strategy"]["entry_timeout_sec"] == pytest.approx(5)
     assert cfg["strategy"]["min_ask_gap"] == pytest.approx(0.0)
     assert cfg["strategy"]["min_leading_ask"] == pytest.approx(0.65)

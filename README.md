@@ -129,7 +129,7 @@ Config:
 
 `crowd_m1` is a simple dry-run candidate:
 
-- At 180s after window open, compare UP and DOWN best ask; the runtime entry
+- At 170s after window open, compare UP and DOWN best ask; the runtime entry
   timeout is 5s to avoid late attach entries.
 - Buy the higher-best-ask side only when the leading ask is at least `0.65`;
   `min_ask_gap=0.0` disables a gap requirement.
