@@ -66,25 +66,29 @@ def test_preset_config_loads_crowd_m1_yaml():
     cfg = preset_config("crowd_m1")
     assert cfg["market"]["asset"] == "btc"
     assert cfg["strategy"]["type"] == "crowd_m1"
-    assert cfg["strategy"]["entry_start_elapsed_sec"] == pytest.approx(45)
-    assert cfg["strategy"]["entry_end_elapsed_sec"] == pytest.approx(90)
+    assert cfg["strategy"]["entry_start_elapsed_sec"] == pytest.approx(135)
+    assert cfg["strategy"]["entry_end_elapsed_sec"] == pytest.approx(180)
     assert cfg["strategy"]["min_ask_gap"] == pytest.approx(0.0)
     assert cfg["strategy"]["min_leading_ask"] == pytest.approx(0.64)
     assert cfg["strategy"]["max_entry_price"] == pytest.approx(0.74)
     assert cfg["strategy"]["btc_direction_confirm"] is True
     assert cfg["strategy"]["btc_direction_deadband_pct"] == pytest.approx(0.015)
-    assert cfg["strategy"]["strong_move_pct"] == pytest.approx(0.04)
+    assert cfg["strategy"]["strong_move_pct"] == pytest.approx(0.05)
     assert "persistence_sec" not in cfg["strategy"]
     assert "min_move_ratio" not in cfg["strategy"]
     assert cfg["strategy"]["btc_price_feed_source"] == "binance"
     assert cfg["params"]["entry_ask_level"] == 10
+    assert cfg["params"]["replay_logging"]["enabled"] is True
+    assert cfg["params"]["replay_logging"]["entry_sample_interval_ms"] == 1000
+    assert cfg["params"]["replay_logging"]["stop_sample_interval_ms"] == 1000
     assert "low_price_threshold" not in cfg["params"]
     assert "low_price_entry_ask_level" not in cfg["params"]
     assert cfg["params"]["stop_loss"]["enabled"] is True
     assert cfg["params"]["stop_loss"]["trigger_drop_pct"] == pytest.approx(0.35)
-    assert cfg["params"]["stop_loss"]["trigger_price"] == pytest.approx(0.20)
-    assert cfg["params"]["stop_loss"]["start_remaining_sec"] == pytest.approx(65)
-    assert cfg["params"]["stop_loss"]["end_remaining_sec"] == pytest.approx(40)
+    assert "trigger_price" not in cfg["params"]["stop_loss"]
+    assert cfg["params"]["stop_loss"]["start_remaining_sec"] == pytest.approx(60)
+    assert cfg["params"]["stop_loss"]["end_remaining_sec"] == pytest.approx(20)
+    assert cfg["params"]["stop_loss"]["min_sell_price"] == pytest.approx(0.15)
 
 
 def test_build_runtime_config_requires_exactly_one_source():

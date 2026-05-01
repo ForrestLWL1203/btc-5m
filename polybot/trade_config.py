@@ -21,7 +21,7 @@ class TradeConfig:
     consecutive_loss_pause_windows: int = 2
     daily_loss_pause_windows: int = 5
     stop_loss_enabled: bool = False
-    stop_loss_trigger_price: float = 0.38
+    stop_loss_trigger_price: Optional[float] = 0.38
     stop_loss_trigger_drop_pct: Optional[float] = None
     stop_loss_disable_below_entry_price: float = 0.45
     stop_loss_start_remaining_sec: float = 120.0
@@ -29,6 +29,9 @@ class TradeConfig:
     stop_loss_sell_bid_level: int = 10
     stop_loss_retry_count: int = 3
     stop_loss_min_sell_price: float = 0.20
+    replay_logging_enabled: bool = False
+    replay_entry_sample_interval_sec: float = 1.0
+    replay_stop_sample_interval_sec: float = 1.0
 
     def amount_for_signal_strength(self, signal_strength: Optional[float]) -> float:
         """Return configured stake size for signal strength."""

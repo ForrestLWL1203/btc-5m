@@ -5,8 +5,8 @@
 Polymarket BTC 5-minute UP/DOWN bot. Status: live-capable.
 
 Current rule: BTC 5-minute only. `paired_window` is the maintained live-capable
-runtime strategy. `crowd_m1` is an explicitly requested experimental dry-run
-runtime strategy for VPS testing. Do not restore historical strategies,
+runtime strategy. `crowd_m1` is an explicitly requested experimental runtime
+strategy for VPS testing. Do not restore historical strategies,
 ETH/multi-timeframe support, conservative configs, TP, reversal, re-entry,
 dynamic strength caps, early-entry bypass, stop-loss multiplier compatibility,
 or theoretical `1 - up_price` execution gating unless the user explicitly asks
@@ -126,14 +126,14 @@ Experimental config: `crowd_m1_dry.yaml`.
 
 Runtime behavior:
 
-- Between `entry_start_elapsed_sec=45` and `entry_end_elapsed_sec=90`, watch
+- Between `entry_start_elapsed_sec=135` and `entry_end_elapsed_sec=180`, watch
   BTC and Polymarket event-driven snapshots. Entry can trigger as soon as BTC
   shows a strong open-to-current move.
 - Buy the higher-best-ask side only if its leading ask is at least
   `min_leading_ask=0.64`; `min_ask_gap=0.0` disables a gap requirement.
 - Require BTC direction confirmation: the selected Polymarket side must match
   BTC's move from the 5-minute window open to entry. Dynamic entry requires
-  `strong_move_pct=0.04%`; it no longer requires a 10-second persistence
+  `strong_move_pct=0.05%`; it no longer requires a 10-second persistence
   lookback or `min_move_ratio`.
 - The BTC price feed uses Binance trade WS by default. Recent live probes showed
   Polymarket RTDS was much closer to Binance than Coinbase. Coinbase and
@@ -151,20 +151,25 @@ Runtime behavior:
 - Reject entries whose selected ask is above `max_entry_price=0.74` or more
   than `0.04` above target-leg best ask.
 - Entry is event-driven: UP or DOWN Polymarket WS updates refresh the cached
-  two-leg snapshot and can trigger entry immediately inside the 45s-90s
+  two-leg snapshot and can trigger entry immediately inside the 135s-180s
   dynamic entry band; the 1s snapshot loop remains only as a fallback.
 - Entry requires both UP and DOWN best-ask caches to be fresh; stale cross-leg
   books are skipped before direction selection.
 - Entry logs include UP/DOWN best-ask cache age for book freshness validation.
+- Dry-run replay logging is enabled for `crowd_m1` and hard-gated by
+  `dry_run`; live runs do not emit replay sample records. Dry runs emit compact
+  `ENTRY_REPLAY_SAMPLE` and `STOP_REPLAY_SAMPLE` records at 1s intervals for
+  later parameter replay.
 - Crowd entry `signal_price` is the leading ask, and `active_theta_pct` remains
   empty because BTC theta is not used.
 - Dry-run BUY uses the same depth quote selected by the entry scan and does not
   add simulated buy latency or extra ticks. Stop-loss dry-run still simulates
   sell-side FAK latency and a tick buffer.
-- Stop-loss is enabled only while remaining time is `[65s,40s]`, with dynamic
+- Stop-loss is enabled only while remaining time is `[60s,20s]`, with dynamic
   trigger `max(min_sell_price, entry_avg_price * 0.65)`, i.e. a 35% drop from
-  actual entry price. `trigger_price=0.20` is kept only to avoid an implicit
-  loader fallback while `trigger_drop_pct` is active.
+  actual entry price. Bids below `min_sell_price=0.15` are not used for
+  stop-loss sells. Fixed `trigger_price` is not used while `trigger_drop_pct`
+  is active.
 - After BUY fill, held-token WS updates are ignored until 5s before the
   stop-loss window; prewarm logs held-leg bid-book age, and active-window
   held-token WS updates trigger stop-loss checks immediately. The monitor loop
@@ -209,7 +214,7 @@ Tests:
 env -u ALL_PROXY -u all_proxy -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy pytest -q
 ```
 
-Expected suite size after latest crowd/backtest updates: 188 tests.
+Expected suite size after dry-run replay logging updates: 213 tests.
 
 VPS bootstrap:
 

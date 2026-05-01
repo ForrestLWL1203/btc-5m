@@ -180,6 +180,11 @@ class TestBuildTradeConfig:
                     {"threshold": 2.0, "amount": 15.0},
                 ],
                 "max_slippage_from_best_ask": 0.04,
+                "replay_logging": {
+                    "enabled": True,
+                    "entry_sample_interval_ms": 500,
+                    "stop_sample_interval_ms": 1500,
+                },
                 "stop_loss": {
                     "enabled": True,
                     "trigger_price": 0.38,
@@ -208,6 +213,9 @@ class TestBuildTradeConfig:
         assert tc.base_entry_ask_level() == 1
         assert tc.amount_tiers == [(2.0, 15.0)]
         assert tc.max_slippage_from_best_ask == pytest.approx(0.04)
+        assert tc.replay_logging_enabled is True
+        assert tc.replay_entry_sample_interval_sec == pytest.approx(0.5)
+        assert tc.replay_stop_sample_interval_sec == pytest.approx(1.5)
         assert tc.amount_for_signal_strength(1.9) == pytest.approx(10.0)
         assert tc.amount_for_signal_strength(2.0) == pytest.approx(15.0)
         assert tc.stop_loss_enabled is True
@@ -231,6 +239,20 @@ class TestBuildTradeConfig:
     def test_rounds_negative_means_infinite(self):
         tc = build_trade_config({"rounds": -1})
         assert tc.rounds is None
+
+    def test_dynamic_stop_loss_without_fixed_trigger_keeps_trigger_price_empty(self):
+        tc = build_trade_config({
+            "params": {
+                "stop_loss": {
+                    "enabled": True,
+                    "trigger_drop_pct": 0.35,
+                    "min_sell_price": 0.20,
+                },
+            },
+        })
+
+        assert tc.stop_loss_trigger_drop_pct == pytest.approx(0.35)
+        assert tc.stop_loss_trigger_price is None
 
 
 # ── Integration: full YAML round-trip ────────────────────────────────────────

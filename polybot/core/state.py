@@ -75,6 +75,8 @@ class MonitorState:
     stop_replay_max_bid_shares_available: float = 0.0
     stop_replay_min_best_bid_age_ms: Optional[int] = None
     stop_replay_max_best_bid_age_ms: Optional[int] = None
+    last_entry_replay_sample_logged_at: float = 0.0
+    last_stop_replay_sample_logged_at: float = 0.0
     trade_lock: asyncio.Lock = None  # prevents concurrent buy/sell from WS callbacks
     started: bool = False  # set True when window officially starts — prevents pre-start trades
     fatal_error: Optional[str] = None  # unrecoverable runtime error that must stop the process

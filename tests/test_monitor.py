@@ -462,6 +462,92 @@ async def test_stop_loss_logs_when_bid_above_trigger(caplog):
 
 
 @pytest.mark.asyncio
+async def test_stop_loss_dry_run_logs_stop_replay_sample(caplog):
+    now = time.time()
+    window = _make_window(start_epoch=int(now) - 240, end_epoch=int(now) + 60)
+    state = _make_state(
+        bought=True,
+        holding_size=1.7,
+        entry_amount=1.0,
+        entry_price=0.66,
+        entry_avg_price=0.66,
+    )
+    ws = MagicMock()
+    ws.get_latest_bid_levels_with_size.return_value = _bid_book(0.56, 20)
+    ws.get_latest_best_bid_age.return_value = 0.01
+    trade_config = _tc(
+        stop_loss_enabled=True,
+        stop_loss_start_remaining_sec=120,
+        stop_loss_end_remaining_sec=15,
+        stop_loss_trigger_price=0.38,
+        replay_logging_enabled=True,
+    )
+
+    with patch("polybot.trading.fak_quotes.get_tick_size", return_value=0.01):
+        with caplog.at_level(logging.INFO, logger="polybot.trading.monitor"):
+            await _maybe_handle_stop_loss(
+                window,
+                state,
+                ws,
+                "down-token-123",
+                True,
+                trade_config,
+                "down",
+            )
+
+    samples = [
+        record.event_data
+        for record in caplog.records
+        if getattr(record, "event_data", {}).get("action") == "STOP_REPLAY_SAMPLE"
+    ]
+    assert len(samples) == 1
+    assert samples[0]["decision"] == "hold"
+    assert samples[0]["reason"] == "bid_above_stop"
+    assert samples[0]["best_bid"] == pytest.approx(0.56)
+
+
+@pytest.mark.asyncio
+async def test_stop_loss_live_does_not_log_stop_replay_sample(caplog):
+    now = time.time()
+    window = _make_window(start_epoch=int(now) - 240, end_epoch=int(now) + 60)
+    state = _make_state(
+        bought=True,
+        holding_size=1.7,
+        entry_amount=1.0,
+        entry_price=0.66,
+        entry_avg_price=0.66,
+    )
+    ws = MagicMock()
+    ws.get_latest_bid_levels_with_size.return_value = _bid_book(0.56, 20)
+    ws.get_latest_best_bid_age.return_value = 0.01
+    trade_config = _tc(
+        stop_loss_enabled=True,
+        stop_loss_start_remaining_sec=120,
+        stop_loss_end_remaining_sec=15,
+        stop_loss_trigger_price=0.38,
+        replay_logging_enabled=True,
+    )
+
+    with patch("polybot.trading.fak_quotes.get_tick_size", return_value=0.01), \
+         patch("polybot.trading.monitor.place_fak_stop_loss_sell", new_callable=AsyncMock):
+        with caplog.at_level(logging.INFO, logger="polybot.trading.monitor"):
+            await _maybe_handle_stop_loss(
+                window,
+                state,
+                ws,
+                "down-token-123",
+                False,
+                trade_config,
+                "down",
+            )
+
+    assert all(
+        getattr(record, "event_data", {}).get("action") != "STOP_REPLAY_SAMPLE"
+        for record in caplog.records
+    )
+
+
+@pytest.mark.asyncio
 async def test_stop_loss_insufficient_depth_logs_once_per_window(caplog):
     now = time.time()
     window = _make_window(start_epoch=int(now) - 240, end_epoch=int(now) + 60)
@@ -720,6 +806,86 @@ async def test_on_price_crowd_strategy_accepts_down_token_update_for_entry_check
         down_best_ask_age_sec=0.0,
     )
     strategy.should_buy.assert_called_once_with(pytest.approx(0.62), state)
+
+
+@pytest.mark.asyncio
+async def test_on_price_dry_run_logs_entry_replay_sample_on_strategy_skip(caplog):
+    window = _make_window()
+    state = _make_state()
+    strategy = _mock_crowd_strategy()
+    strategy._up_best_ask = 0.39
+    strategy._down_best_ask = 0.63
+    ws = MagicMock()
+    ws.get_latest_price.side_effect = lambda token: {
+        "up-token-123": 0.38,
+        "down-token-456": 0.62,
+    }.get(token)
+    ws.get_latest_best_ask.side_effect = lambda token: {
+        "up-token-123": 0.39,
+        "down-token-456": 0.63,
+    }.get(token)
+
+    update = _make_update("down-token-456", midpoint=0.62)
+    trade_config = _tc(replay_logging_enabled=True)
+
+    with caplog.at_level(logging.INFO, logger="polybot.trading.monitor"):
+        await _on_price_update(
+            update,
+            window,
+            state,
+            ws=ws,
+            dry_run=True,
+            trade_config=trade_config,
+            strategy=strategy,
+            side="up",
+        )
+
+    samples = [
+        record.event_data
+        for record in caplog.records
+        if getattr(record, "event_data", {}).get("action") == "ENTRY_REPLAY_SAMPLE"
+    ]
+    assert len(samples) == 1
+    assert samples[0]["decision"] == "skip"
+    assert samples[0]["reason"] == "strategy_filter"
+    assert samples[0]["leading_side"] == "DOWN"
+    assert samples[0]["leading_ask"] == pytest.approx(0.63)
+
+
+@pytest.mark.asyncio
+async def test_on_price_live_does_not_log_entry_replay_sample(caplog):
+    window = _make_window()
+    state = _make_state()
+    strategy = _mock_crowd_strategy()
+    ws = MagicMock()
+    ws.get_latest_price.side_effect = lambda token: {
+        "up-token-123": 0.38,
+        "down-token-456": 0.62,
+    }.get(token)
+    ws.get_latest_best_ask.side_effect = lambda token: {
+        "up-token-123": 0.39,
+        "down-token-456": 0.63,
+    }.get(token)
+
+    update = _make_update("down-token-456", midpoint=0.62)
+    trade_config = _tc(replay_logging_enabled=True)
+
+    with caplog.at_level(logging.INFO, logger="polybot.trading.monitor"):
+        await _on_price_update(
+            update,
+            window,
+            state,
+            ws=ws,
+            dry_run=False,
+            trade_config=trade_config,
+            strategy=strategy,
+            side="up",
+        )
+
+    assert all(
+        getattr(record, "event_data", {}).get("action") != "ENTRY_REPLAY_SAMPLE"
+        for record in caplog.records
+    )
 
 
 @pytest.mark.asyncio

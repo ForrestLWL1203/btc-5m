@@ -1,12 +1,12 @@
 # CLAUDE.md - Current Runtime State
 
 Maintained live-capable runtime strategy: `paired_window`. Experimental
-dry-run runtime strategy: `crowd_m1`. One active market: BTC 5-minute.
+runtime strategy: `crowd_m1`. One active market: BTC 5-minute.
 
 Historical strategy configs/scripts/tests, non-BTC/non-5m series support, and
 legacy stop-loss multiplier compatibility have been removed. Treat
 `paired_window_early_entry_dry.yaml` as the maintained live-capable runtime
-config. `crowd_m1_dry.yaml` is for the explicitly requested M1 dry-run
+config. `crowd_m1_dry.yaml` is for the explicitly requested M1 runtime
 experiment. Filenames containing `dry` do not control dry/live mode; `--dry`
 does.
 
@@ -109,14 +109,14 @@ params:
 ```yaml
 strategy:
   type: crowd_m1
-  entry_start_elapsed_sec: 45
-  entry_end_elapsed_sec: 90
+  entry_start_elapsed_sec: 135
+  entry_end_elapsed_sec: 180
   min_ask_gap: 0.0
   min_leading_ask: 0.64
   max_entry_price: 0.74
   btc_direction_confirm: true
-  # Unit is percent: 0.04 means 0.04%, not 4%.
-  strong_move_pct: 0.04
+  # Unit is percent: 0.05 means 0.05%, not 5%.
+  strong_move_pct: 0.05
   btc_price_feed_source: binance
 
 params:
@@ -124,25 +124,28 @@ params:
   entry_ask_level: 10
   max_slippage_from_best_ask: 0.04
   max_entries_per_window: 1
+  replay_logging:
+    enabled: true
+    entry_sample_interval_ms: 1000
+    stop_sample_interval_ms: 1000
   stop_loss:
     enabled: true
     trigger_drop_pct: 0.35
-    trigger_price: 0.20
-    start_remaining_sec: 65
-    end_remaining_sec: 40
+    start_remaining_sec: 60
+    end_remaining_sec: 20
     sell_bid_level: 10
     retry_count: 3
-    min_sell_price: 0.20
+    min_sell_price: 0.15
 ```
 
 Rules:
 
-- Between 45s and 90s after open, buy the higher-best-ask Polymarket side only
+- Between 135s and 180s after open, buy the higher-best-ask Polymarket side only
   if the leading ask is at least 0.64; gap requirement is disabled with
   `min_ask_gap=0.0`.
 - Require BTC direction confirmation: the selected Polymarket side must match
   BTC's move from the 5-minute window open to entry, and the absolute BTC move
-  must be at least `strong_move_pct=0.04%`. There is no 10-second persistence
+  must be at least `strong_move_pct=0.05%`. There is no 10-second persistence
   lookback and no `min_move_ratio` requirement.
 - The BTC price feed uses Binance trade WS by default. Recent live probes showed
   Polymarket RTDS was much closer to Binance than Coinbase. Coinbase and
@@ -157,11 +160,15 @@ Rules:
 - Selected entry ask must stay within 0.04 of target-leg best ask and at or
   below `max_entry_price=0.74`.
 - Entry is event-driven: UP or DOWN Polymarket WS updates refresh the cached
-  two-leg snapshot and can trigger entry immediately inside the 45s-90s entry
+  two-leg snapshot and can trigger entry immediately inside the 135s-180s entry
   band; the 1s snapshot loop is only a fallback.
 - Entry requires both UP and DOWN best-ask caches to be fresh; stale cross-leg
   books are skipped before direction selection.
 - Entry logs include UP/DOWN best-ask cache age for book freshness validation.
+- Dry-run replay logging is enabled for `crowd_m1` and hard-gated by
+  `dry_run`; live runs do not emit replay sample records. Dry runs emit compact
+  `ENTRY_REPLAY_SAMPLE` and `STOP_REPLAY_SAMPLE` records at 1s intervals for
+  later parameter replay.
 - Crowd entry `signal_price` is the leading ask, and `active_theta_pct` remains
   empty because BTC theta is not used.
 - Dry-run BUY uses the same depth quote selected by the entry scan and does not
@@ -173,8 +180,8 @@ Stop-loss when enabled:
 
 - Entries below 0.45 do not use stop-loss.
 - Trigger price is `max(min_sell_price, entry_avg_price * 0.65)`.
-- `trigger_price=0.20` is kept only to avoid an implicit loader fallback in
-  config/log output while `trigger_drop_pct` is active.
+- Bids below `min_sell_price=0.15` are not used for stop-loss sells.
+- Fixed `trigger_price` is not used while `trigger_drop_pct` is active.
 - Active only while `start_remaining_sec >= remaining >= end_remaining_sec`.
 - Uses held-leg bid book, includes level 1, and defaults to scanning up to bid
   level 10.
@@ -217,7 +224,7 @@ python3.11 run.py --preset enhanced --rounds 3
 env -u ALL_PROXY -u all_proxy -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy pytest -q
 ```
 
-Expected suite size after RTDS/reverse-filter bugfixes: 185 tests.
+Expected suite size after dry-run replay logging updates: 213 tests.
 
 VPS:
 

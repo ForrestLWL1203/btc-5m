@@ -143,6 +143,140 @@ def _record_stop_replay_quote(
     )
 
 
+def _strategy_attr(strategy: Optional[Strategy], name: str, default=None):
+    if strategy is None:
+        return default
+    return getattr(strategy, name, getattr(strategy, f"_{name}", default))
+
+
+def _round_optional(value: Optional[float], digits: int = 4) -> Optional[float]:
+    return round(float(value), digits) if value is not None else None
+
+
+def _should_log_replay_sample(
+    state: MonitorState,
+    *,
+    kind: str,
+    interval_sec: float,
+) -> bool:
+    now = time.time()
+    if kind == "entry":
+        last = state.last_entry_replay_sample_logged_at
+        if last and now - last < interval_sec:
+            return False
+        state.last_entry_replay_sample_logged_at = now
+        return True
+    if kind == "stop":
+        last = state.last_stop_replay_sample_logged_at
+        if last and now - last < interval_sec:
+            return False
+        state.last_stop_replay_sample_logged_at = now
+        return True
+    return False
+
+
+def _log_entry_replay_sample(
+    state: MonitorState,
+    *,
+    window: MarketWindow,
+    strategy: Optional[Strategy],
+    trade_config: TradeConfig,
+    quote: Optional[CapDepthQuote],
+    decision: str,
+    reason: Optional[str] = None,
+) -> None:
+    if not _should_log_replay_sample(
+        state,
+        kind="entry",
+        interval_sec=trade_config.replay_entry_sample_interval_sec,
+    ):
+        return
+    elapsed = max(0.0, time.time() - window.start_epoch)
+    remaining = window.end_epoch - time.time()
+    up_best_ask = _strategy_attr(strategy, "up_best_ask")
+    down_best_ask = _strategy_attr(strategy, "down_best_ask")
+    leading_side = None
+    leading_ask = None
+    if up_best_ask is not None and down_best_ask is not None:
+        leading_side = "UP" if up_best_ask >= down_best_ask else "DOWN"
+        leading_ask = up_best_ask if up_best_ask >= down_best_ask else down_best_ask
+    btc_open = _strategy_attr(strategy, "window_open_btc")
+    btc_now = getattr(_strategy_attr(strategy, "feed"), "latest_price", None)
+    btc_move_pct = (
+        (float(btc_now) / float(btc_open) - 1.0) * 100.0
+        if btc_now is not None and btc_open is not None and btc_open > 0
+        else None
+    )
+    log_event(log, logging.INFO, SIGNAL, {
+        "action": "ENTRY_REPLAY_SAMPLE",
+        "window": window.short_label,
+        "elapsed_sec": round(elapsed, 3),
+        "remaining_sec": round(remaining, 3),
+        "decision": decision,
+        "reason": reason,
+        "leading_side": leading_side,
+        "selected_side": state.target_side.upper() if state.target_side else leading_side,
+        "up_best_ask": _round_optional(up_best_ask),
+        "down_best_ask": _round_optional(down_best_ask),
+        "leading_ask": _round_optional(leading_ask),
+        "ask_gap": _round_optional(abs(up_best_ask - down_best_ask) if up_best_ask is not None and down_best_ask is not None else None),
+        "btc_open": _round_optional(btc_open, 2),
+        "btc_now": _round_optional(btc_now, 2),
+        "btc_move_pct": _round_optional(btc_move_pct, 5),
+        "selected_ask": quote.price if quote is not None else None,
+        "best_ask_level_1": quote.best_ask_level_1 if quote is not None else None,
+        "depth_notional": round(quote.cap_notional, 4) if quote is not None else None,
+        "depth_levels_used": quote.levels_used if quote is not None else None,
+        "depth_enough": quote.enough if quote is not None else None,
+        "best_ask_age_ms": (
+            round(quote.ask_age_sec * 1000)
+            if quote is not None and quote.ask_age_sec is not None
+            else None
+        ),
+        "min_leading_ask": _round_optional(_strategy_attr(strategy, "min_leading_ask")),
+        "max_entry_price": _round_optional(_entry_price_cap(strategy, state)),
+        "strong_move_pct": _round_optional(_strategy_attr(strategy, "strong_move_pct")),
+    })
+
+
+def _log_stop_replay_sample(
+    state: MonitorState,
+    *,
+    window: MarketWindow,
+    trade_config: TradeConfig,
+    side: str,
+    quote: BidDepthQuote,
+    stop_price: float,
+    decision: str,
+    reason: Optional[str] = None,
+) -> None:
+    if not _should_log_replay_sample(
+        state,
+        kind="stop",
+        interval_sec=trade_config.replay_stop_sample_interval_sec,
+    ):
+        return
+    remaining = window.end_epoch - time.time()
+    log_event(log, logging.INFO, TRADE, {
+        "action": "STOP_REPLAY_SAMPLE",
+        "window": window.short_label,
+        "side": side.upper(),
+        "remaining_sec": round(remaining, 3),
+        "decision": decision,
+        "reason": reason,
+        "stop_price": round(stop_price, 4),
+        "best_bid": quote.best_bid_level_1,
+        "selected_bid": quote.price,
+        "price_hint": quote.price_hint,
+        "bid_depth_available": round(quote.shares_available, 4),
+        "bid_levels_used": quote.levels_used,
+        "bid_enough": quote.enough,
+        "shares_to_sell": round(state.holding_size, 6),
+        "min_sell_price": trade_config.stop_loss_min_sell_price,
+        "best_bid_age_ms": round(quote.bid_age_sec * 1000) if quote.bid_age_sec is not None else None,
+    })
+
+
 def _entry_price_cap(
     strategy: Optional[Strategy],
     state: Optional[MonitorState] = None,
@@ -730,6 +864,17 @@ async def _maybe_handle_stop_loss(
         if dry_run:
             _record_stop_replay_quote(state, quote=quote)
             state.stop_replay_missing_or_stale_bid_count += 1
+            if trade_config.replay_logging_enabled:
+                _log_stop_replay_sample(
+                    state,
+                    window=window,
+                    trade_config=trade_config,
+                    side=side,
+                    quote=quote,
+                    stop_price=stop_price,
+                    decision="skip",
+                    reason="missing_or_stale_bid",
+                )
         _log_stop_loss_check(
             state,
             side=side,
@@ -745,6 +890,17 @@ async def _maybe_handle_stop_loss(
     if dry_run:
         _record_stop_replay_quote(state, quote=quote)
     if quote.best_bid_level_1 > stop_price:
+        if dry_run and trade_config.replay_logging_enabled:
+            _log_stop_replay_sample(
+                state,
+                window=window,
+                trade_config=trade_config,
+                side=side,
+                quote=quote,
+                stop_price=stop_price,
+                decision="hold",
+                reason="bid_above_stop",
+            )
         _log_stop_loss_check(
             state,
             side=side,
@@ -760,6 +916,17 @@ async def _maybe_handle_stop_loss(
     if not quote.enough or quote.price is None:
         if dry_run:
             state.stop_replay_insufficient_depth_count += 1
+            if trade_config.replay_logging_enabled:
+                _log_stop_replay_sample(
+                    state,
+                    window=window,
+                    trade_config=trade_config,
+                    side=side,
+                    quote=quote,
+                    stop_price=stop_price,
+                    decision="skip",
+                    reason="insufficient_depth",
+                )
         _log_stop_loss_check(
             state,
             side=side,
@@ -824,6 +991,16 @@ async def _maybe_handle_stop_loss(
     state.stop_loss_attempted = True
     if dry_run:
         state.stop_replay_triggered_count += 1
+        if trade_config.replay_logging_enabled:
+            _log_stop_replay_sample(
+                state,
+                window=window,
+                trade_config=trade_config,
+                side=side,
+                quote=quote,
+                stop_price=stop_price,
+                decision="trigger",
+            )
     log_event(log, logging.INFO, TRADE, {
         "action": "STOP_LOSS_TRIGGERED",
         "side": side.upper(),
@@ -1160,6 +1337,16 @@ async def _attempt_strategy_entry(
         return
 
     if not strategy.should_buy(signal_price, state):
+        if dry_run and trade_config.replay_logging_enabled:
+            _log_entry_replay_sample(
+                state,
+                window=window,
+                strategy=strategy,
+                trade_config=trade_config,
+                quote=None,
+                decision="skip",
+                reason="strategy_filter",
+            )
         return
 
     entry_signal_price = _effective_signal_price(strategy, state, signal_price)
@@ -1183,6 +1370,16 @@ async def _attempt_strategy_entry(
     if dry_run:
         _record_entry_replay_quote(state, leading_ask=entry_signal_price, quote=quote)
     if not quote.enough:
+        if dry_run and trade_config.replay_logging_enabled:
+            _log_entry_replay_sample(
+                state,
+                window=window,
+                strategy=strategy,
+                trade_config=trade_config,
+                quote=quote,
+                decision="skip",
+                reason="insufficient_depth",
+            )
         state.target_entry_price = None
         _log_depth_skip(
             state,
@@ -1205,10 +1402,29 @@ async def _attempt_strategy_entry(
         depth_levels_used=quote.levels_used,
     )
     if not _entry_ask_changed(state, effective_side, quote.price_hint):
+        if dry_run and trade_config.replay_logging_enabled:
+            _log_entry_replay_sample(
+                state,
+                window=window,
+                strategy=strategy,
+                trade_config=trade_config,
+                quote=quote,
+                decision="skip",
+                reason="duplicate_entry_price",
+            )
         state.target_entry_price = None
         return
     if dry_run:
         state.entry_replay_buy_signal_count += 1
+        if trade_config.replay_logging_enabled:
+            _log_entry_replay_sample(
+                state,
+                window=window,
+                strategy=strategy,
+                trade_config=trade_config,
+                quote=quote,
+                decision="buy_signal",
+            )
     state.target_entry_price = quote.price
     log_event(log, logging.INFO, SIGNAL, {
         "action": "BUY_SIGNAL",
@@ -1629,6 +1845,8 @@ async def monitor_window(
     state.last_entry_check_side = None
     state.last_entry_check_best_ask = None
     state.snapshot_entry_check_logged = False
+    state.last_entry_replay_sample_logged_at = 0.0
+    state.last_stop_replay_sample_logged_at = 0.0
     state.started = False
 
     # Check daily reset and risk management before monitoring this window
@@ -1737,7 +1955,19 @@ async def monitor_window(
                     low_price_entry_level=trade_config.low_price_entry_ask_level,
                     max_slippage_from_best_ask=trade_config.max_slippage_from_best_ask,
                 )
+                if dry_run:
+                    _record_entry_replay_quote(state, leading_ask=opening_price, quote=quote)
                 if not quote.enough:
+                    if dry_run and trade_config.replay_logging_enabled:
+                        _log_entry_replay_sample(
+                            state,
+                            window=window,
+                            strategy=strategy,
+                            trade_config=trade_config,
+                            quote=quote,
+                            decision="skip",
+                            reason="insufficient_depth",
+                        )
                     state.target_entry_price = None
                     _log_depth_skip(
                         state,
@@ -1760,8 +1990,29 @@ async def monitor_window(
                         depth_levels_used=quote.levels_used,
                     )
                     if not _entry_ask_changed(state, state.target_side or side, quote.price_hint):
+                        if dry_run and trade_config.replay_logging_enabled:
+                            _log_entry_replay_sample(
+                                state,
+                                window=window,
+                                strategy=strategy,
+                                trade_config=trade_config,
+                                quote=quote,
+                                decision="skip",
+                                reason="duplicate_entry_price",
+                            )
                         state.target_entry_price = None
                     else:
+                        if dry_run:
+                            state.entry_replay_buy_signal_count += 1
+                            if trade_config.replay_logging_enabled:
+                                _log_entry_replay_sample(
+                                    state,
+                                    window=window,
+                                    strategy=strategy,
+                                    trade_config=trade_config,
+                                    quote=quote,
+                                    decision="buy_signal",
+                                )
                         state.target_entry_price = quote.price
                         await _handle_opening_price(
                             window, state, buy_token_id, opening_price, dry_run, trade_config, strategy, state.target_side or side,
@@ -1780,6 +2031,16 @@ async def monitor_window(
                         # Re-resolve token if strategy set target_side during opening buy
                         if state.target_side is not None:
                             buy_token_id, price_token_id = _side_token(window, state.target_side)
+            elif dry_run and trade_config.replay_logging_enabled:
+                _log_entry_replay_sample(
+                    state,
+                    window=window,
+                    strategy=strategy,
+                    trade_config=trade_config,
+                    quote=None,
+                    decision="skip",
+                    reason="strategy_filter",
+                )
     # Monitor until window expires or exit triggered (ws is NOT closed inside)
     next_win = await _monitor_single_window(
         window, state, ws, dry_run, trade_config, strategy, series, side,
@@ -1903,7 +2164,19 @@ async def _on_price_update(
                     low_price_entry_level=trade_config.low_price_entry_ask_level,
                     max_slippage_from_best_ask=trade_config.max_slippage_from_best_ask,
                 )
+                if dry_run:
+                    _record_entry_replay_quote(state, leading_ask=entry_signal_price, quote=quote)
                 if not quote.enough:
+                    if dry_run and trade_config.replay_logging_enabled:
+                        _log_entry_replay_sample(
+                            state,
+                            window=window,
+                            strategy=strategy,
+                            trade_config=trade_config,
+                            quote=quote,
+                            decision="skip",
+                            reason="insufficient_depth",
+                        )
                     state.target_entry_price = None
                     _log_depth_skip(
                         state,
@@ -1926,8 +2199,29 @@ async def _on_price_update(
                     depth_levels_used=quote.levels_used,
                 )
                 if not _entry_ask_changed(state, effective_side, quote.price_hint):
+                    if dry_run and trade_config.replay_logging_enabled:
+                        _log_entry_replay_sample(
+                            state,
+                            window=window,
+                            strategy=strategy,
+                            trade_config=trade_config,
+                            quote=quote,
+                            decision="skip",
+                            reason="duplicate_entry_price",
+                        )
                     state.target_entry_price = None
                     return
+                if dry_run:
+                    state.entry_replay_buy_signal_count += 1
+                    if trade_config.replay_logging_enabled:
+                        _log_entry_replay_sample(
+                            state,
+                            window=window,
+                            strategy=strategy,
+                            trade_config=trade_config,
+                            quote=quote,
+                            decision="buy_signal",
+                        )
                 state.target_entry_price = quote.price
                 log_event(log, logging.INFO, SIGNAL, {
                     "action": "BUY_SIGNAL",
@@ -1981,6 +2275,16 @@ async def _on_price_update(
                     book_ask_preview=quote.preview,
                     price_hint_refresher=_price_hint_refresher(ws, buy_token_id, strategy, trade_config, state),
                     ws=ws,
+                )
+            elif dry_run and trade_config.replay_logging_enabled:
+                _log_entry_replay_sample(
+                    state,
+                    window=window,
+                    strategy=strategy,
+                    trade_config=trade_config,
+                    quote=None,
+                    decision="skip",
+                    reason="strategy_filter",
                 )
             return
 

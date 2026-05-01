@@ -4,8 +4,8 @@ market:
 
 strategy:
   type: crowd_m1
-  entry_start_elapsed_sec: 45
-  entry_end_elapsed_sec: 90
+  entry_start_elapsed_sec: 135
+  entry_end_elapsed_sec: 180
   min_ask_gap: 0.0
   min_leading_ask: 0.64
   max_entry_price: 0.74
@@ -14,8 +14,8 @@ strategy:
   # Unit is percent: 0.015 means 0.015%, not 1.5%.
   btc_direction_deadband_pct: 0.015
   # Dynamic entry only triggers after a strong open-to-current BTC move.
-  # Unit is percent: 0.04 means 0.04%, not 4%.
-  strong_move_pct: 0.04
+  # Unit is percent: 0.05 means 0.05%, not 5%.
+  strong_move_pct: 0.05
   btc_price_feed_source: binance
 
 params:
@@ -23,18 +23,19 @@ params:
   entry_ask_level: 10
   max_slippage_from_best_ask: 0.04
   max_entries_per_window: 1
+  replay_logging:
+    enabled: true
+    entry_sample_interval_ms: 1000
+    stop_sample_interval_ms: 1000
   stop_loss:
     enabled: true
     # Trigger when held bid falls 35% below actual entry price.
     trigger_drop_pct: 0.35
-    # Ignored while trigger_drop_pct is set; keep equal to the sell floor to
-    # avoid misleading fallback values in loaded config/log output.
-    trigger_price: 0.20
-    start_remaining_sec: 65
-    end_remaining_sec: 40
+    start_remaining_sec: 60
+    end_remaining_sec: 20
     sell_bid_level: 10
     retry_count: 3
-    min_sell_price: 0.20
+    min_sell_price: 0.15
 
 risk:
   consecutive_loss_amount: 3.0
