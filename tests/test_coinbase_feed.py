@@ -88,3 +88,42 @@ async def test_coinbase_subscribe_uses_ticker_channel():
         "product_ids": ["BTC-USD"],
         "channel": "ticker",
     }
+
+
+@pytest.mark.asyncio
+async def test_coinbase_fetch_open_at_uses_matching_candle(monkeypatch):
+    feed = CoinbasePriceFeed(product_id="BTC-USD")
+    calls = []
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return [
+                [1777593540, 61000.0, 60900.0, 60950.0, 1.0],
+                [1777593600, 61200.0, 61100.0, 61123.45, 1.0],
+            ]
+
+    class FakeClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def get(self, url, params):
+            calls.append((url, params, self.timeout))
+            return FakeResponse()
+
+    monkeypatch.setattr("polybot.market.coinbase.httpx.AsyncClient", FakeClient)
+
+    price = await feed.fetch_open_at(1777593600)
+
+    assert price == pytest.approx(61123.45)
+    assert feed.price_at_or_before(1777593600) == pytest.approx(61123.45)
+    assert calls[0][0].endswith("/BTC-USD/candles")
+    assert calls[0][1]["granularity"] == 60

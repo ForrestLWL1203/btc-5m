@@ -168,7 +168,9 @@ Config:
   sell-side FAK latency and a tick buffer.
 - Stop-loss is enabled only while remaining time is `[55s,40s]`, with trigger
   `max(min_sell_price, entry_avg_price * 0.65)`, i.e. a 35% drop from actual
-  entry price; otherwise hold to `window.end_epoch`.
+  entry price; `trigger_price=0.20` is present only to avoid an implicit
+  loader fallback while `trigger_drop_pct` is active. Otherwise hold to
+  `window.end_epoch`.
 - After BUY fill, held-token WS updates are ignored until 5s before the
   stop-loss window; prewarm logs held-leg bid-book age, and active-window
   updates can trigger stop-loss immediately.

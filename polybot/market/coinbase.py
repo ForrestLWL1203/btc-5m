@@ -89,19 +89,25 @@ class CoinbasePriceFeed:
                 data = resp.json()
                 if not isinstance(data, list):
                     return None
+                best_row = None
+                best_delta = float("inf")
                 for row in data:
                     if not isinstance(row, list) or len(row) < 4:
                         continue
                     candle_ts = float(row[0])
-                    if abs(candle_ts - epoch) <= 60:
-                        open_price = float(row[3])
-                        self._inject(epoch, open_price)
-                        log.debug(
-                            "CoinbasePriceFeed REST fallback: epoch=%.0f open=%.2f",
-                            epoch,
-                            open_price,
-                        )
-                        return open_price
+                    delta = abs(candle_ts - epoch)
+                    if delta <= 60 and delta < best_delta:
+                        best_row = row
+                        best_delta = delta
+                if best_row is not None:
+                    open_price = float(best_row[3])
+                    self._inject(epoch, open_price)
+                    log.debug(
+                        "CoinbasePriceFeed REST fallback: epoch=%.0f open=%.2f",
+                        epoch,
+                        open_price,
+                    )
+                    return open_price
         except Exception as e:
             log.warning("CoinbasePriceFeed REST candles failed: %s", e)
         return None

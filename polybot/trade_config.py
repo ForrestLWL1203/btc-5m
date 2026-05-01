@@ -12,7 +12,6 @@ class TradeConfig:
     entry_ask_level: int = 1
     low_price_threshold: Optional[float] = None
     low_price_entry_ask_level: Optional[int] = None
-    dynamic_entry_levels: list[tuple[float, int]] = field(default_factory=list)
     max_slippage_from_best_ask: Optional[float] = None
     max_entries_per_window: Optional[int] = None
     rounds: Optional[int] = None  # None = infinite

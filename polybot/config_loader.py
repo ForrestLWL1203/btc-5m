@@ -119,7 +119,6 @@ def build_trade_config(cfg: dict) -> TradeConfig:
             if params.get("low_price_entry_ask_level") is not None
             else None
         ),
-        dynamic_entry_levels=_build_dynamic_entry_levels(params.get("dynamic_entry_levels")),
         max_slippage_from_best_ask=(
             float(params["max_slippage_from_best_ask"])
             if params.get("max_slippage_from_best_ask") is not None
@@ -150,23 +149,6 @@ def _build_amount_tiers(raw: Optional[list[dict]]) -> list[tuple[float, float]]:
         tiers.append((float(threshold), float(amount)))
     tiers.sort(key=lambda pair: pair[0])
     return tiers
-
-
-def _build_dynamic_entry_levels(raw: Optional[list[dict]]) -> list[tuple[float, int]]:
-    """Build sorted best-ask threshold to ask-book level rules."""
-    levels: list[tuple[float, int]] = []
-    if not raw:
-        return levels
-    for item in raw:
-        if not isinstance(item, dict):
-            continue
-        threshold = item.get("leading_ask_max")
-        level = item.get("entry_ask_level")
-        if threshold is None or level is None:
-            continue
-        levels.append((float(threshold), max(1, int(level))))
-    levels.sort(key=lambda pair: pair[0])
-    return levels
 
 
 def _build_stop_loss(raw: Optional[dict]) -> dict:

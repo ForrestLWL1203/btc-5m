@@ -77,14 +77,12 @@ def test_preset_config_loads_crowd_m1_yaml():
     assert "persistence_sec" not in cfg["strategy"]
     assert "min_move_ratio" not in cfg["strategy"]
     assert cfg["strategy"]["btc_price_feed_source"] == "coinbase"
-    assert "btc_reverse_filter" not in cfg["strategy"]
     assert cfg["params"]["entry_ask_level"] == 10
     assert "low_price_threshold" not in cfg["params"]
     assert "low_price_entry_ask_level" not in cfg["params"]
-    assert "dynamic_entry_levels" not in cfg["params"]
     assert cfg["params"]["stop_loss"]["enabled"] is True
     assert cfg["params"]["stop_loss"]["trigger_drop_pct"] == pytest.approx(0.35)
-    assert "trigger_price" not in cfg["params"]["stop_loss"]
+    assert cfg["params"]["stop_loss"]["trigger_price"] == pytest.approx(0.20)
     assert cfg["params"]["stop_loss"]["start_remaining_sec"] == pytest.approx(55)
     assert cfg["params"]["stop_loss"]["end_remaining_sec"] == pytest.approx(40)
 

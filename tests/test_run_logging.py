@@ -4,6 +4,10 @@ import importlib
 import logging
 import sys
 
+from polybot.config_loader import build_strategy
+from polybot.market.series import MarketSeries
+from polybot.trade_config import TradeConfig
+
 
 def test_setup_file_logging_creates_only_run_specific_file(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
@@ -64,3 +68,34 @@ def test_setup_file_logging_removes_historical_logs(tmp_path, monkeypatch):
     assert not (tmp_path / "log" / "btc-updown-5m_trade.jsonl").exists()
     assert not (tmp_path / "log" / "btc-updown-5m_error.jsonl").exists()
     assert not (tmp_path / "log" / "btc-updown-5m_trade.log").exists()
+
+
+def test_log_strategy_params_handles_crowd_without_removed_persistence_fields(caplog):
+    sys.modules.pop("run", None)
+    run = importlib.import_module("run")
+    series = MarketSeries.from_known("btc-updown-5m")
+    strategy = build_strategy(
+        {
+            "strategy": {
+                "type": "crowd_m1",
+                "entry_start_elapsed_sec": 45,
+                "entry_end_elapsed_sec": 90,
+                "strong_move_pct": 0.04,
+            }
+        },
+        series,
+    )
+    trade_config = TradeConfig(
+        amount=1.0,
+        max_slippage_from_best_ask=0.04,
+        stop_loss_enabled=True,
+        stop_loss_start_remaining_sec=55,
+        stop_loss_end_remaining_sec=40,
+    )
+
+    with caplog.at_level(logging.INFO, logger="run"):
+        run._log_strategy_params(strategy, trade_config, series)
+
+    assert "crowd_m1 entry_band=45s-90s" in caplog.text
+    assert "persistence=" not in caplog.text
+    assert "min_move_ratio" not in caplog.text

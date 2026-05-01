@@ -179,10 +179,6 @@ class TestBuildTradeConfig:
                 "amount_tiers": [
                     {"threshold": 2.0, "amount": 15.0},
                 ],
-                "dynamic_entry_levels": [
-                    {"leading_ask_max": 0.64, "entry_ask_level": 5},
-                    {"leading_ask_max": 0.68, "entry_ask_level": 4},
-                ],
                 "max_slippage_from_best_ask": 0.04,
                 "stop_loss": {
                     "enabled": True,
@@ -211,7 +207,6 @@ class TestBuildTradeConfig:
         assert tc.low_price_entry_ask_level == 9
         assert tc.base_entry_ask_level() == 1
         assert tc.amount_tiers == [(2.0, 15.0)]
-        assert tc.dynamic_entry_levels == [(0.64, 5), (0.68, 4)]
         assert tc.max_slippage_from_best_ask == pytest.approx(0.04)
         assert tc.amount_for_signal_strength(1.9) == pytest.approx(10.0)
         assert tc.amount_for_signal_strength(2.0) == pytest.approx(15.0)

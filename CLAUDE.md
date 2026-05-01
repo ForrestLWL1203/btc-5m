@@ -126,6 +126,7 @@ params:
   stop_loss:
     enabled: true
     trigger_drop_pct: 0.35
+    trigger_price: 0.20
     start_remaining_sec: 55
     end_remaining_sec: 40
     sell_bid_level: 10
@@ -172,6 +173,8 @@ Stop-loss when enabled:
 
 - Entries below 0.45 do not use stop-loss.
 - Trigger price is `max(min_sell_price, entry_avg_price * 0.65)`.
+- `trigger_price=0.20` is kept only to avoid an implicit loader fallback in
+  config/log output while `trigger_drop_pct` is active.
 - Active only while `start_remaining_sec >= remaining >= end_remaining_sec`.
 - Uses held-leg bid book, skips level 1, and defaults to scanning up to bid
   level 10.

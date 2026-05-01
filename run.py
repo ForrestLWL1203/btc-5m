@@ -22,8 +22,10 @@ load_dotenv()
 
 from polybot.config_loader import build_series, build_strategy, build_trade_config
 from polybot.market.market import find_next_window
+from polybot.market.series import MarketSeries
 from polybot.core.log_formatter import ConsoleFormatter, JsonFormatter
 from polybot.runtime_config import add_runtime_config_args, build_runtime_config
+from polybot.trade_config import TradeConfig
 from polybot.trading.monitor import monitor_window, MonitorState
 LOG_DIR = Path("log")
 LOG_DIR.mkdir(exist_ok=True)
@@ -132,6 +134,45 @@ def _raise_if_fatal_state(state: MonitorState) -> None:
         raise RuntimeError(state.fatal_error)
 
 
+def _log_strategy_params(strategy, trade_config: TradeConfig, series: MarketSeries) -> None:
+    """Log startup parameters for the active strategy."""
+    if hasattr(strategy, '_theta_pct'):
+        window_sec = series.slug_step
+        start_at = window_sec - strategy._entry_start_remaining_sec
+        end_at = window_sec - strategy._entry_end_remaining_sec
+        log.debug(
+            "Params: theta=%.3f%% | entry_band=[%ds,%ds] into window | "
+            "max_entry=%.2f | persistence=%ds | max_entries=%s",
+            strategy._theta_pct,
+            int(start_at),
+            int(end_at),
+            strategy._max_entry_price,
+            strategy._persistence_sec,
+            trade_config.max_entries_per_window,
+        )
+    if hasattr(strategy, '_min_leading_ask'):
+        log.info(
+            "Params: crowd_m1 entry_band=%ds-%ds | min_ask_gap=%.3f | min_leading_ask=%.3f | max_entry=%.2f | "
+            "btc_confirm=%s strong_move=%.3f%% | "
+            "max_slippage=%s | stop_loss=%s [remaining %.0f->%.0fs]",
+            int(strategy._entry_elapsed_sec),
+            int(strategy._entry_end_elapsed_sec),
+            strategy._min_ask_gap,
+            strategy._min_leading_ask,
+            strategy._max_entry_price,
+            strategy._btc_direction_confirm,
+            strategy._strong_move_pct,
+            (
+                f"{trade_config.max_slippage_from_best_ask:.3f}"
+                if trade_config.max_slippage_from_best_ask is not None
+                else None
+            ),
+            trade_config.stop_loss_enabled,
+            trade_config.stop_loss_start_remaining_sec,
+            trade_config.stop_loss_end_remaining_sec,
+        )
+
+
 async def main() -> None:
     global _LAST_DRY_RUN
     parser = argparse.ArgumentParser(
@@ -184,46 +225,7 @@ Examples:
         log_dir,
     )
 
-    # Print key strategy parameters for verification
-    if hasattr(strategy, '_theta_pct'):
-        window_sec = series.slug_step
-        start_at = window_sec - strategy._entry_start_remaining_sec
-        end_at = window_sec - strategy._entry_end_remaining_sec
-        msg = (
-            "Params: theta=%.3f%% | entry_band=[%ds,%ds] into window | "
-            "max_entry=%.2f | persistence=%ds | max_entries=%s"
-        )
-        log.debug(msg,
-            strategy._theta_pct,
-            int(start_at), int(end_at),
-            strategy._max_entry_price,
-            strategy._persistence_sec,
-            trade_config.max_entries_per_window,
-        )
-    if hasattr(strategy, '_min_leading_ask'):
-        log.info(
-            "Params: crowd_m1 entry_band=%ds-%ds | min_ask_gap=%.3f | min_leading_ask=%.3f | max_entry=%.2f | "
-            "btc_confirm=%s strong_move=%.3f%% persistence=%ds min_move_ratio=%.2f | "
-            "max_slippage=%s | dynamic_levels=%s | stop_loss=%s [remaining %.0f->%.0fs]",
-            int(strategy._entry_elapsed_sec),
-            int(strategy._entry_end_elapsed_sec),
-            strategy._min_ask_gap,
-            strategy._min_leading_ask,
-            strategy._max_entry_price,
-            strategy._btc_direction_confirm,
-            strategy._strong_move_pct,
-            int(strategy._persistence_sec),
-            strategy._min_move_ratio,
-            (
-                f"{trade_config.max_slippage_from_best_ask:.3f}"
-                if trade_config.max_slippage_from_best_ask is not None
-                else None
-            ),
-            trade_config.dynamic_entry_levels,
-            trade_config.stop_loss_enabled,
-            trade_config.stop_loss_start_remaining_sec,
-            trade_config.stop_loss_end_remaining_sec,
-        )
+    _log_strategy_params(strategy, trade_config, series)
 
     ws = None
     completed = 0

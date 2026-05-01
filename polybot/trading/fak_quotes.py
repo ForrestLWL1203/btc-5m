@@ -92,21 +92,6 @@ def buffer_sell_price_hint(
     return max(0.0, min(1.0, math.floor(buffered / tick) * tick))
 
 
-def dynamic_entry_level(
-    best_ask: Optional[float],
-    base_entry_level: int,
-    dynamic_entry_levels: Optional[list[tuple[float, int]]],
-) -> int:
-    """Return dynamic ask-book scan depth for the current target-leg best ask."""
-    selected = max(1, int(base_entry_level))
-    if best_ask is None or not dynamic_entry_levels:
-        return selected
-    for threshold, level in dynamic_entry_levels:
-        if best_ask <= threshold:
-            return max(1, int(level))
-    return selected
-
-
 def _best_ask_level_1(ws: PriceStream, token_id: str) -> Optional[float]:
     try:
         return ws.get_latest_best_ask(token_id, max_age_sec=None, level=1)
@@ -125,7 +110,6 @@ def cap_limited_depth_quote(
     max_entry_level: int = 1,
     low_price_threshold: Optional[float] = None,
     low_price_entry_level: Optional[int] = None,
-    dynamic_entry_levels: Optional[list[tuple[float, int]]] = None,
     max_slippage_from_best_ask: Optional[float] = None,
     buffer_ticks: Optional[float] = None,
 ) -> CapDepthQuote:
@@ -150,14 +134,9 @@ def cap_limited_depth_quote(
     levels = [(float(price), float(size)) for price, size in raw_levels if float(size) > 0]
     best_ask_level_1 = levels[0][0] if levels else _best_ask_level_1(ws, token_id)
     preview = levels[:DEPTH_PREVIEW_LEVELS]
-    selected_max_entry_level = dynamic_entry_level(
-        best_ask_level_1,
-        max_entry_level,
-        dynamic_entry_levels,
-    )
+    selected_max_entry_level = max(1, int(max_entry_level))
     if (
-        not dynamic_entry_levels
-        and best_ask_level_1 is not None
+        best_ask_level_1 is not None
         and low_price_threshold is not None
         and low_price_entry_level is not None
         and best_ask_level_1 < low_price_threshold

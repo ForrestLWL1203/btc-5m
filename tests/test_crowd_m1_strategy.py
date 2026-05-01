@@ -99,6 +99,45 @@ def test_should_buy_scans_dynamic_entry_band_until_strong_btc_move():
     assert state.target_side == "up"
 
 
+def test_should_buy_rejects_move_between_deadband_and_strong_threshold():
+    strat = _strategy(
+        entry_start_elapsed_sec=120,
+        entry_end_elapsed_sec=180,
+        min_ask_gap=0.0,
+        min_leading_ask=0.62,
+        btc_direction_deadband_pct=0.015,
+        strong_move_pct=0.04,
+    )
+    now = time.time()
+    strat._window_start_epoch = now - 130
+    strat._window_open_btc = 100.0
+    strat._feed.latest_price = 100.03
+    strat.set_market_snapshot(up_mid=0.66, down_mid=0.34, up_best_ask=0.67, down_best_ask=0.35)
+
+    assert strat.should_buy(0.66, MonitorState()) is False
+
+
+def test_should_buy_uses_deadband_as_strong_move_fallback():
+    strat = _strategy(
+        entry_start_elapsed_sec=120,
+        entry_end_elapsed_sec=180,
+        min_ask_gap=0.0,
+        min_leading_ask=0.62,
+        btc_direction_deadband_pct=0.015,
+    )
+    now = time.time()
+    strat._window_start_epoch = now - 130
+    strat._window_open_btc = 100.0
+    strat._feed.latest_price = 100.02
+    strat.set_market_snapshot(up_mid=0.66, down_mid=0.34, up_best_ask=0.67, down_best_ask=0.35)
+
+    state = MonitorState()
+
+    assert strat._strong_move_pct == pytest.approx(0.015)
+    assert strat.should_buy(0.66, state) is True
+    assert state.target_side == "up"
+
+
 def test_should_buy_ignores_prior_btc_direction_after_current_move_confirms():
     strat = _strategy(
         entry_start_elapsed_sec=120,

@@ -245,7 +245,6 @@ def _price_hint_refresher(
             max_entry_level=entry_ask_level,
             low_price_threshold=trade_config.low_price_threshold,
             low_price_entry_level=trade_config.low_price_entry_ask_level,
-            dynamic_entry_levels=trade_config.dynamic_entry_levels,
             max_slippage_from_best_ask=trade_config.max_slippage_from_best_ask,
             buffer_ticks=config.FAK_RETRY_PRICE_HINT_BUFFER_TICKS,
         )
@@ -1127,7 +1126,6 @@ async def _attempt_strategy_entry(
         max_entry_level=entry_ask_level,
         low_price_threshold=trade_config.low_price_threshold,
         low_price_entry_level=trade_config.low_price_entry_ask_level,
-        dynamic_entry_levels=trade_config.dynamic_entry_levels,
         max_slippage_from_best_ask=trade_config.max_slippage_from_best_ask,
     )
     if dry_run:
@@ -1677,7 +1675,6 @@ async def monitor_window(
                     max_entry_level=entry_ask_level,
                     low_price_threshold=trade_config.low_price_threshold,
                     low_price_entry_level=trade_config.low_price_entry_ask_level,
-                    dynamic_entry_levels=trade_config.dynamic_entry_levels,
                     max_slippage_from_best_ask=trade_config.max_slippage_from_best_ask,
                 )
                 if not quote.enough:
@@ -1844,7 +1841,6 @@ async def _on_price_update(
                     max_entry_level=entry_ask_level,
                     low_price_threshold=trade_config.low_price_threshold,
                     low_price_entry_level=trade_config.low_price_entry_ask_level,
-                    dynamic_entry_levels=trade_config.dynamic_entry_levels,
                     max_slippage_from_best_ask=trade_config.max_slippage_from_best_ask,
                 )
                 if not quote.enough:

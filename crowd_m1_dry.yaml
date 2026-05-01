@@ -27,6 +27,9 @@ params:
     enabled: true
     # Trigger when held bid falls 35% below actual entry price.
     trigger_drop_pct: 0.35
+    # Ignored while trigger_drop_pct is set; keep equal to the sell floor to
+    # avoid misleading fallback values in loaded config/log output.
+    trigger_price: 0.20
     start_remaining_sec: 55
     end_remaining_sec: 40
     sell_bid_level: 10
