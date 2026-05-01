@@ -8,14 +8,14 @@ strategy:
   entry_end_elapsed_sec: 90
   min_ask_gap: 0.0
   min_leading_ask: 0.65
-  max_entry_price: 0.76
+  max_entry_price: 0.78
   btc_direction_confirm: true
   # Treat open-to-entry BTC moves smaller than this as no clear direction.
   # Unit is percent: 0.015 means 0.015%, not 1.5%.
   btc_direction_deadband_pct: 0.015
   # Dynamic entry only triggers after a strong open-to-current BTC move.
-  # Unit is percent: 0.04 means 0.04%, not 4%.
-  strong_move_pct: 0.04
+  # Unit is percent: 0.05 means 0.05%, not 5%.
+  strong_move_pct: 0.05
   btc_price_feed_source: coinbase
 
 params:

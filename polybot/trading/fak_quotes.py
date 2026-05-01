@@ -15,7 +15,7 @@ from polybot.market.stream import PriceStream
 
 
 DEPTH_ENTRY_SKIP_LEVELS = 0
-DEPTH_STOP_LOSS_SKIP_LEVELS = 1
+DEPTH_STOP_LOSS_SKIP_LEVELS = 0
 DEPTH_PREVIEW_LEVELS = 6
 
 

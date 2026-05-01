@@ -64,8 +64,7 @@ Runtime behavior:
 - Lock the first valid direction per window.
 - Hard cap is `0.75`; no dynamic cap tiers.
 - Execution uses target-leg WS order-book depth.
-- Level 1 ask is diagnostic only; fillability starts from level 2.
-- First FAK hint scans from ask level 2 up to level 9 by default, or up to
+- First FAK hint scans from ask level 1 up to level 9 by default, or up to
   level 11 when top ask is `<0.60`; if cumulative depth covers the order
   earlier, it uses that earlier level.
 - All hints are clamped to cap.
@@ -81,7 +80,7 @@ Stop-loss behavior when enabled:
   `trigger_drop_pct` is set; dynamic configs use
   `max(min_sell_price, entry_avg_price * (1 - trigger_drop_pct))`.
 - Only active while `start_remaining_sec >= remaining >= end_remaining_sec`.
-- Uses held-leg bid book, skips level 1, and defaults to scanning up to bid
+- Uses held-leg bid book, includes level 1, and defaults to scanning up to bid
   level 10.
 - SELL hint uses the first bid level where cumulative depth can cover the
   actual sell size, not the deepest scanned level.
@@ -132,7 +131,7 @@ Runtime behavior:
   `min_leading_ask=0.65`; `min_ask_gap=0.0` disables a gap requirement.
 - Require BTC direction confirmation: the selected Polymarket side must match
   BTC's move from the 5-minute window open to entry. Dynamic entry requires
-  `strong_move_pct=0.04%`; it no longer requires a 10-second persistence
+  `strong_move_pct=0.05%`; it no longer requires a 10-second persistence
   lookback or `min_move_ratio`.
 - The BTC price feed uses Coinbase ticker WS by default for US VPS latency
   tests. Binance WS remains available via `btc_price_feed_source: binance`.
@@ -143,12 +142,12 @@ Runtime behavior:
   and inner symbols, and appends ordered ticks on the hot path.
 - Use existing target-leg depth-gated execution; do not replace live execution
   with backtest-only L5 price proxies.
-- Cap final selected entry/hint at `max_entry_price=0.76`.
-- Reject candidates whose leading ask is above `max_entry_price=0.76` before
+- Cap final selected entry/hint at `max_entry_price=0.78`.
+- Reject candidates whose leading ask is above `max_entry_price=0.78` before
   entering the depth/FAK pipeline.
 - Scan the target-leg order book from level 1 up to `entry_ask_level=10`,
   stopping at the first level whose cumulative depth covers the order amount.
-- Reject entries whose selected ask is above `max_entry_price=0.76` or more
+- Reject entries whose selected ask is above `max_entry_price=0.78` or more
   than `0.04` above target-leg best ask.
 - Entry is event-driven: UP or DOWN Polymarket WS updates refresh the cached
   two-leg snapshot and can trigger entry immediately inside the 45s-90s
@@ -167,7 +166,8 @@ Runtime behavior:
   loader fallback while `trigger_drop_pct` is active.
 - After BUY fill, held-token WS updates are ignored until 5s before the
   stop-loss window; prewarm logs held-leg bid-book age, and active-window
-  updates can trigger stop-loss immediately.
+  held-token WS updates trigger stop-loss checks immediately. The monitor loop
+  does not poll once per second to trigger stop-loss.
 - Hold to `window.end_epoch` unless stop-loss fills.
 
 ## Core Files
@@ -309,9 +309,10 @@ Important fields:
 - `ENTRY_DEPTH_SKIP` logs first insufficient-depth skip only; repeats aggregate
   into `SUMMARY`.
 - `TRADE_RESOLVED` uses binary `1.0/0.0` settlement only when the held-leg mark
-  is fresh. If the cached mark is stale, it records mark-to-mid PnL with
-  `result=MARK_STALE`, `mark_price_age_sec`, and `mark_price_fresh=false`
-  instead of converting a stale mark above `0.5` into a fake settlement win.
+  is fresh. The monitor refreshes the held-leg CLOB midpoint once about 2 seconds
+  before expiry. Stale cached marks are logged as `result=MARK_STALE`, and a
+  fresh `0.5` mark is logged as `result=MARK_AMBIGUOUS` instead of being counted
+  as a loss.
 
 ## Agent Rules
 

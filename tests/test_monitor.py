@@ -177,7 +177,7 @@ async def test_stop_loss_sells_with_bid_depth_inside_time_band():
 
     mock_sell.assert_awaited_once()
     assert mock_sell.await_args.args[:2] == ("up-token-123", pytest.approx(1.522))
-    assert mock_sell.await_args.kwargs["price_hint"] == pytest.approx(0.35)
+    assert mock_sell.await_args.kwargs["price_hint"] == pytest.approx(0.36)
     assert mock_sell.await_args.kwargs["retry_count"] == 3
     assert state.stop_loss_triggered is True
     assert state.exit_triggered is True
@@ -356,7 +356,7 @@ async def test_stop_loss_does_not_trigger_from_deep_book_price_only():
 
 
 @pytest.mark.asyncio
-async def test_stop_loss_stays_quiet_when_bid_above_trigger(caplog):
+async def test_stop_loss_logs_when_bid_above_trigger(caplog):
     now = time.time()
     window = _make_window(start_epoch=int(now) - 240, end_epoch=int(now) + 60)
     state = _make_state(
@@ -395,7 +395,10 @@ async def test_stop_loss_stays_quiet_when_bid_above_trigger(caplog):
         for record in caplog.records
         if getattr(record, "event_data", {}).get("action") == "STOP_LOSS_CHECK"
     ]
-    assert checks == []
+    assert len(checks) == 1
+    assert checks[0]["reason"] == "bid_above_stop"
+    assert checks[0]["best_bid_level_1"] == 0.56
+    assert checks[0]["quote_enough"] is True
 
 
 @pytest.mark.asyncio
@@ -404,7 +407,7 @@ async def test_stop_loss_insufficient_depth_logs_once_per_window(caplog):
     window = _make_window(start_epoch=int(now) - 240, end_epoch=int(now) + 60)
     state = _make_state(
         bought=True,
-        holding_size=1000.0,
+        holding_size=1001.0,
         entry_amount=1.0,
         entry_price=0.66,
         entry_avg_price=0.66,
@@ -1664,7 +1667,7 @@ async def test_monitor_single_window_logs_snapshot_entry_check_once_per_window(c
 
 
 @pytest.mark.asyncio
-async def test_monitor_single_window_actively_checks_stop_loss_without_price_update():
+async def test_monitor_single_window_does_not_check_stop_loss_without_price_update():
     now = int(time.time())
     window = _make_window(start_epoch=now - 230, end_epoch=now + 70)
     state = _make_state(
@@ -1697,9 +1700,55 @@ async def test_monitor_single_window_actively_checks_stop_loss_without_price_upd
             prefetch_next_window=False,
         )
 
-    mock_stop.assert_awaited()
-    assert mock_stop.await_args.args[:4] == (window, state, ws, window.down_token)
-    assert mock_stop.await_args.args[6] == "down"
+    mock_stop.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_monitor_single_window_refreshes_settlement_mark_before_end(caplog):
+    now = int(time.time())
+    window = _make_window(start_epoch=now - 298, end_epoch=now + 2)
+    state = _make_state(
+        bought=True,
+        holding_size=1.25,
+        entry_amount=1.0,
+        entry_price=0.80,
+        entry_avg_price=0.80,
+        target_side="down",
+    )
+    ws = MagicMock()
+    strategy = _mock_strategy()
+
+    fake_now = {"value": now}
+    with patch("polybot.trading.monitor.time.time", side_effect=lambda: fake_now["value"]), \
+         patch("polybot.trading.monitor.asyncio.sleep", new_callable=AsyncMock) as mock_sleep, \
+         patch("polybot.trading.monitor.get_midpoint_async", new_callable=AsyncMock) as mock_midpoint:
+        async def _after_one_sleep(_seconds):
+            fake_now["value"] = window.end_epoch
+
+        mock_sleep.side_effect = _after_one_sleep
+        mock_midpoint.return_value = 0.71
+
+        with caplog.at_level(logging.INFO, logger="polybot.trading.monitor"):
+            await _monitor_single_window(
+                window,
+                state,
+                ws,
+                dry_run=False,
+                trade_config=_tc(stop_loss_enabled=True),
+                strategy=strategy,
+                prefetch_next_window=False,
+            )
+
+    mock_midpoint.assert_awaited_once_with(window.down_token)
+    assert state.settlement_mark_refreshed is True
+    events = [
+        record.event_data
+        for record in caplog.records
+        if getattr(record, "event_data", {}).get("action") == "SETTLEMENT_MARK_REFRESH"
+    ]
+    assert events
+    assert events[0]["mark_price"] == pytest.approx(0.71)
+    assert events[0]["remaining_sec"] == pytest.approx(2)
 
 
 @pytest.mark.asyncio
@@ -1801,6 +1850,46 @@ async def test_monitor_single_window_does_not_binary_win_stale_mark(caplog):
     assert resolved[0]["mark_price_age_sec"] == pytest.approx(30)
     assert resolved[0]["realized_pnl"] == pytest.approx(round((1.25 * 0.695) - 1.0, 4))
     assert state.daily_realized_pnl == pytest.approx((1.25 * 0.695) - 1.0)
+
+
+@pytest.mark.asyncio
+async def test_monitor_single_window_does_not_count_ambiguous_half_mark_as_loss(caplog):
+    now = int(time.time())
+    window = _make_window(start_epoch=now - 300, end_epoch=now)
+    state = _make_state(
+        bought=True,
+        holding_size=1.408448,
+        entry_amount=1.0,
+        entry_price=0.64,
+        entry_avg_price=0.64,
+        latest_midpoint=0.5,
+        latest_midpoint_received_at=window.end_epoch,
+    )
+
+    with patch("polybot.trading.monitor.time.time", return_value=window.end_epoch):
+        with caplog.at_level(logging.INFO, logger="polybot.trading.monitor"):
+            await _monitor_single_window(
+                window,
+                state,
+                ws=None,
+                dry_run=False,
+                trade_config=_tc(),
+                strategy=None,
+                prefetch_next_window=False,
+            )
+
+    resolved = [
+        record.event_data
+        for record in caplog.records
+        if getattr(record, "event_data", {}).get("action") == "TRADE_RESOLVED"
+    ]
+    assert resolved
+    assert resolved[0]["result"] == "MARK_AMBIGUOUS"
+    assert resolved[0]["price"] == pytest.approx(0.5)
+    assert resolved[0]["mark_price"] == pytest.approx(0.5)
+    assert resolved[0]["mark_price_fresh"] is True
+    assert resolved[0]["realized_pnl"] == pytest.approx(0.0)
+    assert state.daily_realized_pnl == pytest.approx(0.0)
 
 
 @pytest.mark.asyncio

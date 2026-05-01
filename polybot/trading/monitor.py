@@ -45,6 +45,7 @@ _SIGNAL_EVAL_LOG_INTERVAL_SEC = 5.0
 _STOP_LOSS_CHECK_LOG_INTERVAL_SEC = 5.0
 _STOP_LOSS_PREWARM_SEC = 5.0
 _SETTLEMENT_MARK_FRESH_SEC = 5.0
+_SETTLEMENT_MARK_REFRESH_REMAINING_SEC = 2.0
 
 
 async def _noop_price_callback(update: PriceUpdate) -> None:
@@ -372,6 +373,32 @@ def _log_stop_loss_book_freshness(
         "phase": phase,
         "remaining_sec": round(remaining, 3),
         "best_bid_age_ms": best_bid_age_ms,
+    })
+
+
+async def _refresh_settlement_mark(
+    state: MonitorState,
+    *,
+    token_id: str,
+    side: str,
+    window: MarketWindow,
+    remaining: float,
+) -> None:
+    if state.settlement_mark_refreshed:
+        return
+    state.settlement_mark_refreshed = True
+    mark_price = await get_midpoint_async(token_id)
+    if mark_price is not None:
+        state.latest_midpoint = mark_price
+        state.latest_midpoint_received_at = time.time()
+    log_event(log, logging.INFO, TRADE, {
+        "action": "SETTLEMENT_MARK_REFRESH",
+        "side": side.upper(),
+        "window": window.short_label,
+        "remaining_sec": round(remaining, 3),
+        "mark_price": mark_price,
+        "mark_source": "clob_midpoint",
+        "success": mark_price is not None,
     })
 
 
@@ -709,6 +736,17 @@ async def _maybe_handle_stop_loss(
     if dry_run:
         _record_stop_replay_quote(state, quote=quote)
     if quote.best_bid_level_1 > stop_price:
+        _log_stop_loss_check(
+            state,
+            side=side,
+            window=window,
+            remaining=remaining,
+            entry_price=entry_price,
+            stop_price=stop_price,
+            quote=quote,
+            shares=shares_to_sell,
+            reason="bid_above_stop",
+        )
         return
     if not quote.enough or quote.price is None:
         if dry_run:
@@ -1258,12 +1296,19 @@ async def _monitor_single_window(
                     and mark_price_age_sec <= _SETTLEMENT_MARK_FRESH_SEC
                 )
                 direction_correct = mark_price_fresh and mark_price > 0.5
-                settlement_price = 1.0 if direction_correct else 0.0 if mark_price_fresh else None
+                direction_wrong = mark_price_fresh and mark_price < 0.5
+                mark_ambiguous = mark_price_fresh and mark_price == 0.5
+                settlement_price = (
+                    1.0 if direction_correct else
+                    0.0 if direction_wrong else
+                    None
+                )
 
                 entry_amount = state.entry_amount or state.entry_price * state.holding_size
                 realized_pnl = (
                     state.holding_size * settlement_price - entry_amount
                     if settlement_price is not None
+                    else 0.0 if mark_ambiguous
                     else (
                         state.holding_size * mark_price - entry_amount
                         if mark_price is not None
@@ -1273,17 +1318,21 @@ async def _monitor_single_window(
                 trade_result_win = direction_correct if mark_price_fresh else realized_pnl > 0
                 result_label = (
                     "WIN" if direction_correct else
-                    "LOSS" if mark_price_fresh else
+                    "LOSS" if direction_wrong else
+                    "MARK_AMBIGUOUS" if mark_ambiguous else
                     "MARK_STALE"
                 )
 
-                # Process trade result for risk management
-                _process_trade_result(
-                    state,
-                    trade_result_win,
-                    realized_pnl,
-                    trade_config,
-                )
+                # Process trade result for risk management only when the mark
+                # clearly indicates the binary outcome. A fresh 0.5 mark at
+                # expiry is ambiguous and must not be counted as a real loss.
+                if not mark_ambiguous:
+                    _process_trade_result(
+                        state,
+                        trade_result_win,
+                        realized_pnl,
+                        trade_config,
+                    )
 
                 # Record trade resolution
                 log_event(log, logging.INFO, TRADE, {
@@ -1333,25 +1382,21 @@ async def _monitor_single_window(
             _log_window_summary(state, window, dry_run)
             return next_win
 
-        if (
-            ws is not None
-            and state.bought
-            and not state.exit_triggered
-            and not state.trade_lock.locked()
-        ):
-            async with state.trade_lock:
-                if state.bought and not state.exit_triggered:
-                    effective_side = state.target_side if state.target_side is not None else side
-                    buy_token_id, _ = _side_token(window, effective_side)
-                    await _maybe_handle_stop_loss(
-                        window,
-                        state,
-                        ws,
-                        buy_token_id,
-                        dry_run,
-                        trade_config,
-                        effective_side,
-                    )
+        remaining = window.end_epoch - now
+        if state.bought and not state.exit_triggered:
+            effective_side = state.target_side if state.target_side is not None else side
+            buy_token_id, _ = _side_token(window, effective_side)
+            if (
+                0 < remaining <= _SETTLEMENT_MARK_REFRESH_REMAINING_SEC
+                and not state.settlement_mark_refreshed
+            ):
+                await _refresh_settlement_mark(
+                    state,
+                    token_id=buy_token_id,
+                    side=effective_side,
+                    window=window,
+                    remaining=remaining,
+                )
 
         if (
             ws is not None
@@ -1515,6 +1560,7 @@ async def monitor_window(
     state.entry_timestamps = []
     state.latest_midpoint = None
     state.latest_midpoint_received_at = None
+    state.settlement_mark_refreshed = False
     state.target_side = None
     state.target_entry_price = None
     state.target_max_entry_price = None

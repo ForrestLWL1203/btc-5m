@@ -52,7 +52,8 @@ def test_stop_loss_bid_quote_scans_sell_book_independently():
     assert quote.enough is True
     assert quote.price == pytest.approx(0.36)
     assert quote.price_hint == pytest.approx(0.33)
-    assert quote.levels_used == 2
+    assert quote.levels_used == 3
+    assert quote.skipped_levels == 0
 
 
 def test_stop_loss_bid_quote_stops_at_first_sufficient_bid_depth():
@@ -78,4 +79,5 @@ def test_stop_loss_bid_quote_stops_at_first_sufficient_bid_depth():
     assert quote.enough is True
     assert quote.price == pytest.approx(0.38)
     assert quote.price_hint == pytest.approx(0.36)
-    assert quote.levels_used == 2
+    assert quote.levels_used == 3
+    assert quote.skipped_levels == 0
