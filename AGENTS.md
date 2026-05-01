@@ -77,7 +77,9 @@ Runtime behavior:
 Stop-loss behavior when enabled:
 
 - Entries below `disable_below_entry_price=0.45` do not use stop-loss.
-- Trigger price: `max(min_sell_price, trigger_price=0.38)`.
+- Trigger price is fixed `max(min_sell_price, trigger_price=0.38)` unless
+  `trigger_drop_pct` is set; dynamic configs use
+  `max(min_sell_price, entry_avg_price * (1 - trigger_drop_pct))`.
 - Only active while `start_remaining_sec >= remaining >= end_remaining_sec`.
 - Uses held-leg bid book, skips level 1, and defaults to scanning up to bid
   level 10.
@@ -126,32 +128,26 @@ Runtime behavior:
 - At `entry_elapsed_sec=180`, compare current UP and DOWN best asks; use
   `entry_timeout_sec=5` to avoid late attach entries.
 - Buy the higher-best-ask side only if its leading ask is at least
-  `min_leading_ask=0.64`; `min_ask_gap=0.0` disables a gap requirement.
+  `min_leading_ask=0.65`; `min_ask_gap=0.0` disables a gap requirement.
 - Require BTC direction confirmation: the selected Polymarket side must match
-  BTC's move from the 5-minute window open to entry.
-- Enable the BTC recent-reverse soft filter: skip UP entries if BTC dropped at
-  least `0.02%` over the last 20s, and skip DOWN entries if BTC rose at least
-  `0.02%` over the last 20s.
-- `btc_reverse_filter.min_reverse_move_pct` is in percent units:
-  `0.02` means `0.02%`, not `2%`.
-- The reverse filter uses Binance WS by default. Polymarket RTDS remains
-  available as a fallback option, but is not the active default after stale-feed
-  behavior was observed in dry-run.
-- The reverse filter logs `BTC_REVERSE_FILTER_CHECK` once per
-  `(history_ready, triggered)` state per window, so a temporary history-missing
-  check does not hide a later ready check.
+  BTC's move from the 5-minute window open to entry. Open-to-entry BTC moves
+  smaller than `btc_direction_deadband_pct=0.015%` are treated as no clear BTC
+  direction and do not block the Polymarket-leading side.
+- The BTC price feed uses Binance WS by default. Coinbase ticker WS is
+  available via `btc_price_feed_source: coinbase` for US VPS latency tests.
+  Polymarket RTDS remains available as a fallback option, but is not the active
+  default after stale-feed behavior was observed in dry-run.
 - Polymarket RTDS feed handling ignores malformed/non-finite crypto price
   values, preserves inner item symbols when batch payloads include both outer
   and inner symbols, and appends ordered ticks on the hot path.
 - Use existing target-leg depth-gated execution; do not replace live execution
   with backtest-only L5 price proxies.
-- Cap final selected entry/hint at `max_entry_price=0.80`.
-- Reject candidates whose leading ask is above `max_entry_price=0.80` before
+- Cap final selected entry/hint at `max_entry_price=0.76`.
+- Reject candidates whose leading ask is above `max_entry_price=0.76` before
   entering the depth/FAK pipeline.
-- Scan the target-leg order book up to `entry_ask_level=10`, skipping level 1
-  for fillability and stopping at the first level whose cumulative depth covers
-  the order amount.
-- Reject entries whose selected ask is above `max_entry_price=0.80` or more
+- Scan the target-leg order book from level 1 up to `entry_ask_level=10`,
+  stopping at the first level whose cumulative depth covers the order amount.
+- Reject entries whose selected ask is above `max_entry_price=0.76` or more
   than `0.04` above target-leg best ask.
 - Entry is event-driven: UP or DOWN Polymarket WS updates refresh the cached
   two-leg snapshot and can trigger entry immediately inside the 5s entry
@@ -164,8 +160,9 @@ Runtime behavior:
 - Dry-run BUY uses the same depth quote selected by the entry scan and does not
   add simulated buy latency or extra ticks. Stop-loss dry-run still simulates
   sell-side FAK latency and a tick buffer.
-- Stop-loss is enabled with trigger `0.40`, only while remaining time is
-  `[60s,45s]`.
+- Stop-loss is enabled only while remaining time is `[60s,45s]`, with dynamic
+  trigger `max(min_sell_price, entry_avg_price * 0.65)`, i.e. a 35% drop from
+  actual entry price.
 - After BUY fill, held-token WS updates are ignored until 5s before the
   stop-loss window; prewarm logs held-leg bid-book age, and active-window
   updates can trigger stop-loss immediately.

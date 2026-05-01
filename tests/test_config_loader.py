@@ -4,6 +4,7 @@ import pytest
 import yaml
 
 from polybot.config_loader import load_config, build_series, build_strategy, build_trade_config
+from polybot.market.coinbase import CoinbasePriceFeed
 from polybot.market.polymarket_rtds import PolymarketRTDSPriceFeed
 from polybot.market.series import MarketSeries
 from polybot.strategies.crowd_m1 import CrowdM1Strategy
@@ -115,12 +116,8 @@ class TestBuildStrategy:
                 "min_ask_gap": 0.16,
                 "max_entry_price": 0.75,
                 "btc_direction_confirm": True,
+                "btc_direction_deadband_pct": 0.015,
                 "btc_price_feed_source": "polymarket_rtds",
-                "btc_reverse_filter": {
-                    "enabled": True,
-                    "lookback_sec": 20,
-                    "min_reverse_move_pct": 0.02,
-                },
             }
         }
         strat = build_strategy(cfg, series)
@@ -130,11 +127,24 @@ class TestBuildStrategy:
         assert strat._min_ask_gap == pytest.approx(0.16)
         assert strat._max_entry_price == pytest.approx(0.75)
         assert strat._btc_direction_confirm is True
+        assert strat._btc_direction_deadband_pct == pytest.approx(0.015)
         assert strat._btc_price_feed_source == "polymarket_rtds"
         assert isinstance(strat._feed, PolymarketRTDSPriceFeed)
-        assert strat._btc_reverse_filter_enabled is True
-        assert strat._btc_reverse_lookback_sec == pytest.approx(20)
-        assert strat._btc_reverse_min_move_pct == pytest.approx(0.02)
+
+    def test_build_crowd_m1_strategy_with_coinbase_feed(self):
+        series = MarketSeries.from_known("btc-updown-5m")
+        cfg = {
+            "strategy": {
+                "type": "crowd_m1",
+                "btc_price_feed_source": "coinbase",
+            }
+        }
+
+        strat = build_strategy(cfg, series)
+
+        assert isinstance(strat, CrowdM1Strategy)
+        assert strat._btc_price_feed_source == "coinbase"
+        assert isinstance(strat._feed, CoinbasePriceFeed)
 
     def test_missing_strategy_raises(self):
         series = MarketSeries.from_known("btc-updown-5m")
@@ -175,6 +185,7 @@ class TestBuildTradeConfig:
                 "stop_loss": {
                     "enabled": True,
                     "trigger_price": 0.38,
+                    "trigger_drop_pct": 0.35,
                     "disable_below_entry_price": 0.45,
                     "start_remaining_sec": 120,
                     "end_remaining_sec": 15,
@@ -204,6 +215,7 @@ class TestBuildTradeConfig:
         assert tc.amount_for_signal_strength(2.0) == pytest.approx(15.0)
         assert tc.stop_loss_enabled is True
         assert tc.stop_loss_trigger_price == pytest.approx(0.38)
+        assert tc.stop_loss_trigger_drop_pct == pytest.approx(0.35)
         assert tc.stop_loss_disable_below_entry_price == pytest.approx(0.45)
         assert tc.stop_loss_start_remaining_sec == pytest.approx(120)
         assert tc.stop_loss_end_remaining_sec == pytest.approx(15)

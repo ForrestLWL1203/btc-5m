@@ -671,10 +671,14 @@ async def _maybe_handle_stop_loss(
         return
     if entry_price < trade_config.stop_loss_disable_below_entry_price:
         return
-    stop_price = max(
-        trade_config.stop_loss_min_sell_price,
-        trade_config.stop_loss_trigger_price,
-    )
+    if trade_config.stop_loss_trigger_drop_pct is not None:
+        dynamic_stop_price = entry_price * (1.0 - trade_config.stop_loss_trigger_drop_pct)
+        stop_price = max(trade_config.stop_loss_min_sell_price, dynamic_stop_price)
+    else:
+        stop_price = max(
+            trade_config.stop_loss_min_sell_price,
+            trade_config.stop_loss_trigger_price,
+        )
     state.stop_loss_price = stop_price
 
     shares_to_sell = state.holding_size

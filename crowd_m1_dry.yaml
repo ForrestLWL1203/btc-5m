@@ -7,15 +7,13 @@ strategy:
   entry_elapsed_sec: 180
   entry_timeout_sec: 5
   min_ask_gap: 0.0
-  min_leading_ask: 0.60
+  min_leading_ask: 0.65
   max_entry_price: 0.76
   btc_direction_confirm: true
+  # Treat open-to-entry BTC moves smaller than this as no clear direction.
+  # Unit is percent: 0.015 means 0.015%, not 1.5%.
+  btc_direction_deadband_pct: 0.015
   btc_price_feed_source: binance
-  btc_reverse_filter:
-    enabled: true
-    lookback_sec: 20
-    # Unit is percent: 0.02 means 0.02%, not 2%.
-    min_reverse_move_pct: 0.02
 
 params:
   amount: 1.0
@@ -24,7 +22,8 @@ params:
   max_entries_per_window: 1
   stop_loss:
     enabled: true
-    trigger_price: 0.40
+    # Trigger when held bid falls 35% below actual entry price.
+    trigger_drop_pct: 0.35
     start_remaining_sec: 60
     end_remaining_sec: 45
     sell_bid_level: 10

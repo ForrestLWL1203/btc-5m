@@ -54,127 +54,18 @@ def test_should_buy_rejects_if_btc_direction_disagrees():
     assert strat.should_buy(0.59, MonitorState()) is False
 
 
-def test_should_buy_rejects_btc_recent_reverse_move_for_up_entry(caplog):
-    strat = _strategy(
-        entry_elapsed_sec=120,
-        min_ask_gap=0.0,
-        min_leading_ask=0.62,
-        btc_direction_confirm=False,
-        btc_reverse_filter_enabled=True,
-        btc_reverse_lookback_sec=20,
-        btc_reverse_min_move_pct=0.02,
-    )
+def test_should_buy_allows_btc_direction_noise_inside_deadband():
+    strat = _strategy(entry_elapsed_sec=120, min_ask_gap=0.16, btc_direction_deadband_pct=0.015)
     now = time.time()
     strat._window_start_epoch = now - 121
-    strat._feed.price_at_or_before.side_effect = [100.0, 99.97]
-    strat._feed.latest_price = 99.97
-    strat.set_market_snapshot(up_mid=0.66, down_mid=0.34, up_best_ask=0.67, down_best_ask=0.35)
-
-    caplog.set_level(logging.INFO, logger="polybot.strategies.crowd_m1")
-
-    assert strat.should_buy(0.66, MonitorState()) is False
-    assert "M1_DECISION_SKIP: reason=btc_recent_reverse_move" in caplog.text
-
-
-def test_should_buy_allows_btc_recent_move_below_reverse_threshold():
-    strat = _strategy(
-        entry_elapsed_sec=120,
-        min_ask_gap=0.0,
-        min_leading_ask=0.62,
-        btc_direction_confirm=False,
-        btc_reverse_filter_enabled=True,
-        btc_reverse_lookback_sec=20,
-        btc_reverse_min_move_pct=0.02,
-    )
-    now = time.time()
-    strat._window_start_epoch = now - 121
-    strat._feed.price_at_or_before.side_effect = [100.0, 99.99]
+    strat._window_open_btc = 100.0
     strat._feed.latest_price = 99.99
-    strat.set_market_snapshot(up_mid=0.66, down_mid=0.34, up_best_ask=0.67, down_best_ask=0.35)
+    strat.set_market_snapshot(up_mid=0.59, down_mid=0.41, up_best_ask=0.61, down_best_ask=0.43)
 
     state = MonitorState()
 
-    assert strat.should_buy(0.66, state) is True
+    assert strat.should_buy(0.59, state) is True
     assert state.target_side == "up"
-
-
-def test_should_buy_logs_reverse_filter_check_before_successful_entry(caplog):
-    strat = _strategy(
-        entry_elapsed_sec=120,
-        min_ask_gap=0.0,
-        min_leading_ask=0.62,
-        btc_direction_confirm=False,
-        btc_reverse_filter_enabled=True,
-        btc_reverse_lookback_sec=20,
-        btc_reverse_min_move_pct=0.02,
-        btc_price_feed_source="polymarket_rtds",
-    )
-    now = time.time()
-    strat._window_start_epoch = now - 121
-    strat._feed.price_at_or_before.side_effect = [100.0, 99.99]
-    strat._feed.latest_price = 99.99
-    strat.set_market_snapshot(up_mid=0.66, down_mid=0.34, up_best_ask=0.67, down_best_ask=0.35)
-
-    caplog.set_level(logging.INFO, logger="polybot.strategies.crowd_m1")
-
-    assert strat.should_buy(0.66, MonitorState()) is True
-    assert caplog.text.count("BTC_REVERSE_FILTER_CHECK") == 1
-    assert "source=polymarket_rtds" in caplog.text
-    assert "dir=UP" in caplog.text
-    assert "history_ready=True" in caplog.text
-    assert "lookback_btc=100.0" in caplog.text
-    assert "current_btc=100.0" in caplog.text
-    assert "move_pct=-0.0100" in caplog.text
-    assert "triggered=False" in caplog.text
-
-
-def test_should_buy_rejects_when_reverse_filter_history_not_ready(caplog):
-    strat = _strategy(
-        entry_elapsed_sec=120,
-        min_ask_gap=0.0,
-        min_leading_ask=0.62,
-        btc_direction_confirm=False,
-        btc_reverse_filter_enabled=True,
-        btc_reverse_lookback_sec=20,
-        btc_reverse_min_move_pct=0.02,
-    )
-    now = time.time()
-    strat._window_start_epoch = now - 121
-    strat._feed.price_at_or_before.side_effect = [None, 100.0]
-    strat._feed.latest_price = 100.0
-    strat.set_market_snapshot(up_mid=0.66, down_mid=0.34, up_best_ask=0.67, down_best_ask=0.35)
-
-    caplog.set_level(logging.INFO, logger="polybot.strategies.crowd_m1")
-
-    assert strat.should_buy(0.66, MonitorState()) is False
-    assert "BTC_REVERSE_FILTER_CHECK" in caplog.text
-    assert "history_ready=False" in caplog.text
-    assert "M1_DECISION_SKIP: reason=btc_reverse_history_not_ready" in caplog.text
-
-
-def test_should_buy_logs_reverse_filter_not_ready_and_ready_states(caplog):
-    strat = _strategy(
-        entry_elapsed_sec=120,
-        min_ask_gap=0.0,
-        min_leading_ask=0.62,
-        btc_direction_confirm=False,
-        btc_reverse_filter_enabled=True,
-        btc_reverse_lookback_sec=20,
-        btc_reverse_min_move_pct=0.02,
-    )
-    now = time.time()
-    strat._window_start_epoch = now - 121
-    strat._feed.price_at_or_before.side_effect = [None, 100.0, 100.0, 100.01]
-    strat._feed.latest_price = 100.01
-    strat.set_market_snapshot(up_mid=0.66, down_mid=0.34, up_best_ask=0.67, down_best_ask=0.35)
-
-    caplog.set_level(logging.INFO, logger="polybot.strategies.crowd_m1")
-
-    assert strat.should_buy(0.66, MonitorState()) is False
-    assert strat.should_buy(0.66, MonitorState()) is True
-    assert caplog.text.count("BTC_REVERSE_FILTER_CHECK") == 2
-    assert "history_ready=False" in caplog.text
-    assert "history_ready=True" in caplog.text
 
 
 def test_should_buy_rejects_gap_below_min_without_consuming_window():

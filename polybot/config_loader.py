@@ -72,7 +72,6 @@ def build_strategy(cfg: dict, series: Optional[MarketSeries] = None):
     if strat_type == "crowd_m1":
         if series is None:
             raise ValueError("CrowdM1Strategy requires a market series")
-        btc_reverse_filter = strat_cfg.get("btc_reverse_filter") or {}
         return CrowdM1Strategy(
             series=series,
             entry_elapsed_sec=strat_cfg.get("entry_elapsed_sec", 120.0),
@@ -81,10 +80,8 @@ def build_strategy(cfg: dict, series: Optional[MarketSeries] = None):
             min_ask_gap=strat_cfg.get("min_ask_gap", 0.16),
             max_entry_price=strat_cfg.get("max_entry_price", 0.75),
             btc_direction_confirm=bool(strat_cfg.get("btc_direction_confirm", True)),
+            btc_direction_deadband_pct=float(strat_cfg.get("btc_direction_deadband_pct", 0.015)),
             btc_price_feed_source=strat_cfg.get("btc_price_feed_source", "binance"),
-            btc_reverse_filter_enabled=bool(btc_reverse_filter.get("enabled", False)),
-            btc_reverse_lookback_sec=float(btc_reverse_filter.get("lookback_sec", 20.0)),
-            btc_reverse_min_move_pct=float(btc_reverse_filter.get("min_reverse_move_pct", 0.02)),
             open_price_max_wait_sec=strat_cfg.get("open_price_max_wait_sec", 30.0),
         )
 
@@ -172,6 +169,11 @@ def _build_stop_loss(raw: Optional[dict]) -> dict:
     return {
         "stop_loss_enabled": bool(raw.get("enabled", False)),
         "stop_loss_trigger_price": float(raw.get("trigger_price", 0.38)),
+        "stop_loss_trigger_drop_pct": (
+            float(raw["trigger_drop_pct"])
+            if raw.get("trigger_drop_pct") is not None
+            else None
+        ),
         "stop_loss_disable_below_entry_price": float(raw.get("disable_below_entry_price", 0.45)),
         "stop_loss_start_remaining_sec": float(raw.get("start_remaining_sec", 120.0)),
         "stop_loss_end_remaining_sec": float(raw.get("end_remaining_sec", 15.0)),

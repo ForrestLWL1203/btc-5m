@@ -23,6 +23,7 @@ class TradeConfig:
     daily_loss_pause_windows: int = 5
     stop_loss_enabled: bool = False
     stop_loss_trigger_price: float = 0.38
+    stop_loss_trigger_drop_pct: Optional[float] = None
     stop_loss_disable_below_entry_price: float = 0.45
     stop_loss_start_remaining_sec: float = 120.0
     stop_loss_end_remaining_sec: float = 15.0

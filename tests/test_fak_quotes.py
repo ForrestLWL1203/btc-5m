@@ -27,7 +27,7 @@ def test_cap_limited_depth_quote_scans_entry_book_independently():
     assert quote.enough is True
     assert quote.price == pytest.approx(0.63)
     assert quote.price_hint == pytest.approx(0.64)
-    assert quote.levels_used == 2
+    assert quote.levels_used == 3
 
 
 def test_stop_loss_bid_quote_scans_sell_book_independently():

@@ -35,6 +35,7 @@ def _args(**overrides) -> argparse.Namespace:
         "max_entries": None,
         "stop_loss_enabled": None,
         "stop_loss_trigger_price": None,
+        "stop_loss_trigger_drop_pct": None,
         "stop_loss_disable_below_entry_price": None,
         "stop_loss_start_remaining": None,
         "stop_loss_end_remaining": None,
@@ -68,19 +69,19 @@ def test_preset_config_loads_crowd_m1_yaml():
     assert cfg["strategy"]["entry_elapsed_sec"] == pytest.approx(180)
     assert cfg["strategy"]["entry_timeout_sec"] == pytest.approx(5)
     assert cfg["strategy"]["min_ask_gap"] == pytest.approx(0.0)
-    assert cfg["strategy"]["min_leading_ask"] == pytest.approx(0.60)
+    assert cfg["strategy"]["min_leading_ask"] == pytest.approx(0.65)
     assert cfg["strategy"]["max_entry_price"] == pytest.approx(0.76)
     assert cfg["strategy"]["btc_direction_confirm"] is True
+    assert cfg["strategy"]["btc_direction_deadband_pct"] == pytest.approx(0.015)
     assert cfg["strategy"]["btc_price_feed_source"] == "binance"
-    assert cfg["strategy"]["btc_reverse_filter"]["enabled"] is True
-    assert cfg["strategy"]["btc_reverse_filter"]["lookback_sec"] == pytest.approx(20)
-    assert cfg["strategy"]["btc_reverse_filter"]["min_reverse_move_pct"] == pytest.approx(0.02)
+    assert "btc_reverse_filter" not in cfg["strategy"]
     assert cfg["params"]["entry_ask_level"] == 10
     assert "low_price_threshold" not in cfg["params"]
     assert "low_price_entry_ask_level" not in cfg["params"]
     assert "dynamic_entry_levels" not in cfg["params"]
     assert cfg["params"]["stop_loss"]["enabled"] is True
-    assert cfg["params"]["stop_loss"]["trigger_price"] == pytest.approx(0.40)
+    assert cfg["params"]["stop_loss"]["trigger_drop_pct"] == pytest.approx(0.35)
+    assert "trigger_price" not in cfg["params"]["stop_loss"]
     assert cfg["params"]["stop_loss"]["start_remaining_sec"] == pytest.approx(60)
     assert cfg["params"]["stop_loss"]["end_remaining_sec"] == pytest.approx(45)
 
@@ -156,6 +157,7 @@ def test_advanced_runtime_input_schema_includes_engineering_fields():
     assert "low_price_entry_ask_level" in names
     assert "stop_loss_enabled" in names
     assert "stop_loss_trigger_price" in names
+    assert "stop_loss_trigger_drop_pct" in names
 
 
 def test_validate_runtime_inputs_rejects_bad_ranges_and_relationships():

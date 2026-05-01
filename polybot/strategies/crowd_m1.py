@@ -4,24 +4,17 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass
 from typing import Optional
 
 from polybot.core import config
 from polybot.core.state import MonitorState
 from polybot.market.binance import BinancePriceFeed
+from polybot.market.coinbase import CoinbasePriceFeed
 from polybot.market.polymarket_rtds import PolymarketRTDSPriceFeed
 from polybot.market.series import MarketSeries
 from .base import Strategy
 
 log = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True)
-class _ReverseFilterResult:
-    history_ready: bool
-    move_pct: Optional[float]
-    triggered: bool
 
 
 class CrowdM1Strategy(Strategy):
@@ -46,9 +39,7 @@ class CrowdM1Strategy(Strategy):
         min_ask_gap: float = 0.16,
         max_entry_price: float = 0.75,
         btc_direction_confirm: bool = True,
-        btc_reverse_filter_enabled: bool = False,
-        btc_reverse_lookback_sec: float = 20.0,
-        btc_reverse_min_move_pct: float = 0.02,
+        btc_direction_deadband_pct: float = 0.015,
         btc_price_feed_source: str = "binance",
         open_price_max_wait_sec: float = 30.0,
         max_book_age_sec: Optional[float] = config.FAK_RETRY_MAX_BEST_ASK_AGE_SEC,
@@ -60,9 +51,7 @@ class CrowdM1Strategy(Strategy):
         self._min_ask_gap = min_ask_gap
         self._max_entry_price = max_entry_price
         self._btc_direction_confirm = btc_direction_confirm
-        self._btc_reverse_filter_enabled = btc_reverse_filter_enabled
-        self._btc_reverse_lookback_sec = btc_reverse_lookback_sec
-        self._btc_reverse_min_move_pct = btc_reverse_min_move_pct
+        self._btc_direction_deadband_pct = btc_direction_deadband_pct
         self._btc_price_feed_source = btc_price_feed_source
         self._open_price_max_wait_sec = open_price_max_wait_sec
         self._max_book_age_sec = max_book_age_sec
@@ -79,7 +68,6 @@ class CrowdM1Strategy(Strategy):
         self._up_best_ask_age_sec: Optional[float] = None
         self._down_best_ask_age_sec: Optional[float] = None
         self._logged_skip_reasons: set[str] = set()
-        self._logged_btc_reverse_filter_checks: set[tuple[bool, bool]] = set()
 
     @property
     def entry_start_remaining_sec(self) -> float:
@@ -99,16 +87,14 @@ class CrowdM1Strategy(Strategy):
         log.debug(
             "CrowdM1Strategy started | entry_elapsed=%.0fs timeout=%.0fs | "
             "min_ask_gap=%.3f min_leading_ask=%.3f | max_entry=%.2f | "
-            "btc_confirm=%s btc_reverse_filter=%s lookback=%.0fs min_reverse=%.3f%% btc_feed=%s",
+            "btc_confirm=%s btc_deadband=%.3f%% btc_feed=%s",
             self._entry_elapsed_sec,
             self._entry_timeout_sec,
             self._min_ask_gap,
             self._min_leading_ask,
             self._max_entry_price,
             self._btc_direction_confirm,
-            self._btc_reverse_filter_enabled,
-            self._btc_reverse_lookback_sec,
-            self._btc_reverse_min_move_pct,
+            self._btc_direction_deadband_pct,
             self._btc_price_feed_source,
         )
 
@@ -127,7 +113,6 @@ class CrowdM1Strategy(Strategy):
         self._up_best_ask_age_sec = None
         self._down_best_ask_age_sec = None
         self._logged_skip_reasons = set()
-        self._logged_btc_reverse_filter_checks = set()
 
     async def preload_open_btc(self, epoch: float) -> None:
         if not self._btc_direction_confirm:
@@ -264,8 +249,10 @@ class CrowdM1Strategy(Strategy):
                     current_btc=current_btc,
                 )
                 return False
-            btc_up = current_btc > open_btc
-            if (direction == "up") != btc_up:
+            btc_move_pct = (float(current_btc) / float(open_btc) - 1.0) * 100.0
+            has_clear_btc_direction = abs(btc_move_pct) >= self._btc_direction_deadband_pct
+            btc_up = btc_move_pct > 0
+            if has_clear_btc_direction and (direction == "up") != btc_up:
                 self._log_decision_skip(
                     reason="btc_direction_mismatch",
                     elapsed=elapsed,
@@ -280,37 +267,6 @@ class CrowdM1Strategy(Strategy):
                     current_btc=current_btc,
                 )
                 return False
-
-        reverse_filter = self._recent_btc_reverse_filter(now, direction)
-        if reverse_filter is not None and not reverse_filter.history_ready:
-            self._log_decision_skip(
-                reason="btc_reverse_history_not_ready",
-                elapsed=elapsed,
-                direction=direction,
-                up_mid=up_mid,
-                down_mid=down_mid,
-                up_best_ask=up_best_ask,
-                down_best_ask=down_best_ask,
-                ask_gap=ask_gap,
-                leading_ask=leading_ask,
-                current_btc=current_btc,
-            )
-            return False
-        if reverse_filter is not None and reverse_filter.triggered:
-            self._log_decision_skip(
-                reason="btc_recent_reverse_move",
-                elapsed=elapsed,
-                direction=direction,
-                up_mid=up_mid,
-                down_mid=down_mid,
-                up_best_ask=up_best_ask,
-                down_best_ask=down_best_ask,
-                ask_gap=ask_gap,
-                leading_ask=leading_ask,
-                current_btc=current_btc,
-                btc_reverse_move_pct=reverse_filter.move_pct,
-            )
-            return False
 
         remaining = self._series.slug_step - elapsed
         state.target_side = direction
@@ -340,7 +296,6 @@ class CrowdM1Strategy(Strategy):
         current_btc: Optional[float] = None,
         up_best_ask_age_sec: Optional[float] = None,
         down_best_ask_age_sec: Optional[float] = None,
-        btc_reverse_move_pct: Optional[float] = None,
     ) -> None:
         if reason in self._logged_skip_reasons:
             return
@@ -351,7 +306,7 @@ class CrowdM1Strategy(Strategy):
             "M1_DECISION_SKIP: reason=%s elapsed=%.1fs remaining=%.1fs dir=%s "
             "up_best_ask=%s down_best_ask=%s leading_ask=%s ask_gap=%s min_ask_gap=%.3f min_leading_ask=%.3f "
             "up_mid=%s down_mid=%s btc_open=%s btc_now=%s max_entry=%.3f "
-            "up_best_ask_age_ms=%s down_best_ask_age_ms=%s btc_reverse_move_pct=%s",
+            "up_best_ask_age_ms=%s down_best_ask_age_ms=%s",
             reason,
             elapsed,
             remaining,
@@ -369,7 +324,6 @@ class CrowdM1Strategy(Strategy):
             self._max_entry_price,
             self._fmt_age_ms(up_best_ask_age_sec),
             self._fmt_age_ms(down_best_ask_age_sec),
-            self._fmt_price(btc_reverse_move_pct, digits=4),
         )
 
     @staticmethod
@@ -407,66 +361,10 @@ class CrowdM1Strategy(Strategy):
             return PolymarketRTDSPriceFeed(symbol="btcusdt")
         if normalized == "binance":
             return BinancePriceFeed(symbol="btcusdt")
-        raise ValueError("Unsupported BTC price feed source: " + source)
-
-    def _recent_btc_reverse_filter(self, now: float, direction: str) -> Optional[_ReverseFilterResult]:
-        if not self._btc_reverse_filter_enabled:
-            return None
-        if self._btc_reverse_lookback_sec <= 0 or self._btc_reverse_min_move_pct <= 0:
-            return None
-
-        past_btc = self._feed.price_at_or_before(now - self._btc_reverse_lookback_sec)
-        current_btc = self._feed.price_at_or_before(now)
-        history_ready = past_btc is not None and current_btc is not None and past_btc > 0
-        move_pct: Optional[float] = None
-        if history_ready:
-            move_pct = (float(current_btc) / float(past_btc) - 1.0) * 100.0
-        self._log_btc_reverse_filter_check(
-            direction=direction,
-            past_btc=past_btc,
-            current_btc=current_btc,
-            move_pct=move_pct,
-            history_ready=history_ready,
-        )
-        if not history_ready:
-            return _ReverseFilterResult(history_ready=False, move_pct=None, triggered=False)
-
-        triggered = False
-        if direction == "up" and move_pct <= -self._btc_reverse_min_move_pct:
-            triggered = True
-        elif direction == "down" and move_pct >= self._btc_reverse_min_move_pct:
-            triggered = True
-        return _ReverseFilterResult(history_ready=True, move_pct=move_pct, triggered=triggered)
-
-    def _log_btc_reverse_filter_check(
-        self,
-        *,
-        direction: str,
-        past_btc: Optional[float],
-        current_btc: Optional[float],
-        move_pct: Optional[float],
-        history_ready: bool,
-    ) -> None:
-        triggered = False
-        if move_pct is not None:
-            if direction == "up":
-                triggered = move_pct <= -self._btc_reverse_min_move_pct
-            elif direction == "down":
-                triggered = move_pct >= self._btc_reverse_min_move_pct
-        log_key = (history_ready, triggered)
-        if log_key in self._logged_btc_reverse_filter_checks:
-            return
-        self._logged_btc_reverse_filter_checks.add(log_key)
-        log.info(
-            "BTC_REVERSE_FILTER_CHECK: source=%s dir=%s lookback_sec=%.0f min_reverse=%.3f%% "
-            "history_ready=%s lookback_btc=%s current_btc=%s move_pct=%s triggered=%s",
-            self._btc_price_feed_source,
-            direction.upper(),
-            self._btc_reverse_lookback_sec,
-            self._btc_reverse_min_move_pct,
-            history_ready,
-            self._fmt_price(past_btc, digits=1),
-            self._fmt_price(current_btc, digits=1),
-            self._fmt_price(move_pct, digits=4),
-            triggered,
+        if normalized in {"coinbase", "coinbase_ws"}:
+            return CoinbasePriceFeed(product_id="BTC-USD")
+        raise ValueError(
+            "Unsupported BTC price feed source: "
+            + source
+            + ". Available: binance, coinbase, polymarket_rtds"
         )

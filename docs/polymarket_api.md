@@ -136,8 +136,8 @@ Tick size determines minimum price increment. Varies by price range:
 
 1. **Signal**: BTC window-open move decides direction; Polymarket UP stream is
    only a signal reference.
-2. **Entry permission**: Use target-leg WS order-book depth, skip ask level 1
-   for fillability, and require enough cap-limited notional.
+2. **Entry permission**: Use target-leg WS order-book depth from ask level 1
+   and require enough cap-limited notional.
 3. **Buy**: FAK market order with a book-depth price hint clamped to the hard
    cap.
 4. **Retry**: Refresh WS book depth before retry; abort if stale or insufficient.

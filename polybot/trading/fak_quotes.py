@@ -14,7 +14,8 @@ from polybot.core.client import get_tick_size
 from polybot.market.stream import PriceStream
 
 
-DEPTH_ENTRY_SKIP_LEVELS = 1
+DEPTH_ENTRY_SKIP_LEVELS = 0
+DEPTH_STOP_LOSS_SKIP_LEVELS = 1
 DEPTH_PREVIEW_LEVELS = 6
 
 
@@ -130,9 +131,7 @@ def cap_limited_depth_quote(
 ) -> CapDepthQuote:
     """Return the first ask level where cap-limited depth can cover amount.
 
-    Level 1 is deliberately excluded from fillability calculations because it
-    often disappears before the FAK reaches Polymarket. ``max_entry_level`` is
-    the deepest ask level scanned for the first FAK hint.
+    ``max_entry_level`` is the deepest ask level scanned for the first FAK hint.
     """
     ask_age = ws.get_latest_best_ask_age(token_id, level=1)
     try:
@@ -236,7 +235,7 @@ def stop_loss_bid_quote(
     shares: float,
     *,
     max_age_sec: Optional[float],
-    skip_levels: int = DEPTH_ENTRY_SKIP_LEVELS,
+    skip_levels: int = DEPTH_STOP_LOSS_SKIP_LEVELS,
     min_sell_level: int = 9,
     min_sell_price: float = 0.20,
     buffer_ticks: Optional[float] = None,
