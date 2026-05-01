@@ -125,14 +125,16 @@ Experimental config: `crowd_m1_dry.yaml`.
 
 Runtime behavior:
 
-- At `entry_elapsed_sec=170`, compare current UP and DOWN best asks; use
-  `entry_timeout_sec=5` to avoid late attach entries.
+- Between `entry_start_elapsed_sec=120` and `entry_end_elapsed_sec=180`, watch
+  BTC and Polymarket event-driven snapshots. Entry can trigger as soon as BTC
+  shows a strong open-to-current move.
 - Buy the higher-best-ask side only if its leading ask is at least
   `min_leading_ask=0.65`; `min_ask_gap=0.0` disables a gap requirement.
 - Require BTC direction confirmation: the selected Polymarket side must match
-  BTC's move from the 5-minute window open to entry. Open-to-entry BTC moves
-  smaller than `btc_direction_deadband_pct=0.015%` are treated as no clear BTC
-  direction and do not block the Polymarket-leading side.
+  BTC's move from the 5-minute window open to entry. Dynamic entry requires
+  `strong_move_pct=0.06%`, plus same-direction BTC persistence
+  `persistence_sec=10` seconds ago and current move at least
+  `min_move_ratio=0.7` of that past move.
 - The BTC price feed uses Coinbase ticker WS by default for US VPS latency
   tests. Binance WS remains available via `btc_price_feed_source: binance`.
   Polymarket RTDS remains available as a fallback option, but is not the active
@@ -150,8 +152,8 @@ Runtime behavior:
 - Reject entries whose selected ask is above `max_entry_price=0.76` or more
   than `0.04` above target-leg best ask.
 - Entry is event-driven: UP or DOWN Polymarket WS updates refresh the cached
-  two-leg snapshot and can trigger entry immediately inside the 5s entry
-  window; the 1s snapshot loop remains only as a fallback.
+  two-leg snapshot and can trigger entry immediately inside the 120s-180s
+  dynamic entry band; the 1s snapshot loop remains only as a fallback.
 - Entry requires both UP and DOWN best-ask caches to be fresh; stale cross-leg
   books are skipped before direction selection.
 - Entry logs include UP/DOWN best-ask cache age for book freshness validation.

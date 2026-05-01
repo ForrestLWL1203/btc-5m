@@ -66,13 +66,16 @@ def test_preset_config_loads_crowd_m1_yaml():
     cfg = preset_config("crowd_m1")
     assert cfg["market"]["asset"] == "btc"
     assert cfg["strategy"]["type"] == "crowd_m1"
-    assert cfg["strategy"]["entry_elapsed_sec"] == pytest.approx(170)
-    assert cfg["strategy"]["entry_timeout_sec"] == pytest.approx(5)
+    assert cfg["strategy"]["entry_start_elapsed_sec"] == pytest.approx(120)
+    assert cfg["strategy"]["entry_end_elapsed_sec"] == pytest.approx(180)
     assert cfg["strategy"]["min_ask_gap"] == pytest.approx(0.0)
     assert cfg["strategy"]["min_leading_ask"] == pytest.approx(0.65)
     assert cfg["strategy"]["max_entry_price"] == pytest.approx(0.76)
     assert cfg["strategy"]["btc_direction_confirm"] is True
     assert cfg["strategy"]["btc_direction_deadband_pct"] == pytest.approx(0.015)
+    assert cfg["strategy"]["strong_move_pct"] == pytest.approx(0.06)
+    assert cfg["strategy"]["persistence_sec"] == pytest.approx(10)
+    assert cfg["strategy"]["min_move_ratio"] == pytest.approx(0.7)
     assert cfg["strategy"]["btc_price_feed_source"] == "coinbase"
     assert "btc_reverse_filter" not in cfg["strategy"]
     assert cfg["params"]["entry_ask_level"] == 10

@@ -16,6 +16,7 @@ def _strategy(**kwargs) -> CrowdM1Strategy:
     strat = CrowdM1Strategy(series=series, **kwargs)
     strat._started = True
     strat._feed = MagicMock()
+    strat._feed.price_at_or_before.return_value = 100.04
     return strat
 
 
@@ -55,17 +56,85 @@ def test_should_buy_rejects_if_btc_direction_disagrees():
 
 
 def test_should_buy_allows_btc_direction_noise_inside_deadband():
-    strat = _strategy(entry_elapsed_sec=120, min_ask_gap=0.16, btc_direction_deadband_pct=0.015)
+    strat = _strategy(
+        entry_elapsed_sec=120,
+        min_ask_gap=0.16,
+        btc_direction_deadband_pct=0.015,
+        strong_move_pct=0.015,
+        min_move_ratio=0.0,
+    )
     now = time.time()
     strat._window_start_epoch = now - 121
     strat._window_open_btc = 100.0
-    strat._feed.latest_price = 99.99
+    strat._feed.latest_price = 100.02
+    strat._feed.price_at_or_before.return_value = 100.01
     strat.set_market_snapshot(up_mid=0.59, down_mid=0.41, up_best_ask=0.61, down_best_ask=0.43)
 
     state = MonitorState()
 
     assert strat.should_buy(0.59, state) is True
     assert state.target_side == "up"
+
+
+def test_should_buy_scans_dynamic_entry_band_until_strong_btc_move():
+    strat = _strategy(
+        entry_start_elapsed_sec=120,
+        entry_end_elapsed_sec=180,
+        min_ask_gap=0.0,
+        min_leading_ask=0.62,
+        strong_move_pct=0.06,
+    )
+    now = time.time()
+    strat._window_start_epoch = now - 130
+    strat._window_open_btc = 100.0
+    strat._feed.latest_price = 100.05
+    strat._feed.price_at_or_before.return_value = 100.04
+    strat.set_market_snapshot(up_mid=0.66, down_mid=0.34, up_best_ask=0.67, down_best_ask=0.35)
+
+    assert strat.should_buy(0.66, MonitorState()) is False
+
+    strat._feed.latest_price = 100.07
+    state = MonitorState()
+
+    assert strat.should_buy(0.66, state) is True
+    assert state.target_side == "up"
+
+
+def test_should_buy_rejects_when_btc_persistence_direction_flips():
+    strat = _strategy(
+        entry_start_elapsed_sec=120,
+        entry_end_elapsed_sec=180,
+        min_ask_gap=0.0,
+        min_leading_ask=0.62,
+        strong_move_pct=0.06,
+    )
+    now = time.time()
+    strat._window_start_epoch = now - 130
+    strat._window_open_btc = 100.0
+    strat._feed.latest_price = 100.07
+    strat._feed.price_at_or_before.return_value = 99.99
+    strat.set_market_snapshot(up_mid=0.66, down_mid=0.34, up_best_ask=0.67, down_best_ask=0.35)
+
+    assert strat.should_buy(0.66, MonitorState()) is False
+
+
+def test_should_buy_rejects_when_btc_move_has_lost_persistence():
+    strat = _strategy(
+        entry_start_elapsed_sec=120,
+        entry_end_elapsed_sec=180,
+        min_ask_gap=0.0,
+        min_leading_ask=0.62,
+        strong_move_pct=0.06,
+        min_move_ratio=0.7,
+    )
+    now = time.time()
+    strat._window_start_epoch = now - 130
+    strat._window_open_btc = 100.0
+    strat._feed.latest_price = 100.07
+    strat._feed.price_at_or_before.return_value = 100.12
+    strat.set_market_snapshot(up_mid=0.66, down_mid=0.34, up_best_ask=0.67, down_best_ask=0.35)
+
+    assert strat.should_buy(0.66, MonitorState()) is False
 
 
 def test_should_buy_rejects_gap_below_min_without_consuming_window():

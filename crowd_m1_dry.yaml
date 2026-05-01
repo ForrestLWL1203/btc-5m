@@ -4,8 +4,8 @@ market:
 
 strategy:
   type: crowd_m1
-  entry_elapsed_sec: 170
-  entry_timeout_sec: 5
+  entry_start_elapsed_sec: 120
+  entry_end_elapsed_sec: 180
   min_ask_gap: 0.0
   min_leading_ask: 0.65
   max_entry_price: 0.76
@@ -13,6 +13,11 @@ strategy:
   # Treat open-to-entry BTC moves smaller than this as no clear direction.
   # Unit is percent: 0.015 means 0.015%, not 1.5%.
   btc_direction_deadband_pct: 0.015
+  # Dynamic entry only triggers after a strong open-to-current BTC move.
+  # Unit is percent: 0.06 means 0.06%, not 6%.
+  strong_move_pct: 0.06
+  persistence_sec: 10
+  min_move_ratio: 0.7
   btc_price_feed_source: coinbase
 
 params:

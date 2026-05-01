@@ -76,11 +76,20 @@ def build_strategy(cfg: dict, series: Optional[MarketSeries] = None):
             series=series,
             entry_elapsed_sec=strat_cfg.get("entry_elapsed_sec", 120.0),
             entry_timeout_sec=strat_cfg.get("entry_timeout_sec", 60.0),
+            entry_start_elapsed_sec=strat_cfg.get("entry_start_elapsed_sec"),
+            entry_end_elapsed_sec=strat_cfg.get("entry_end_elapsed_sec"),
             min_leading_ask=strat_cfg.get("min_leading_ask", 0.0),
             min_ask_gap=strat_cfg.get("min_ask_gap", 0.16),
             max_entry_price=strat_cfg.get("max_entry_price", 0.75),
             btc_direction_confirm=bool(strat_cfg.get("btc_direction_confirm", True)),
             btc_direction_deadband_pct=float(strat_cfg.get("btc_direction_deadband_pct", 0.015)),
+            strong_move_pct=(
+                float(strat_cfg["strong_move_pct"])
+                if strat_cfg.get("strong_move_pct") is not None
+                else None
+            ),
+            persistence_sec=float(strat_cfg.get("persistence_sec", 10.0)),
+            min_move_ratio=float(strat_cfg.get("min_move_ratio", 0.7)),
             btc_price_feed_source=strat_cfg.get("btc_price_feed_source", "binance"),
             open_price_max_wait_sec=strat_cfg.get("open_price_max_wait_sec", 30.0),
         )

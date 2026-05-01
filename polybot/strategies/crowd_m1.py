@@ -20,11 +20,9 @@ log = logging.getLogger(__name__)
 class CrowdM1Strategy(Strategy):
     """Buy the higher-best-ask Polymarket leg during the mid-window band.
 
-    The strategy scans between ``entry_elapsed_sec`` and
-    ``entry_elapsed_sec + entry_timeout_sec``. It buys the side with the higher
-    best ask only when the higher ask leads the lower ask by at least
-    ``min_ask_gap``. Optional BTC confirmation is retained for compatibility,
-    but the active M1 config keeps it disabled.
+    The strategy scans a configurable elapsed-time band. Inside that band, BTC
+    must show a strong same-direction move before the higher-best-ask
+    Polymarket side is considered.
     """
 
     dynamic_side = True
@@ -35,23 +33,44 @@ class CrowdM1Strategy(Strategy):
         series: MarketSeries,
         entry_elapsed_sec: float = 120.0,
         entry_timeout_sec: float = 60.0,
+        entry_start_elapsed_sec: Optional[float] = None,
+        entry_end_elapsed_sec: Optional[float] = None,
         min_leading_ask: float = 0.0,
         min_ask_gap: float = 0.16,
         max_entry_price: float = 0.75,
         btc_direction_confirm: bool = True,
         btc_direction_deadband_pct: float = 0.015,
+        strong_move_pct: Optional[float] = None,
+        persistence_sec: float = 10.0,
+        min_move_ratio: float = 0.7,
         btc_price_feed_source: str = "binance",
         open_price_max_wait_sec: float = 30.0,
         max_book_age_sec: Optional[float] = config.FAK_RETRY_MAX_BEST_ASK_AGE_SEC,
     ):
         self._series = series
-        self._entry_elapsed_sec = entry_elapsed_sec
-        self._entry_timeout_sec = entry_timeout_sec
+        self._entry_elapsed_sec = (
+            float(entry_start_elapsed_sec)
+            if entry_start_elapsed_sec is not None
+            else float(entry_elapsed_sec)
+        )
+        self._entry_end_elapsed_sec = (
+            float(entry_end_elapsed_sec)
+            if entry_end_elapsed_sec is not None
+            else float(entry_elapsed_sec) + float(entry_timeout_sec)
+        )
+        self._entry_timeout_sec = max(0.0, self._entry_end_elapsed_sec - self._entry_elapsed_sec)
         self._min_leading_ask = min_leading_ask
         self._min_ask_gap = min_ask_gap
         self._max_entry_price = max_entry_price
         self._btc_direction_confirm = btc_direction_confirm
         self._btc_direction_deadband_pct = btc_direction_deadband_pct
+        self._strong_move_pct = (
+            float(strong_move_pct)
+            if strong_move_pct is not None
+            else float(btc_direction_deadband_pct)
+        )
+        self._persistence_sec = float(persistence_sec)
+        self._min_move_ratio = float(min_move_ratio)
         self._btc_price_feed_source = btc_price_feed_source
         self._open_price_max_wait_sec = open_price_max_wait_sec
         self._max_book_age_sec = max_book_age_sec
@@ -75,7 +94,7 @@ class CrowdM1Strategy(Strategy):
 
     @property
     def entry_end_remaining_sec(self) -> float:
-        return max(0.0, self._series.slug_step - self._entry_elapsed_sec - self._entry_timeout_sec)
+        return max(0.0, self._series.slug_step - self._entry_end_elapsed_sec)
 
     @property
     def max_entry_price(self) -> float:
@@ -85,16 +104,20 @@ class CrowdM1Strategy(Strategy):
         await self._feed.start()
         self._started = True
         log.debug(
-            "CrowdM1Strategy started | entry_elapsed=%.0fs timeout=%.0fs | "
+            "CrowdM1Strategy started | entry_band=%.0fs-%.0fs | "
             "min_ask_gap=%.3f min_leading_ask=%.3f | max_entry=%.2f | "
-            "btc_confirm=%s btc_deadband=%.3f%% btc_feed=%s",
+            "btc_confirm=%s btc_deadband=%.3f%% strong_move=%.3f%% "
+            "persistence=%.0fs min_move_ratio=%.2f btc_feed=%s",
             self._entry_elapsed_sec,
-            self._entry_timeout_sec,
+            self._entry_end_elapsed_sec,
             self._min_ask_gap,
             self._min_leading_ask,
             self._max_entry_price,
             self._btc_direction_confirm,
             self._btc_direction_deadband_pct,
+            self._strong_move_pct,
+            self._persistence_sec,
+            self._min_move_ratio,
             self._btc_price_feed_source,
         )
 
@@ -160,7 +183,7 @@ class CrowdM1Strategy(Strategy):
         elapsed = now - self._window_start_epoch
         if elapsed < self._entry_elapsed_sec:
             return False
-        if elapsed > self._entry_elapsed_sec + self._entry_timeout_sec:
+        if elapsed > self._entry_end_elapsed_sec:
             self._evaluated = True
             self._log_decision_skip(reason="entry_timeout", elapsed=elapsed)
             return False
@@ -250,11 +273,73 @@ class CrowdM1Strategy(Strategy):
                 )
                 return False
             btc_move_pct = (float(current_btc) / float(open_btc) - 1.0) * 100.0
-            has_clear_btc_direction = abs(btc_move_pct) >= self._btc_direction_deadband_pct
+            past_btc = self._feed.price_at_or_before(now - self._persistence_sec)
+            if past_btc is None:
+                self._log_decision_skip(
+                    reason="missing_btc_persistence_reference",
+                    elapsed=elapsed,
+                    direction=direction,
+                    up_mid=up_mid,
+                    down_mid=down_mid,
+                    up_best_ask=up_best_ask,
+                    down_best_ask=down_best_ask,
+                    ask_gap=ask_gap,
+                    leading_ask=leading_ask,
+                    open_btc=open_btc,
+                    current_btc=current_btc,
+                )
+                return False
+            past_move_pct = (float(past_btc) / float(open_btc) - 1.0) * 100.0
+            has_clear_btc_direction = abs(btc_move_pct) >= self._strong_move_pct
+            if not has_clear_btc_direction:
+                self._log_decision_skip(
+                    reason="btc_move_below_strong_threshold",
+                    elapsed=elapsed,
+                    direction=direction,
+                    up_mid=up_mid,
+                    down_mid=down_mid,
+                    up_best_ask=up_best_ask,
+                    down_best_ask=down_best_ask,
+                    ask_gap=ask_gap,
+                    leading_ask=leading_ask,
+                    open_btc=open_btc,
+                    current_btc=current_btc,
+                )
+                return False
             btc_up = btc_move_pct > 0
-            if has_clear_btc_direction and (direction == "up") != btc_up:
+            if (direction == "up") != btc_up:
                 self._log_decision_skip(
                     reason="btc_direction_mismatch",
+                    elapsed=elapsed,
+                    direction=direction,
+                    up_mid=up_mid,
+                    down_mid=down_mid,
+                    up_best_ask=up_best_ask,
+                    down_best_ask=down_best_ask,
+                    ask_gap=ask_gap,
+                    leading_ask=leading_ask,
+                    open_btc=open_btc,
+                    current_btc=current_btc,
+                )
+                return False
+            if (past_move_pct > 0) != btc_up:
+                self._log_decision_skip(
+                    reason="btc_persistence_direction_mismatch",
+                    elapsed=elapsed,
+                    direction=direction,
+                    up_mid=up_mid,
+                    down_mid=down_mid,
+                    up_best_ask=up_best_ask,
+                    down_best_ask=down_best_ask,
+                    ask_gap=ask_gap,
+                    leading_ask=leading_ask,
+                    open_btc=open_btc,
+                    current_btc=current_btc,
+                )
+                return False
+            if abs(btc_move_pct) < abs(past_move_pct) * self._min_move_ratio:
+                self._log_decision_skip(
+                    reason="btc_move_lost_persistence",
                     elapsed=elapsed,
                     direction=direction,
                     up_mid=up_mid,
